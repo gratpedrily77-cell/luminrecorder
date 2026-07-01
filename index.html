@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>学习追踪器</title>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap"
+    rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+  <div class="header">
+    <div class="header-row">
+      <div>
+        <h1>📊 <span id="headerTitle">学习追踪器</span></h1>
+        <div class="header-meta" id="headerMeta">数据记录 · 三维时间分析 · 效率可视化</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="period-badge" id="headerPeriod">—</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="stats-grid" id="statsGrid"></div>
+
+  <div class="tabs-wrapper">
+    <div class="tab active" onclick="showTab('entry')">✏️ 录入</div>
+    <div class="tab" onclick="showTab('calendar')">📆 日历</div>
+    <div class="tab" onclick="showTab('day')">📊 日览</div>
+    <div class="tab" onclick="showTab('week')">📈 周览</div>
+    <div class="tab" onclick="showTab('month')">🗓️ 月览</div>
+    <div class="tab" onclick="showTab('stacked')">📊 堆积图</div>
+    <div class="tab" onclick="showTab('sessAnalysis')">⏱️ 时段分析</div>
+    <div class="tab" onclick="showTab('taskAnalysis')">📝 任务分析</div>
+    <div class="tab" onclick="showTab('sleep')">🌙 作息</div>
+    <div class="tab" onclick="showTab('export')">💾 导出</div>
+    <div class="tab" onclick="showTab('templates')">📋 模板库</div>
+    <div class="tab" onclick="showTab('ai')">🤖 AI录入</div>
+    <div class="tab" onclick="showTab('scan')">🔍 AI扫描</div>
+    <div class="tab" onclick="showTab('settings')">⚙️ 设置</div>
+  </div>
+
+  <div class="tab-content active" id="tab-entry"></div>
+  <div class="tab-content" id="tab-calendar"></div>
+  <div class="tab-content" id="tab-day"></div>
+  <div class="tab-content" id="tab-week"></div>
+  <div class="tab-content" id="tab-month"></div>
+  <div class="tab-content" id="tab-sleep"></div>
+  <div class="tab-content" id="tab-stacked"></div>
+  <div class="tab-content" id="tab-sessAnalysis"></div>
+  <div class="tab-content" id="tab-taskAnalysis"></div>
+  <div class="tab-content" id="tab-export"></div>
+  <div class="tab-content" id="tab-templates"></div>
+  <div class="tab-content" id="tab-ai"></div>
+  <div class="tab-content" id="tab-scan"></div>
+  <div class="tab-content" id="tab-settings"></div>
+
+  <script src="app.js"></script>
+  <script src="ai_parser_core.js"></script>
+  <script src="ai_module.js"></script>
+</body>
+
+</html>
