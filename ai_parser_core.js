@@ -5,7 +5,7 @@
 })(typeof window !== 'undefined' ? window : globalThis, function () {
   'use strict';
 
-  const VERSION = 2;
+  const VERSION = 4;
   const SESSION_TYPES = new Set(['normal', 'special', 'special-study']);
   const LINE_KINDS = new Set(['field', 'session', 'task', 'note', 'unknown']);
   const ORIGINS = new Set(['source-explicit', 'program-derived', 'ai-inferred', 'template-default', 'manual']);
@@ -220,7 +220,21 @@
         }
       }
 
-      if (/休息日|特殊日/.test(trimmed)) result.hints.specialDay = true;
+      const specialDayNegative = /(?:不是|并非|非)\s*特殊(?:日|天)/.test(trimmed);
+      const specialDayPositive = /特殊(?:日|天)/.test(trimmed);
+      if (specialDayNegative) {
+        result.facts.specialDay = fact(false, [line], 'source-explicit', trimmed);
+      } else if (specialDayPositive) {
+        result.facts.specialDay = fact(true, [line], 'source-explicit', trimmed);
+      }
+
+      const excludeRatingPositive = /不参与评分|不计入评分|不评分|排除评分/.test(trimmed);
+      const excludeRatingNegative = /(?:参与|计入)\s*评分/.test(trimmed);
+      if (excludeRatingPositive) {
+        result.facts.excludeFromRating = fact(true, [line], 'source-explicit', trimmed);
+      } else if (excludeRatingNegative) {
+        result.facts.excludeFromRating = fact(false, [line], 'source-explicit', trimmed);
+      }
       lineFacts.push(result);
     });
 
@@ -282,10 +296,17 @@
     const uniqueByType = !selected && task.activityType
       ? templates.filter(template => template.activityType === task.activityType)
       : [];
-    const template = selected || (uniqueByType.length === 1 ? uniqueByType[0] : null);
+    const typeFallback = uniqueByType.length === 1 && !String(uniqueByType[0].aiPrompt || '').trim()
+      ? uniqueByType[0]
+      : null;
+    const template = selected || typeFallback;
     if (!template) return;
     task.templateId = template.id;
     if (!task.activityType && template.activityType) task.activityType = template.activityType;
+    if (template.name && task.fieldMeta?.name?.origin !== 'manual') {
+      task.name = template.name;
+      task.fieldMeta.name = fact(template.name, [line], 'template-default', template.name);
+    }
     if (template.defaultMinutes && task.minutes == null) {
       task.minutes = Number(template.defaultMinutes);
       task.fieldMeta.minutes = fact(task.minutes, [line], 'template-default', template.name || template.activityType || '');
@@ -307,14 +328,72 @@
     if (task.aiMeta?.evidenceLevel !== 'conflict') task.aiMeta = itemMeta('template-default', '唯一任务模板');
   }
 
+  function sessionTemplateMatches(text, template) {
+    const source = String(text || '').toLowerCase();
+    if (!source) return false;
+    const name = String(template?.name || '').trim().toLowerCase();
+    if (name && source.includes(name)) return true;
+    return (template?.keywords || []).some(keyword => {
+      const normalized = String(keyword || '').trim().toLowerCase();
+      return normalized && source.includes(normalized);
+    });
+  }
+
+  function resolveSessionTemplate(session, templates, lineFact, aiSession, issues, line, sessionIndex) {
+    if (session.type !== 'special' || !templates.length) return null;
+    const literalMatches = templates.filter(template => sessionTemplateMatches(lineFact.trimmed, template));
+    const aiSelected = aiSession.templateId
+      ? templates.find(template => template.id === aiSession.templateId)
+      : null;
+    const deterministicMatches = literalMatches.filter(template => !String(template.aiPrompt || '').trim());
+    let selected = null;
+
+    if (aiSelected) {
+      selected = aiSelected;
+    } else if (deterministicMatches.length === 1) {
+      selected = deterministicMatches[0];
+    } else if (deterministicMatches.length > 1) {
+      if (!selected) {
+        issues.push(issue(
+          'SESSION_TEMPLATE_CONFLICT',
+          'warning',
+          `第 ${line} 行同时命中多个特殊时段模板：${deterministicMatches.map(template => template.name || template.id).join('、')}。`,
+          [line],
+          { targetPath: `parsed.sessions.${sessionIndex}.name` }
+        ));
+        session.aiMeta = itemMeta('conflict', '多个特殊时段模板同时命中');
+        return null;
+      }
+    } else if (aiSession.templateId) {
+      issues.push(issue(
+        'SESSION_TEMPLATE_NOT_FOUND',
+        'warning',
+        `第 ${line} 行引用的特殊时段模板不存在：${aiSession.templateId}。`,
+        [line],
+        { original: aiSession.templateId, targetPath: `parsed.sessions.${sessionIndex}.name` }
+      ));
+    }
+
+    if (!selected) return null;
+    session.sessionTemplateId = selected.id;
+    if (selected.name) session.name = selected.name;
+    if (selected.note && !session.note) session.note = selected.note;
+    session.aiMeta = itemMeta('template-default', `特殊时段模板：${selected.name || selected.id}`);
+    return selected;
+  }
+
   function assembleDay(sourceFacts, aiLineResults, options = {}) {
     const templates = options.taskTemplates || [];
+    const sessionTemplates = options.sessionTemplates || [];
     const byLine = new Map((aiLineResults || []).map(result => [Number(result.line), result]));
     const draft = {
       parserVersion: VERSION,
       wakeTime: null,
       sleepTime: null,
+      dayType: '',
+      dayTypeTemplateId: '',
       specialDay: false,
+      specialDayReason: '',
       excludeFromRating: false,
       dayNote: '',
       sessions: [],
@@ -336,6 +415,15 @@
         if (!draft.consumedLines.includes(line)) draft.consumedLines.push(line);
       };
       (ai.aiIssues || []).forEach(item => draft.aiIssues.push({ ...item, sourceLines: [line] }));
+      const hasExplicitDayFlags = Boolean(facts.specialDay || facts.excludeFromRating);
+      if (facts.specialDay) {
+        draft.specialDay = Boolean(facts.specialDay.value);
+        draft.fieldMeta.specialDay = facts.specialDay;
+      }
+      if (facts.excludeFromRating) {
+        draft.excludeFromRating = Boolean(facts.excludeFromRating.value);
+        draft.fieldMeta.excludeFromRating = facts.excludeFromRating;
+      }
 
       if (hints.dateHeading) {
         markConsumed();
@@ -353,14 +441,6 @@
         markConsumed();
         return;
       }
-      if (hints.specialDay) {
-        draft.specialDay = true;
-        draft.excludeFromRating = true;
-        draft.fieldMeta.specialDay = fact(true, [line], 'source-explicit', lineFact.trimmed);
-        markConsumed();
-        return;
-      }
-
       const structuralSession = Boolean(facts.startTime && facts.endTime);
       if (structuralSession || ai.kind === 'session') {
         const aiSession = ai.session || {};
@@ -396,6 +476,15 @@
           },
           aiMeta: itemMeta(hints.sessionType ? 'source-explicit' : 'ai-inferred', hints.sessionType ? '原文关键词和时间范围' : 'AI时段语义判断')
         };
+        resolveSessionTemplate(
+          session,
+          sessionTemplates,
+          lineFact,
+          aiSession,
+          draft.aiIssues,
+          line,
+          draft.sessions.length
+        );
 
         if (type === 'special') {
           session.nominalMinutes = 0;
@@ -435,9 +524,14 @@
 
       if (ai.kind === 'field') {
         if (ai.field === 'dayNote') draft.dayNote = [draft.dayNote, String(ai.value || '')].filter(Boolean).join('\n');
-        else if (['specialDay', 'excludeFromRating'].includes(ai.field)) draft[ai.field] = Boolean(ai.value);
+        else if (['specialDay', 'excludeFromRating'].includes(ai.field)) {
+          if (draft.fieldMeta[ai.field]?.origin !== 'source-explicit') {
+            draft[ai.field] = Boolean(ai.value);
+            draft.fieldMeta[ai.field] = fact(Boolean(ai.value), [line], 'ai-inferred', lineFact.trimmed);
+          }
+        }
         else if (['wakeTime', 'sleepTime'].includes(ai.field)) draft[ai.field] = ai.value || null;
-        draft.fieldMeta[ai.field] = fact(ai.value, [line], 'ai-inferred', lineFact.trimmed);
+        if (!draft.fieldMeta[ai.field]) draft.fieldMeta[ai.field] = fact(ai.value, [line], 'ai-inferred', lineFact.trimmed);
         markConsumed();
         return;
       }
@@ -461,6 +555,7 @@
           fieldMeta: {},
           aiMeta: itemMeta('ai-inferred', 'AI任务语义判断')
         };
+        task.fieldMeta.name = fact(task.name, [line], 'ai-inferred', aiTask.name || lineFact.trimmed);
         if (facts.taskMinutes) task.fieldMeta.minutes = facts.taskMinutes;
         else if (task.minutes != null) task.fieldMeta.minutes = fact(task.minutes, [line], 'ai-inferred');
         if (facts.quantity) task.fieldMeta.quantity = facts.quantity;
@@ -487,11 +582,87 @@
         return;
       }
 
+      if (hasExplicitDayFlags) {
+        markConsumed();
+        return;
+      }
+
       draft.unassignedLines.push({ line, text: lineFact.trimmed, reason: ai.reason || 'AI未能归属该行' });
       markConsumed();
     });
 
     draft.consumedLines.sort((a, b) => a - b);
+    return draft;
+  }
+
+  function applyDayTypeClassification(draft, sourceFacts, classification, templates) {
+    if (!draft) return draft;
+    draft.fieldMeta = draft.fieldMeta || {};
+    draft.aiIssues = (draft.aiIssues || []).filter(item =>
+      !['DAY_TYPE_TEMPLATE_NOT_FOUND', 'DAY_TYPE_FACT_CONFLICT'].includes(item.code)
+    );
+    const sourceLines = [...new Set((classification?.sourceLines || []).map(Number).filter(Number.isFinite))];
+    const templateId = String(classification?.templateId || '');
+    const selected = templateId
+      ? (templates || []).find(template => template.id === templateId)
+      : null;
+
+    const resetTemplateField = (field, fallback) => {
+      const origin = draft.fieldMeta[field]?.origin;
+      if (['template-default', 'ai-inferred'].includes(origin)) {
+        draft[field] = fallback;
+        delete draft.fieldMeta[field];
+      }
+    };
+
+    resetTemplateField('dayType', '');
+    resetTemplateField('specialDay', false);
+    resetTemplateField('excludeFromRating', false);
+    draft.dayTypeTemplateId = '';
+
+    if (!templateId) return draft;
+    if (!selected) {
+      draft.aiIssues.push(issue(
+        'DAY_TYPE_TEMPLATE_NOT_FOUND',
+        'error',
+        `AI 返回的日期类型模板不存在：${templateId}。`,
+        sourceLines,
+        { original: templateId, targetPath: 'parsed.dayType' }
+      ));
+      return draft;
+    }
+
+    const reason = String(classification?.reason || '').trim();
+    if (draft.fieldMeta.dayType?.origin !== 'manual') {
+      draft.dayType = selected.name || '';
+      draft.fieldMeta.dayType = fact(draft.dayType, sourceLines, 'ai-inferred', reason || selected.name || '');
+      draft.dayTypeTemplateId = selected.id;
+    } else {
+      draft.dayTypeTemplateId = '';
+    }
+
+    ['specialDay', 'excludeFromRating'].forEach(field => {
+      const templateValue = Boolean(selected[field]);
+      const currentMeta = draft.fieldMeta[field];
+      if (currentMeta && ['manual', 'source-explicit'].includes(currentMeta.origin)) {
+        if (Boolean(draft[field]) !== templateValue) {
+          draft.aiIssues.push(issue(
+            'DAY_TYPE_FACT_CONFLICT',
+            'warning',
+            `日期类型“${selected.name || selected.id}”建议${field === 'specialDay' ? '特殊天' : '不参与评分'}为${templateValue ? '是' : '否'}，但已保留${currentMeta.origin === 'manual' ? '人工修改' : '原文明写'}值。`,
+            [...new Set([...(currentMeta.sourceLines || []), ...sourceLines])],
+            {
+              targetPath: `parsed.${field}`,
+              original: Boolean(draft[field]),
+              suggestion: templateValue
+            }
+          ));
+        }
+        return;
+      }
+      draft[field] = templateValue;
+      draft.fieldMeta[field] = fact(templateValue, sourceLines, 'template-default', selected.name || selected.id);
+    });
     return draft;
   }
 
@@ -546,7 +717,7 @@
     if (!value || typeof value !== 'object') return value;
     const output = {};
     Object.entries(value).forEach(([key, item]) => {
-      if (['fieldMeta', 'aiMeta', 'sourceLines', 'parserVersion', 'aiIssues', 'unassignedLines', 'consumedLines'].includes(key)) return;
+      if (['fieldMeta', 'aiMeta', 'sourceLines', 'parserVersion', 'aiIssues', 'unassignedLines', 'consumedLines', 'sessionTemplateId', 'dayTypeTemplateId'].includes(key)) return;
       output[key] = stripParserMetadata(item);
     });
     return output;
@@ -556,6 +727,7 @@
     return stripParserMetadata({
       wakeTime: validatedDraft.wakeTime || '',
       sleepTime: validatedDraft.sleepTime || '',
+      dayType: validatedDraft.dayType || '',
       specialDay: Boolean(validatedDraft.specialDay),
       specialDayReason: validatedDraft.specialDayReason || '',
       excludeFromRating: Boolean(validatedDraft.excludeFromRating),
@@ -575,7 +747,9 @@
     clockSpan,
     extractFacts,
     validateAiEnvelope,
+    resolveTaskTemplate: resolveTemplate,
     assembleDay,
+    applyDayTypeClassification,
     validateDay,
     buildImportDay
   };

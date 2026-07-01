@@ -8,12 +8,15 @@ const AI_PARSER_VERSION = window.AIParserCore?.VERSION || 2;
 // ── AI 状态 ───────────────────────────────────────────────────
 const aiState = {
   daySplits: [],   // [{ id, date, text, startLine, endLine, status, parsed, issues }]
-  // status: 'pending' | 'parsing' | 'review' | 'blocked' | 'confirmed' | 'error' | 'imported'
+  // review status: pending | parsing | review | blocked | confirmed | error | imported
   rawInput: '',    // 原始输入文本
   sourceMeta: { fileName: '', lineCount: 0, charCount: 0, loadedAt: '' },
   sourceIssues: [],
   parserVersion: AI_PARSER_VERSION,
   networkConcurrency: 1,
+  step2StopInfo: null,
+  parseManager: null,
+  _activeStep2Run: null,
   _cacheLoaded: false,
 };
 
@@ -29,6 +32,8 @@ async function aiSaveCacheToServer() {
         daySplits: aiState.daySplits,
         sourceMeta: aiState.sourceMeta,
         sourceIssues: aiState.sourceIssues,
+        step2StopInfo: aiState.step2StopInfo,
+        parseManager: aiState.parseManager,
       }),
     });
   } catch (e) { console.warn('AI缓存保存失败', e); }
@@ -39,18 +44,17 @@ async function aiLoadCacheFromServer() {
     const res = await fetch('/api/cache');
     const cache = await res.json();
     if (cache && (cache.rawInput || (cache.daySplits && cache.daySplits.length))) {
-      const currentParser = Number(cache.parserVersion) === AI_PARSER_VERSION;
       aiState.rawInput = cache.rawInput || '';
-      aiState.daySplits = (cache.daySplits || []).map(split => aiNormalizeCachedSplit(currentParser ? split : {
-        id: split.id,
-        date: split.date,
-        text: split.text,
-        startLine: split.startLine,
-        endLine: split.endLine,
-        status: 'pending',
-      }));
+      const cachedParserVersion = Number(cache.parserVersion) || 0;
+      aiState.daySplits = (cache.daySplits || []).map(split => aiMigrateCachedSplit(split, cachedParserVersion));
       aiState.sourceMeta = cache.sourceMeta || aiBuildSourceMeta(aiState.rawInput);
       aiState.sourceIssues = cache.sourceIssues || [];
+      aiState.step2StopInfo = cache.step2StopInfo || null;
+      aiState.parseManager = window.AIParseManager.reconcileOnLoad(
+        aiState.daySplits,
+        cache.parseManager,
+        split => window.AIParserCore.extractFacts(split.text)
+      );
       aiState.parserVersion = AI_PARSER_VERSION;
       aiState._cacheLoaded = true;
       aiRunSourcePreflight(aiState.daySplits);
@@ -93,9 +97,10 @@ function aiPersistConfig(cfg) {
 }
 
 function aiNormalizeParseConcurrency(value) {
+  if (window.AIStep2Scheduler) return window.AIStep2Scheduler.normalizeConcurrency(value);
   const n = parseInt(value, 10);
   if (!Number.isFinite(n)) return 1;
-  return Math.min(2, Math.max(1, n));
+  return Math.min(10, Math.max(1, n));
 }
 
 // ============================================================
@@ -143,6 +148,8 @@ async function renderAI() {
   }
 
   const cfg = aiLoadConfig();
+  const parseManager = aiEnsureParseManager();
+  const parseManagerRunning = parseManager.state === 'running';
 
   // 方案 A：重建 DOM 前保存 textarea 已有内容
   const savedRawInput = document.getElementById('ai-rawInput')?.value || '';
@@ -199,11 +206,11 @@ async function renderAI() {
           <div style="font-size:13px;font-weight:600;margin-bottom:10px;color:var(--hp)">⚡ Step 2 — 解析并发</div>
           <div class="form-grid" style="grid-template-columns:repeat(2,1fr)">
             <div class="form-group">
-              <label>同时解析天数</label>
-              <input type="number" id="ai-parseConcurrency" value="${aiNormalizeParseConcurrency(cfg.parseConcurrency)}" min="1" max="2" step="1">
+              <label>同时解析本日项目数</label>
+              <input type="number" id="ai-parseConcurrency" value="${aiNormalizeParseConcurrency(cfg.parseConcurrency)}" min="1" max="10" step="1">
             </div>
           </div>
-          <div style="font-size:10px;color:var(--muted);margin-top:4px">默认 1，最多 2。出现限流、空流或网络失败时，本轮会自动降为串行。</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:4px">日期始终逐日处理；此数值只控制当前日期相邻项目的并发量，范围 1-10。收到 429 会立即停止。</div>
         </div>
 
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -272,8 +279,8 @@ async function renderAI() {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px">
           <div class="card-title" id="ai-splits-title">📋 分割结果</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn btn-primary" id="ai-btn-parse-all" onclick="aiStep2ParseAll()">
-              🤖 Step 2：全部解析
+            <button class="btn btn-primary" id="ai-btn-parse-all" onclick="aiStep2ParseAll()" ${parseManagerRunning ? 'disabled title="已有解析正在运行"' : ''}>
+              ${parseManagerRunning ? '⏳ Step 2 解析中' : '🤖 Step 2：全部解析'}
             </button>
             <button class="btn btn-success" id="ai-btn-import-all" style="display:none" onclick="aiStep3ImportAll()">
               ✅ Step 3：批量导入
@@ -291,6 +298,8 @@ async function renderAI() {
             <div id="ai-progress-bar" style="height:4px;background:var(--pol);border-radius:2px;width:0%;transition:width .3s"></div>
           </div>
         </div>
+        <div id="ai-parse-manager"></div>
+        <div id="ai-step2-stop" style="display:none;margin-bottom:12px"></div>
 
         <div id="ai-day-list"></div>
       </div>
@@ -619,17 +628,40 @@ function aiSetNetworkConcurrency(value) {
 
 function aiDrainNetworkQueue() {
   while (aiNetworkGate.active < aiNetworkGate.limit && aiNetworkGate.queue.length) {
+    const entry = aiNetworkGate.queue.shift();
+    if (entry.signal?.aborted) {
+      entry.reject(aiAbortError(entry.signal.reason));
+      continue;
+    }
+    entry.signal?.removeEventListener('abort', entry.onAbort);
     aiNetworkGate.active += 1;
-    aiNetworkGate.queue.shift()();
+    entry.resolve();
   }
 }
 
-function aiAcquireNetworkSlot() {
+function aiAbortError(reason = null) {
+  const error = new Error(reason?.message || '请求已取消');
+  error.name = 'AbortError';
+  error.code = 'REQUEST_ABORTED';
+  return error;
+}
+
+function aiAcquireNetworkSlot(signal = null) {
+  if (signal?.aborted) return Promise.reject(aiAbortError(signal.reason));
   if (aiNetworkGate.active < aiNetworkGate.limit) {
     aiNetworkGate.active += 1;
     return Promise.resolve();
   }
-  return new Promise(resolve => aiNetworkGate.queue.push(resolve));
+  return new Promise((resolve, reject) => {
+    const entry = { resolve, reject, signal, onAbort: null };
+    entry.onAbort = () => {
+      const index = aiNetworkGate.queue.indexOf(entry);
+      if (index >= 0) aiNetworkGate.queue.splice(index, 1);
+      reject(aiAbortError(signal?.reason));
+    };
+    signal?.addEventListener('abort', entry.onAbort, { once: true });
+    aiNetworkGate.queue.push(entry);
+  });
 }
 
 function aiReleaseNetworkSlot() {
@@ -637,7 +669,7 @@ function aiReleaseNetworkSlot() {
   aiDrainNetworkQueue();
 }
 
-async function aiCall(messages, systemPrompt, maxTokens = 3000, step = 'split') {
+async function aiCall(messages, systemPrompt, maxTokens = 3000, step = 'split', requestOptions = {}) {
   const cfg = aiReadConfig(step);
   if (!cfg.baseUrl || !cfg.apiKey || !cfg.modelId) {
     throw new Error('请先展开"AI 接口配置"，填写 Base URL、API Key 和 Model ID，然后保存。');
@@ -703,9 +735,9 @@ async function aiCall(messages, systemPrompt, maxTokens = 3000, step = 'split') 
     body = JSON.stringify(parsed);
   }
 
-  await aiAcquireNetworkSlot();
+  await aiAcquireNetworkSlot(requestOptions.signal);
   try {
-    const res = await fetch(url, { method: 'POST', headers, body });
+    const res = await fetch(url, { method: 'POST', headers, body, signal: requestOptions.signal });
 
     if (!res.ok) {
       const txt = await res.text().catch(() => '');
@@ -763,6 +795,7 @@ async function aiReadStream(res, provider) {
         const message = json.error.message || json.error.type || JSON.stringify(json.error);
         streamError = new Error(`流式接口错误：${message}`);
         streamError.status = Number(json.error.status || json.error.code) || null;
+        if (!streamError.status && aiIsRateLimitError(streamError)) streamError.status = 429;
         streamError.responseText = payload;
         return;
       }
@@ -775,6 +808,7 @@ async function aiReadStream(res, provider) {
       } else if (provider === 'anthropic') {
         if (json.type === 'error') {
           streamError = new Error(`流式接口错误：${json.error?.message || payload}`);
+          if (aiIsRateLimitError(streamError)) streamError.status = 429;
           streamError.responseText = payload;
         } else if (json.type === 'content_block_delta' && json.delta?.text) {
           result += json.delta.text;
@@ -808,6 +842,8 @@ async function aiReadStream(res, provider) {
         const json = JSON.parse(buffer.trim());
         if (json.error) {
           streamError = new Error(`接口错误：${json.error.message || JSON.stringify(json.error)}`);
+          streamError.status = Number(json.error.status || json.error.code) || null;
+          if (!streamError.status && aiIsRateLimitError(streamError)) streamError.status = 429;
           streamError.responseText = buffer.trim();
         } else if (json.choices?.[0]?.message?.content) {
           result += json.choices[0].message.content;
@@ -834,26 +870,42 @@ async function aiReadStream(res, provider) {
 
 function aiIsRetryableNetworkError(error) {
   const status = Number(error?.status);
-  return status === 429 || status >= 500 || error?.code === 'EMPTY_STREAM' ||
+  return status >= 500 || error?.code === 'EMPTY_STREAM' ||
     /Failed to fetch|NetworkError|网络|空|流式接口错误|无法解析流式数据|无法识别的非流式内容/i.test(error?.message || '');
 }
 
-function aiWait(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function aiIsRateLimitError(error) {
+  if (window.AIStep2Scheduler) return window.AIStep2Scheduler.isRateLimitError(error);
+  return Number(error?.status) === 429 ||
+    /(?:^|\D)429(?:\D|$)|rate[\s_-]*limit|too many requests|请求过多|concurrency limit exceeded|concurrent request limit|too many concurrent requests/i.test(error?.message || '');
 }
 
-async function aiCallWithNetworkRetry(messages, systemPrompt, maxTokens, step, maxRetries = 2) {
+function aiWait(ms, signal = null) {
+  if (signal?.aborted) return Promise.reject(aiAbortError(signal.reason));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(aiAbortError(signal?.reason));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function aiCallWithNetworkRetry(messages, systemPrompt, maxTokens, step, maxRetries = 2, requestOptions = {}) {
   let lastError = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await aiCall(messages, systemPrompt, maxTokens, step);
+      return await aiCall(messages, systemPrompt, maxTokens, step, requestOptions);
     } catch (error) {
       lastError = error;
+      if (aiIsRateLimitError(error) || error?.name === 'AbortError') throw error;
       if (!aiIsRetryableNetworkError(error) || attempt >= maxRetries) throw error;
-      if (Number(error.status) === 429) aiSetNetworkConcurrency(1);
-      const retryAfterMs = Number(error.retryAfter) > 0 ? Number(error.retryAfter) * 1000 : 0;
       const baseDelay = attempt === 0 ? 2000 : 5000;
-      await aiWait(Math.max(retryAfterMs, baseDelay) + Math.floor(Math.random() * 400));
+      await aiWait(baseDelay + Math.floor(Math.random() * 400), requestOptions.signal);
     }
   }
   throw lastError;
@@ -936,13 +988,28 @@ function aiBuildSourceMeta(rawText, fileName = '') {
 }
 
 function aiNormalizeCachedSplit(split) {
+  const reviewProposals = split.reviewProposals || [];
+  const legacyFinalReviewFailure = reviewProposals.some(proposal =>
+    /AI 最终复查失败/.test(proposal?.message || '')
+  );
+  const finalReviewState = ['pending', 'reviewing', 'complete', 'error'].includes(split.finalReviewState)
+    ? (split.finalReviewState === 'reviewing' ? 'pending' : split.finalReviewState)
+    : legacyFinalReviewFailure
+      ? 'error'
+      : split.parsed && ['review', 'blocked', 'confirmed', 'imported'].includes(split.status)
+        ? 'complete'
+        : 'pending';
   const normalized = {
     id: split.id || uid(),
     date: split.date || '',
     text: split.text || '',
     startLine: split.startLine || null,
     endLine: split.endLine || null,
-    status: split.status === 'done' ? 'review' : (split.status || 'pending'),
+    status: split.status === 'done'
+      ? 'review'
+      : split.status === 'parsing'
+        ? (split.parsed ? 'review' : 'error')
+        : (split.status || 'pending'),
     parsed: split.parsed || null,
     error: split.error || null,
     issues: split.issues || [],
@@ -958,15 +1025,78 @@ function aiNormalizeCachedSplit(split) {
     partialParseMessage: split.partialParseMessage || '',
     draftDirty: Boolean(split.draftDirty),
     pendingProposal: split.pendingProposal || null,
-    reviewProposals: split.reviewProposals || [],
+    reviewProposals,
+    finalReviewState,
+    finalReviewError: split.finalReviewError ||
+      (legacyFinalReviewFailure ? reviewProposals.find(proposal => /AI 最终复查失败/.test(proposal?.message || ''))?.message || '' : ''),
+    resumeAsProposal: Boolean(split.resumeAsProposal),
     itemParseResults: split.itemParseResults || [],
     sourceFacts: split.sourceFacts || null,
+    sourceEditHistory: split.sourceEditHistory || [],
+    parseState: window.AIParseManager?.DAY_STATES.includes(split.parseState) ? split.parseState : '',
+    parseExcluded: Boolean(split.parseExcluded),
     parserVersion: AI_PARSER_VERSION,
     parsingLocked: false,
     reparseLocked: false,
   };
   if (normalized.parsed) aiValidateDraftDay(normalized);
   return normalized;
+}
+
+function aiMigrateCachedSplit(split, cachedParserVersion) {
+  if (cachedParserVersion === AI_PARSER_VERSION) return aiNormalizeCachedSplit(split);
+  if ([2, 3].includes(cachedParserVersion)) {
+    const normalized = aiNormalizeCachedSplit({ ...split, parserVersion: AI_PARSER_VERSION });
+    const facts = window.AIParserCore.extractFacts(normalized.text);
+    const validResults = (normalized.itemParseResults || [])
+      .filter(record => window.AIParseManager.isValidCheckpoint(record, facts));
+
+    if (facts.nonEmptyLines.length > 0 && validResults.length === facts.nonEmptyLines.length) {
+      const lineResults = validResults.map(record => {
+        const { sourceLine, text, parseStatus, parserVersion, error, errorStatus, ...result } = record;
+        return result;
+      }).sort((a, b) => Number(a.line) - Number(b.line));
+      normalized.sourceFacts = facts;
+      normalized.parsed = aiPrepareV2Parsed(normalized, facts, lineResults);
+      normalized.reviewProposals = [];
+      normalized.pendingProposal = null;
+      normalized.issues = [];
+      aiValidateDraftDay(normalized);
+      if (split.status !== 'imported') {
+        normalized.status = aiHasBlockingIssues(normalized) ? 'blocked' : 'review';
+        normalized.finalReviewState = 'pending';
+        normalized.finalReviewError = '';
+        normalized.parseState = 'partial';
+        normalized.partialParseMessage = '解析器已升级；逐项检查点已保留，继续时只补新版最终复查与日期类型判断。';
+      } else {
+        normalized.parseState = 'complete';
+      }
+      return normalized;
+    }
+
+    normalized.sourceFacts = facts;
+    normalized.itemParseResults = normalized.itemParseResults || [];
+    if (split.status === 'imported') {
+      normalized.status = 'imported';
+      normalized.parseState = 'complete';
+      return normalized;
+    }
+    if (split.status !== 'imported') normalized.parsed = null;
+    normalized.parseState = validResults.length ? 'partial' : 'pending';
+    normalized.status = validResults.length ? 'error' : 'pending';
+    normalized.error = validResults.length ? '解析器已升级，可从现有逐项检查点继续。' : null;
+    return normalized;
+  }
+
+  return aiNormalizeCachedSplit({
+    id: split.id,
+    date: split.date,
+    text: split.text,
+    startLine: split.startLine,
+    endLine: split.endLine,
+    status: 'pending',
+    parseState: 'pending',
+  });
 }
 
 function aiNumberSplitLines(rawText) {
@@ -990,6 +1120,10 @@ function aiCreateIssue(code, level, message, options = {}) {
     original: options.original || '',
     suggestion: options.suggestion ?? null,
     sourceReplacement: options.sourceReplacement ?? null,
+    expectedSource: options.expectedSource ?? null,
+    replacementSource: options.replacementSource ?? null,
+    proposalType: options.proposalType || '',
+    reason: options.reason || '',
     apply: options.apply || null,
     confidence: options.confidence ?? null,
     status: options.status || 'open',
@@ -1018,6 +1152,7 @@ async function aiLoadTextFile(event) {
   aiState.sourceMeta = aiBuildSourceMeta(rawText, file.name);
   aiState.daySplits = [];
   aiState.sourceIssues = [];
+  aiState.parseManager = window.AIParseManager.createManager();
   aiRenderSourceMeta();
   aiMsg('split', `已读取 ${file.name}，可以开始日期切分`, 'ok');
   await aiSaveCacheToServer();
@@ -1163,10 +1298,13 @@ function aiFinalizeSplits(rawText, splits) {
     ...split,
     id: uid(),
     status: 'pending',
+    parseState: 'pending',
+    parseExcluded: false,
     parsed: null,
     error: null,
     issues: [],
   }));
+  aiState.parseManager = window.AIParseManager.createManager();
   aiState.rawInput = rawText;
   aiState.sourceMeta = {
     ...aiBuildSourceMeta(rawText, aiState.sourceMeta?.fileName || ''),
@@ -1332,9 +1470,12 @@ function aiGetTemplateHint() {
     if (t.defaultMinutes) desc += `，默认时长：${t.defaultMinutes}分钟`;
     if (t.quantityUnit) desc += `，数量单位：${t.quantityUnit}`;
     if (t.note) desc += `，备注模板：${t.note}`;
+    if (String(t.aiPrompt || '').trim()) {
+      desc += `\n    专属 AI 提示词（选择模板时优先遵守）：${String(t.aiPrompt).trim()}`;
+    }
     return desc;
   });
-  return lines.join('\n') + '\n命中模板时，task.templateId 必须填写对应 templateId；未命中模板时 templateId 设为空字符串。';
+  return lines.join('\n') + '\n模板选择必须先理解专属 AI 提示词中的适用范围、扩展场景、排除情况和注意事项，再结合关键词与整日上下文。专属提示词与关键词冲突时，以专属提示词为准。命中模板时，task.templateId 必须填写对应 templateId；模板名称非空时 task.name 使用模板名称，模板名称为空时由你生成名称；未命中模板时 templateId 设为空字符串。';
 }
 
 function aiGetSessionTemplateHint() {
@@ -1342,17 +1483,35 @@ function aiGetSessionTemplateHint() {
   if (!templates || templates.length === 0) return '';
   const lines = templates.map((t, i) => {
     const kw = (t.keywords || []).join('、') || '（无关键词）';
-    let desc = `  - 特殊时段模板#${i + 1} → 名称: "${t.name}"，关键词：${kw}`;
+    let desc = `  - 特殊时段模板#${i + 1} templateId: "${t.id}" → 名称: "${t.name}"，关键词：${kw}`;
     if (t.note) desc += `，note: "${t.note}"`;
+    if (String(t.aiPrompt || '').trim()) {
+      desc += `\n    专属 AI 提示词（选择模板时优先遵守）：${String(t.aiPrompt).trim()}`;
+    }
     return desc;
   });
-  return lines.join('\n');
+  return lines.join('\n') + '\n特殊时段模板也必须先理解专属 AI 提示词，再结合关键词与整日上下文。专属提示词与关键词冲突时，以专属提示词为准。';
+}
+
+function aiGetDayTypeTemplateHint() {
+  const templates = typeof getDayTypeTemplates === 'function' ? getDayTypeTemplates() : [];
+  if (!templates.length) return '';
+  const lines = templates.map((template, index) => {
+    const keywords = (template.keywords || []).join('、') || '（无关键词）';
+    const flags = `特殊天=${template.specialDay ? '是' : '否'}，不参与评分=${template.excludeFromRating ? '是' : '否'}`;
+    let description = `  - 日期类型#${index + 1} templateId: "${template.id}" → 名称: "${template.name}"，关键词：${keywords}，${flags}`;
+    if (String(template.aiPrompt || '').trim()) {
+      description += `\n    专属 AI 提示词（最高优先级）：${String(template.aiPrompt).trim()}`;
+    }
+    return description;
+  });
+  return lines.join('\n') + '\n每天最多选择一个日期类型。先遵守专属 AI 提示词，再参考关键词和整日上下文；无法明确匹配时 templateId 必须留空。不要自行输出特殊天或不参与评分的值。';
 }
 
 const AI_ITEM_JSON_BEGIN = '<<<AI_JSON_BEGIN:item-v1>>>';
 const AI_ITEM_JSON_END = '<<<AI_JSON_END:item-v1>>>';
-const AI_REVIEW_JSON_BEGIN = '<<<AI_JSON_BEGIN:review-v1>>>';
-const AI_REVIEW_JSON_END = '<<<AI_JSON_END:review-v1>>>';
+const AI_REVIEW_JSON_BEGIN = '<<<AI_JSON_BEGIN:review-v2>>>';
+const AI_REVIEW_JSON_END = '<<<AI_JSON_END:review-v2>>>';
 const AI_DAY_JSON_BEGIN = '<<<AI_JSON_BEGIN:day-lines-v2>>>';
 const AI_DAY_JSON_END = '<<<AI_JSON_END:day-lines-v2>>>';
 const AI_STRICT_JSON_RETRIES = 1;
@@ -1371,7 +1530,7 @@ function aiExtractMarkedJson(raw, beginMarker, endMarker) {
   return JSON.parse(jsonText);
 }
 
-async function aiStrictMarkedJsonCall({ messages, systemPrompt, maxTokens, step, beginMarker, endMarker, validate }) {
+async function aiStrictMarkedJsonCall({ messages, systemPrompt, maxTokens, step, beginMarker, endMarker, validate, requestOptions = {} }) {
   let lastRaw = '';
   let lastError = '';
   for (let attempt = 0; attempt <= AI_STRICT_JSON_RETRIES; attempt++) {
@@ -1390,7 +1549,9 @@ ${endMarker}
       attempt === 0 ? messages : [...messages, { role: 'user', content: repairPrompt }],
       systemPrompt,
       maxTokens,
-      step
+      step,
+      2,
+      requestOptions
     );
     lastRaw = raw;
     try {
@@ -1410,261 +1571,20 @@ ${endMarker}
   throw new Error(lastError || 'AI JSON 输出失败');
 }
 
-function aiIsHHMM(value) {
-  return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(value || ''));
-}
-
-function aiIsDaytimeSleep(value) {
-  if (!aiIsHHMM(value)) return false;
-  const hour = Number(String(value).slice(0, 2));
-  return hour >= 6 && hour <= 20;
-}
-
-function aiBuildLineParseUnits(split) {
-  return String(split.text || '').replace(/\r\n?/g, '\n').split('\n')
-    .map((line, offset) => ({
-      key: `line-${offset + 1}`,
-      relativeLine: offset + 1,
-      absoluteLine: split.startLine ? split.startLine + offset : offset + 1,
-      text: line,
-      trimmed: line.trim(),
-    }))
-    .filter(unit => unit.trimmed);
-}
-
-function aiLineLooksDateHeading(text) {
-  return /^(?:(?:20\d{2})年)?\d{1,2}月\d{1,2}日\s*$/.test(String(text || '').trim());
-}
-
-function aiLineParserSystem(split) {
-  const actHint = aiGetActHint();
-  const tmplHint = aiGetTemplateHint();
-  const sessTmplHint = aiGetSessionTemplateHint();
-  return `你是学习追踪器的逐项解析助手。你一次只解析一行原文，不能重建整天。
-
-必须严格输出：
-${AI_ITEM_JSON_BEGIN}
-{"kind":"field|session|task|note|unknown|none","field":"","value":"","session":null,"task":null,"note":{"target":"day|previous-session|previous-task|unknown","text":""},"aiIssues":[]}
-${AI_ITEM_JSON_END}
-
-规则：
-1. 只解析当前这一行，不要补充别的行内容。
-2. 所有时间必须是 24 小时制 HH:MM。
-3. 起床行只能输出 kind="field", field="wakeTime"。
-4. 睡觉行只能输出 kind="field", field="sleepTime"；睡觉12:xx=00:xx，睡觉1点=01:00，睡觉24点=00:00。
-5. 如果睡觉时间会落在 06:00-20:59，禁止写入 field 值，改为 kind="unknown" 并在 aiIssues 里输出 level="error" 的歧义时间问题。
-6. 有起止时间的学习行输出 kind="session"；吃饭、洗澡、午休等非学习起止时间输出 session.type="special"。
-7. 任务行输出 kind="task"，提取 name/activityType/minutes/quantity/quantityUnit/note。
-8. 备注行输出 kind="note"，并选择 target；无法判断时 target="unknown"。
-9. 日期标题行输出 kind="unknown"，不要报错。
-10. aiIssues 只允许输出 level="error" 的硬错误，不要输出普通建议。
-11. 不要输出 sourceLines，程序会自动写入当前行号。
-
-日期：${split.date}
-
-特殊时段模板：
-${sessTmplHint || '无'}
-
-任务模板：
-${tmplHint || '无'}
-
-已有活动分类：
-${actHint || '无'}`;
-}
-
-function aiValidateLineParseValue(value) {
-  const kind = String(value?.kind || '').toLowerCase();
-  const allowedKinds = ['field', 'session', 'task', 'note', 'unknown', 'none'];
-  if (!allowedKinds.includes(kind)) throw new Error('kind 不合法：' + (value?.kind || '空'));
-  if (!Array.isArray(value.aiIssues)) value.aiIssues = [];
-  if (kind === 'field') {
-    const field = value.field;
-    if (!['wakeTime', 'sleepTime', 'dayNote', 'specialDay', 'excludeFromRating'].includes(field)) {
-      throw new Error('field 不合法：' + (field || '空'));
-    }
-    if ((field === 'wakeTime' || field === 'sleepTime') && !aiIsHHMM(value.value)) {
-      throw new Error(`${field} 必须是 HH:MM`);
-    }
-    if (field === 'sleepTime' && aiIsDaytimeSleep(value.value)) {
-      throw new Error('sleepTime 落在白天，必须改为 hard error，不得写入字段');
-    }
-  }
-  if (kind === 'session') {
-    const s = value.session;
-    if (!s || typeof s !== 'object') throw new Error('session 缺失');
-    if (!aiIsHHMM(s.startTime) || !aiIsHHMM(s.endTime)) throw new Error('session startTime/endTime 必须是 HH:MM');
-  }
-  if (kind === 'task') {
-    const t = value.task;
-    if (!t || typeof t !== 'object') throw new Error('task 缺失');
-    if (!String(t.name || '').trim()) throw new Error('task.name 不能为空');
-  }
-  if (kind === 'note') {
-    if (!value.note || typeof value.note !== 'object') throw new Error('note 缺失');
-    const target = value.note.target || 'unknown';
-    if (!['day', 'previous-session', 'previous-task', 'unknown'].includes(target)) throw new Error('note.target 不合法');
-  }
-}
-
-function aiIssueFromItemAiIssue(issue, unit) {
-  return {
-    level: (issue.level || 'error').toLowerCase(),
-    code: issue.code || 'AI_ITEM_REVIEW',
-    message: issue.message || 'AI 解析提醒',
-    sourceLines: [unit.relativeLine],
-    original: issue.original || unit.trimmed,
-    suggestion: issue.suggestion || '',
-    sourceReplacement: issue.sourceReplacement || '',
-    targetPath: issue.targetPath || '',
-    suggestedValue: issue.suggestedValue ?? '',
-    confidence: issue.confidence ?? null,
-  };
-}
-
-function aiNormalizeLineParseResult(value, unit, error = null) {
-  if (error) {
-    return {
-      kind: 'unknown',
-      sourceLine: unit.relativeLine,
-      text: unit.trimmed,
-      parseStatus: 'failed',
-      error,
-      aiIssues: [{
-        level: 'error',
-        code: 'AI_ITEM_PARSE_FAILED',
-        message: `第 ${unit.relativeLine} 行 AI 逐项解析失败：${error}`,
-        sourceLines: [unit.relativeLine],
-        original: unit.trimmed,
-        confidence: 1,
-      }],
-    };
-  }
-  const kind = String(value.kind || '').toLowerCase();
-  return {
-    ...value,
-    kind,
-    sourceLine: unit.relativeLine,
-    text: unit.trimmed,
-    parseStatus: 'ok',
-    aiIssues: (value.aiIssues || []).map(issue => aiIssueFromItemAiIssue(issue, unit)),
-  };
-}
-
-function aiAppendTextValue(target, value) {
-  const text = String(value || '').trim();
-  if (!text) return target || '';
-  return target ? `${target}\n${text}` : text;
-}
-
-function aiMergeLineParseResults(split, results) {
-  const parsed = {
-    wakeTime: '',
-    sleepTime: '',
-    dayNote: '',
-    sessions: [],
-    tasks: [],
-    aiIssues: [],
-    unassignedLines: [],
-    consumedLines: [],
-  };
-  let lastSession = null;
-  let lastTask = null;
-
-  results.forEach(result => {
-    const line = Number(result.sourceLine);
-    const unitText = result.text || result.original || '';
-    const markConsumed = () => {
-      if (Number.isFinite(line) && !parsed.consumedLines.includes(line)) parsed.consumedLines.push(line);
-    };
-
-    (result.aiIssues || []).forEach(issue => parsed.aiIssues.push(issue));
-
-    if (result.parseStatus === 'failed') {
-      parsed.unassignedLines.push({ line, text: unitText, reason: result.error || 'AI逐项解析失败' });
-      markConsumed();
-      return;
-    }
-
-    if (aiLineLooksDateHeading(unitText)) {
-      markConsumed();
-      return;
-    }
-
-    if (result.kind === 'field') {
-      if (result.field === 'dayNote') parsed.dayNote = aiAppendTextValue(parsed.dayNote, result.value);
-      else parsed[result.field] = result.value ?? '';
-      markConsumed();
-      return;
-    }
-
-    if (result.kind === 'session') {
-      const session = { ...(result.session || {}) };
-      session.id = session.id || uid();
-      session.type = session.type || 'normal';
-      session.name = session.name || '';
-      session.nominalMinutes = Number(session.nominalMinutes) || 0;
-      session.actualMinutes = Number(session.actualMinutes) || 0;
-      session.restMinutes = Number(session.restMinutes) || 0;
-      session.note = session.note || '';
-      session.sourceLines = [line];
-      session.aiMeta = session.aiMeta || { confidence: result.confidence ?? 0.9, reason: '逐项解析', matchMode: 'keyword-exact' };
-      parsed.sessions.push(session);
-      lastSession = session;
-      lastTask = null;
-      markConsumed();
-      return;
-    }
-
-    if (result.kind === 'task') {
-      const task = { ...(result.task || {}) };
-      task.id = task.id || uid();
-      task.name = task.name || unitText;
-      task.activityType = task.activityType || '';
-      task.minutes = Number(task.minutes) || 0;
-      task.quantity = task.quantity === undefined ? null : task.quantity;
-      task.quantityUnit = task.quantityUnit || '';
-      task.note = task.note || '';
-      task.sourceLines = [line];
-      task.aiMeta = task.aiMeta || { confidence: result.confidence ?? 0.8, reason: '逐项解析', matchMode: task.activityType ? 'category-semantic' : 'unclassified' };
-      parsed.tasks.push(task);
-      lastTask = task;
-      markConsumed();
-      return;
-    }
-
-    if (result.kind === 'note') {
-      const note = result.note || {};
-      const noteText = note.text || unitText;
-      if (note.target === 'previous-task' && lastTask) {
-        lastTask.note = aiAppendTextValue(lastTask.note, noteText);
-      } else if (note.target === 'previous-session' && lastSession) {
-        lastSession.note = aiAppendTextValue(lastSession.note, noteText);
-      } else if (note.target === 'day') {
-        parsed.dayNote = aiAppendTextValue(parsed.dayNote, noteText);
-      } else {
-        parsed.unassignedLines.push({ line, text: unitText, reason: '备注无法安全归属' });
-      }
-      markConsumed();
-      return;
-    }
-
-    parsed.unassignedLines.push({ line, text: unitText, reason: result.reason || 'AI未能归属该行' });
-    markConsumed();
-  });
-
-  parsed.consumedLines = [...new Set(parsed.consumedLines)].sort((a, b) => a - b);
-  aiResolveParsedTaskTemplates(parsed);
-  return parsed;
-}
-
 function aiReviewDraftSummary(parsed) {
   return {
     wakeTime: parsed.wakeTime || '',
     sleepTime: parsed.sleepTime || '',
+    dayType: parsed.dayType || '',
+    dayTypeTemplateId: parsed.dayTypeTemplateId || '',
+    specialDay: Boolean(parsed.specialDay),
+    specialDayReason: parsed.specialDayReason || '',
+    excludeFromRating: Boolean(parsed.excludeFromRating),
     dayNote: parsed.dayNote || '',
     sessions: (parsed.sessions || []).map(session => ({
       id: session.id,
       type: session.type,
+      sessionTemplateId: session.sessionTemplateId || '',
       name: session.name || '',
       startTime: session.startTime || '',
       endTime: session.endTime || '',
@@ -1675,6 +1595,7 @@ function aiReviewDraftSummary(parsed) {
     })),
     tasks: (parsed.tasks || []).map(task => ({
       id: task.id,
+      templateId: task.templateId || '',
       name: task.name || '',
       activityType: task.activityType || '',
       minutes: Number(task.minutes) || 0,
@@ -1688,7 +1609,20 @@ function aiReviewDraftSummary(parsed) {
 
 function aiValidateReviewValue(value) {
   if (!value || !Array.isArray(value.reviewProposals)) throw new Error('复查结果缺少 reviewProposals 数组');
-  const exactTarget = /^parsed\.(?:wakeTime|sleepTime|dayNote|specialDay|excludeFromRating|sessions\.\d+\.(?:type|name|startTime|endTime|nominalMinutes|actualMinutes|restMinutes|note)|tasks\.\d+\.(?:name|templateId|activityType|minutes|quantity|quantityUnit|completionStatus|progressText|errorCount|note))$/;
+  if (!value.dayClassification || typeof value.dayClassification !== 'object') {
+    throw new Error('复查结果缺少 dayClassification 对象');
+  }
+  const dayClassification = value.dayClassification;
+  dayClassification.templateId = String(dayClassification.templateId || '');
+  dayClassification.reason = String(dayClassification.reason || '');
+  dayClassification.sourceLines = [...new Set((dayClassification.sourceLines || []).map(Number))]
+    .filter(line => Number.isFinite(line) && line > 0)
+    .sort((a, b) => a - b);
+  const dayTypeTemplates = typeof getDayTypeTemplates === 'function' ? getDayTypeTemplates() : [];
+  if (dayClassification.templateId && !dayTypeTemplates.some(template => template.id === dayClassification.templateId)) {
+    throw new Error(`dayClassification.templateId 不存在：${dayClassification.templateId}`);
+  }
+  const exactTarget = /^parsed\.(?:wakeTime|sleepTime|dayType|dayNote|specialDay|specialDayReason|excludeFromRating|sessions\.\d+\.(?:type|sessionTemplateId|name|startTime|endTime|nominalMinutes|actualMinutes|restMinutes|note)|tasks\.\d+\.(?:name|templateId|activityType|minutes|quantity|quantityUnit|completionStatus|progressText|errorCount|note))$/;
   value.reviewProposals.forEach((proposal, index) => {
     if (!['source', 'field', 'session', 'task'].includes(proposal.type)) throw new Error(`reviewProposals[${index}].type 不合法`);
     if (!['error', 'warning'].includes(proposal.severity)) proposal.severity = 'warning';
@@ -1696,6 +1630,22 @@ function aiValidateReviewValue(value) {
     if (!proposal.message) throw new Error(`reviewProposals[${index}].message 不能为空`);
     if (proposal.targetPath && !exactTarget.test(proposal.targetPath)) {
       throw new Error(`reviewProposals[${index}].targetPath 不是精确字段路径：${proposal.targetPath}`);
+    }
+    const hasSourceRewrite = proposal.type === 'source' &&
+      (String(proposal.expectedSource ?? '') !== '' || String(proposal.replacementSource ?? '') !== '');
+    if (hasSourceRewrite) {
+      const lines = [...new Set(proposal.sourceLines.map(Number))].filter(Number.isFinite).sort((a, b) => a - b);
+      if (!lines.length) throw new Error(`reviewProposals[${index}] 原文修改缺少 sourceLines`);
+      if (lines.some((line, lineIndex) => lineIndex > 0 && line !== lines[lineIndex - 1] + 1)) {
+        throw new Error(`reviewProposals[${index}] 原文修改的 sourceLines 必须连续`);
+      }
+      if (typeof proposal.expectedSource !== 'string' || typeof proposal.replacementSource !== 'string') {
+        throw new Error(`reviewProposals[${index}] 原文修改必须同时提供 expectedSource 和 replacementSource`);
+      }
+      proposal.sourceLines = lines;
+    } else {
+      delete proposal.expectedSource;
+      delete proposal.replacementSource;
     }
   });
 }
@@ -1706,9 +1656,13 @@ function aiReviewProposalsToIssues(split, proposals) {
     return aiCreateIssue(`AI_REVIEW_PROPOSAL_${proposal.type || 'source'}_${index}`, level, proposal.message || 'AI 复查提案', {
       target: proposal.targetPath || '',
       sourceLines: aiAbsoluteSourceLines(split, proposal.sourceLines || []),
-      original: proposal.original || '',
-      suggestion: proposal.suggestion || proposal.suggestedValue || proposal.sourceReplacement || '',
-      sourceReplacement: proposal.sourceReplacement || '',
+      original: proposal.expectedSource ?? proposal.original ?? '',
+      suggestion: proposal.replacementSource ?? proposal.suggestion ?? proposal.suggestedValue ?? proposal.sourceReplacement ?? '',
+      sourceReplacement: proposal.replacementSource ?? proposal.sourceReplacement ?? '',
+      expectedSource: proposal.expectedSource ?? null,
+      replacementSource: proposal.replacementSource ?? null,
+      proposalType: proposal.type || '',
+      reason: proposal.reason || '',
       apply: aiSafeApplyFromAI({
         targetPath: proposal.targetPath || '',
         suggestedValue: proposal.suggestedValue,
@@ -1719,25 +1673,44 @@ function aiReviewProposalsToIssues(split, proposals) {
   });
 }
 
-async function aiRunReviewProposal(split, parsed, localIssues, sourceFacts = split.sourceFacts || null) {
-  const system = `你是学习追踪器的最终复查助手。你只能复查程序合并后的草稿并输出提案，绝不能直接修改草稿。
+async function aiRunReviewProposal(split, parsed, localIssues, sourceFacts = split.sourceFacts || null, requestOptions = {}) {
+  const system = `你是学习追踪器的最终复查与日期类型判断助手。字段修正只能输出提案，绝不能未经用户点击采纳就修改草稿或原文。日期类型判断会由程序确定性套用到待审核草稿，但不会直接修改正式数据。
 
 必须严格输出：
 ${AI_REVIEW_JSON_BEGIN}
-{"reviewProposals":[]}
+{"dayClassification":{"templateId":"","reason":"","sourceLines":[]},"reviewProposals":[]}
 ${AI_REVIEW_JSON_END}
 
+dayClassification 规则：
+1. 阅读整日原文，并从下方日期类型模板中选择至多一个。
+2. 专属 AI 提示词优先于关键词；关键词只提供候选线索。
+3. 无法明确匹配时 templateId 留空，不得强行分类。
+4. reason 简要说明判断依据，sourceLines 列出本日相对行号。
+5. 只返回 templateId，不要自行返回 specialDay 或 excludeFromRating。
+
 reviewProposals 每项格式：
-{"type":"source|field|session|task","sourceLines":[1],"severity":"error|warning","message":"问题","original":"","sourceReplacement":"","targetPath":"","suggestedValue":"","confidence":0.9}
+{"type":"source|field|session|task","sourceLines":[1],"severity":"error|warning","message":"问题","reason":"修改原因","expectedSource":"指定行当前完整原文","replacementSource":"建议替换后的完整原文","targetPath":"","suggestedValue":""}
 
 规则：
 1. 只提出会影响导入正确性的硬问题或安全修正提案。
 2. 不要输出模板单位差异、普通任务未关联时段、任务总时长和 session 总时长口径差异这类软建议。
 3. 如果发现睡觉时间被解析为 06:00-20:59，必须提出 error 提案，不能默认接受。
-4. 如果本地硬校验已经列出错误，可以补充原因或安全的原文替换建议。
+4. 你可以质疑原文明写的时间、分钟、数量、单位或文字，并提出原文修改，但只能作为用户可采纳的提案。
 5. sourceLines 使用本日相对行号。
 6. targetPath 必须是精确字段路径，例如 parsed.tasks.10.quantityUnit；不能只写 tasks、sessions 等集合名。
-7. source-explicit 的时间、分钟、数量和单位是原文事实，不得建议用模板值覆盖。` + aiGetExtraParsePrompt();
+7. 原文修改必须使用 type="source"，sourceLines 必须连续；expectedSource 必须逐字等于这些行的完整当前原文，replacementSource 必须给出完整替换文本。
+8. 不得为了迎合模板而修改原文。只有确实认为原文有误时才提出修改，并在 reason 中说明依据。
+9. 复查模板选择时必须重新阅读下方每个模板的专属 AI 提示词；提示词优先于关键词，发现套用了明确排除的模板时提出精确字段提案。
+10. 不要输出数值置信度。
+
+任务模板：
+${aiGetTemplateHint() || '无'}
+
+特殊时段模板：
+${aiGetSessionTemplateHint() || '无'}
+
+日期类型模板：
+${aiGetDayTypeTemplateHint() || '无'}` + aiGetExtraParsePrompt();
   const hardIssues = (localIssues || [])
     .filter(issue => issue.level === 'error')
     .map(issue => ({
@@ -1765,145 +1738,30 @@ ${JSON.stringify(hardIssues, null, 2)}`;
     step: 'parse',
     beginMarker: AI_REVIEW_JSON_BEGIN,
     endMarker: AI_REVIEW_JSON_END,
-    validate: aiValidateReviewValue,
+    validate: value => {
+      aiValidateReviewValue(value);
+      const maxLine = sourceFacts?.lines?.length || String(split.text || '').split(/\r?\n/).length;
+      if (value.dayClassification.sourceLines.some(line => line > maxLine)) {
+        throw new Error(`dayClassification.sourceLines 超出本日原文范围：${value.dayClassification.sourceLines.join('、')}`);
+      }
+    },
+    requestOptions,
   });
-  return value.reviewProposals || [];
+  return {
+    dayClassification: value.dayClassification,
+    reviewProposals: value.reviewProposals || [],
+  };
 }
 
-async function aiParseLineUnit(split, unit, context) {
-  const user = `当前行：
-[L${unit.relativeLine}] ${unit.trimmed}
-
-上一条 session 摘要：
-${context.lastSession ? JSON.stringify({ startTime: context.lastSession.startTime, endTime: context.lastSession.endTime, name: context.lastSession.name || '', sourceLines: context.lastSession.sourceLines || [] }) : '无'}
-
-上一条 task 摘要：
-${context.lastTask ? JSON.stringify({ name: context.lastTask.name, minutes: context.lastTask.minutes, sourceLines: context.lastTask.sourceLines || [] }) : '无'}`;
-  const { value } = await aiStrictMarkedJsonCall({
-    messages: [{ role: 'user', content: user }],
-    systemPrompt: aiLineParserSystem(split),
-    maxTokens: 900,
-    step: 'parse',
-    beginMarker: AI_ITEM_JSON_BEGIN,
-    endMarker: AI_ITEM_JSON_END,
-    validate: aiValidateLineParseValue,
+async function aiRunFinalReviewStage(split, parsed, localIssues, sourceFacts = split.sourceFacts || null, requestOptions = {}) {
+  const scheduler = window.AIStep2Scheduler;
+  if (!scheduler?.runFinalReviewStage) throw new Error('Step 2 最终复查调度模块未加载');
+  const configuredConcurrency = aiNetworkGate.limit;
+  return scheduler.runFinalReviewStage({
+    configuredConcurrency,
+    setConcurrency: aiSetNetworkConcurrency,
+    review: () => aiRunReviewProposal(split, parsed, localIssues, sourceFacts, requestOptions),
   });
-  return aiNormalizeLineParseResult(value, unit);
-}
-
-async function aiParseSingleDayByUnitsLegacy(index, options = {}) {
-  const split = aiState.daySplits[index];
-  if (!split) return false;
-  if (split.parsingLocked || split.status === 'parsing') {
-    split.partialParseMessage = '正在解析，请稍候…';
-    aiRenderDayCard(index);
-    if (options.scrollAnchor) aiRestoreScrollAnchor(options.scrollAnchor);
-    return false;
-  }
-
-  aiRunSourcePreflight(aiState.daySplits);
-  const asProposal = Boolean(options.asProposal && split.parsed);
-  const previousParsed = split.parsed;
-  const previousIssues = split.issues || [];
-  const units = aiBuildLineParseUnits(split);
-  const results = [];
-  const context = { lastSession: null, lastTask: null };
-
-  split.parsingLocked = true;
-  split.status = 'parsing';
-  split.error = null;
-  split.pendingProposal = null;
-  split.reviewProposals = [];
-  split.itemParseResults = [];
-  split.issues = aiMergeIssueLists(previousIssues, split.sourceIssues || []);
-  split.partialParseMessage = `正在逐项解析本日原文：0 / ${units.length} 项…`;
-  aiRenderDayCard(index);
-  if (options.scrollAnchor) aiRestoreScrollAnchor(options.scrollAnchor);
-
-  try {
-    for (let i = 0; i < units.length; i++) {
-      const unit = units[i];
-      let result;
-      try {
-        result = await aiParseLineUnit(split, unit, context);
-      } catch (e) {
-        result = aiNormalizeLineParseResult(null, unit, e.message || String(e));
-      }
-      results.push(result);
-      if (result.kind === 'session' && result.session) {
-        context.lastSession = { ...result.session, sourceLines: [unit.relativeLine] };
-        context.lastTask = null;
-      } else if (result.kind === 'task' && result.task) {
-        context.lastTask = { ...result.task, sourceLines: [unit.relativeLine] };
-      }
-      split.itemParseResults = results.slice();
-      if (options.progress) {
-        options.progress.doneItems += 1;
-        aiUpdateProgress();
-      }
-      split.partialParseMessage = `正在逐项解析本日原文：${i + 1} / ${units.length} 项…`;
-      aiRenderDayCard(index);
-      if (options.scrollAnchor) aiRestoreScrollAnchor(options.scrollAnchor);
-    }
-
-    const parsed = aiMergeLineParseResults(split, results);
-    const validationSplit = { ...split, parsed, issues: [] };
-    aiValidateDraftDay(validationSplit);
-    let reviewProposals = [];
-    try {
-      reviewProposals = await aiRunReviewProposal(split, parsed, validationSplit.issues || []);
-    } catch (e) {
-      reviewProposals = [{
-        type: 'source',
-        sourceLines: [],
-        severity: 'warning',
-        message: `AI 最终复查失败：${e.message || e}`,
-        confidence: 1,
-      }];
-    }
-
-    if (asProposal) {
-      const proposalSplit = { ...split, parsed, issues: [], reviewProposals };
-      aiValidateDraftDay(proposalSplit);
-      split.parsed = previousParsed;
-      split.reviewProposals = [];
-      split.pendingProposal = {
-        parsed,
-        issues: proposalSplit.issues || [],
-        differences: aiBuildProposalDifferences(previousParsed, parsed),
-        createdAt: new Date().toISOString(),
-      };
-      split.partialParseMessage = 'AI 已逐项重新解析本日原文。新结果尚未覆盖最终草稿，请审核下方提案。';
-    } else {
-      split.parsed = parsed;
-      split.pendingProposal = null;
-      split.reviewProposals = reviewProposals;
-      split.partialParseMessage = '本日原文已逐项解析，并已完成 AI 复查提案。';
-    }
-    split.error = null;
-    split.sourceDirty = false;
-    split.draftDirty = false;
-    aiValidateDraftDay(split);
-    split.status = aiHasBlockingIssues(split) ? 'blocked' : 'review';
-  } catch (e) {
-    split.parsed = previousParsed;
-    split.issues = aiMergeIssueLists(previousIssues, split.sourceIssues || []);
-    if (previousParsed) aiValidateDraftDay(split);
-    split.status = previousParsed ? (aiHasBlockingIssues(split) ? 'blocked' : 'review') : 'error';
-    split.error = e.message;
-  }
-
-  if (options.progress) {
-    options.progress.doneDays += 1;
-    aiUpdateProgress();
-  }
-  split.parsingLocked = false;
-  aiRenderDayCard(index);
-  if (options.scrollAnchor) aiRestoreScrollAnchor(options.scrollAnchor);
-  aiUpdateImportBtn();
-  aiUpdateProgress();
-  aiSaveCacheToServer();
-  return split.status !== 'error';
 }
 
 function aiBatchParserSystem(split, sourceFacts, targetLines = null) {
@@ -1922,7 +1780,7 @@ ${AI_DAY_JSON_BEGIN}
     "kind":"field|session|task|note|unknown",
     "field":"",
     "value":"",
-    "session":{"type":"normal|special|special-study","name":"","note":""},
+    "session":{"type":"normal|special|special-study","templateId":"","name":"","note":""},
     "task":{"name":"","activityType":"","templateId":"","minutes":null,"quantity":null,"quantityUnit":"","completionStatus":"completed|partial|review|unknown","progressText":"","errorCount":null,"note":""},
     "note":{"target":"day|previous-session|previous-task|unknown","targetLine":null,"text":""},
     "reason":"简短语义依据",
@@ -1938,9 +1796,11 @@ ${AI_DAY_JSON_END}
 4. 睡觉、午睡或午休只要带起止时间范围，就必须输出 session/type="special"，不能输出 sleepTime。
 5. 普通学习时间范围输出 session/type="normal"；吃饭、洗澡、外出、睡觉等不可用范围输出 special；外层时段含零散学习才使用 special-study。
 6. session.type 只能是 normal、special、special-study，禁止输出 study 等其他值。
-7. task 负责名称、已有分类和模板候选。原文明写的分钟、数量、单位由程序处理，不得为了匹配模板改写。
-8. 备注按整日上下文归入 day、previous-session 或 previous-task；不确定时使用 unknown。
-9. 不要生成数值置信度。aiIssues 只允许影响导入正确性的硬错误。
+7. 选择任务或特殊时段模板时，专属 AI 提示词的优先级高于关键词。必须先判断提示词中的适用范围、可扩展场景、排除条件和注意事项；关键词只用于提供候选线索。
+8. 特殊时段符合模板专属提示词及上下文时，session.templateId 必须填写对应模板 ID；不符合时即使出现关键词也不得套用；普通时段留空。
+9. task 负责名称、已有分类和模板候选。符合模板专属提示词及上下文时填写 templateId；不符合时即使活动类别相同或出现宽泛关键词也不得套用。原文明写的分钟、数量、单位由程序处理，不得为了匹配模板改写。
+10. 备注按整日上下文归入 day、previous-session 或 previous-task；不确定时使用 unknown。
+11. 不要生成数值置信度。aiIssues 只允许影响导入正确性的硬错误。
 
 日期：${split.date}
 
@@ -1954,7 +1814,7 @@ ${aiGetSessionTemplateHint() || '无'}
 ${aiGetActHint() || '无'}` + aiGetExtraParsePrompt();
 }
 
-async function aiRequestDayLineResults(split, sourceFacts, targetLines = null) {
+async function aiRequestDayLineResults(split, sourceFacts, targetLines = null, requestOptions = {}) {
   const expectedLines = targetLines?.length ? targetLines : sourceFacts.nonEmptyLines;
   const factPayload = sourceFacts.lineFacts
     .filter(item => expectedLines.includes(item.line))
@@ -1976,6 +1836,7 @@ ${expectedLines.join('、')}`;
     beginMarker: AI_DAY_JSON_BEGIN,
     endMarker: AI_DAY_JSON_END,
     validate: result => window.AIParserCore.validateAiEnvelope(result, sourceFacts, expectedLines),
+    requestOptions,
   });
   return value.lineResults;
 }
@@ -1983,6 +1844,7 @@ ${expectedLines.join('、')}`;
 function aiPrepareV2Parsed(split, sourceFacts, lineResults) {
   const parsed = window.AIParserCore.assembleDay(sourceFacts, lineResults, {
     taskTemplates: aiGetTaskTemplatesSafe(),
+    sessionTemplates: typeof getSessionTemplates === 'function' ? getSessionTemplates() : [],
   });
   parsed.sessions.forEach(session => {
     session.id = session.id || uid();
@@ -1992,6 +1854,268 @@ function aiPrepareV2Parsed(split, sourceFacts, lineResults) {
   });
   parsed.aiIssues = window.AIParserCore.validateDay(parsed, sourceFacts);
   return parsed;
+}
+
+function aiCreateStep2Run(concurrency = aiGetParseConcurrency()) {
+  return {
+    concurrency: aiNormalizeParseConcurrency(concurrency),
+    failedWaves: 0,
+    controller: new AbortController(),
+    stopped: false,
+    stopReason: '',
+    stopError: null,
+    pauseRequested: false,
+    paused: false,
+  };
+}
+
+function aiEnsureParseManager() {
+  if (!aiState.parseManager) {
+    aiState.parseManager = window.AIParseManager.createManager({
+      concurrency: aiGetParseConcurrency(),
+    });
+  }
+  return aiState.parseManager;
+}
+
+function aiFactsForSplit(split) {
+  return window.AIParserCore.extractFacts(split?.text || '');
+}
+
+function aiDayParseProgress(split) {
+  return window.AIParseManager.dayProgress(split, aiFactsForSplit(split));
+}
+
+function aiUpdateParseManager(values = {}) {
+  const manager = aiEnsureParseManager();
+  Object.assign(manager, values, { updatedAt: new Date().toISOString() });
+  aiRenderParseManager();
+  return manager;
+}
+
+function aiPauseStep2() {
+  const manager = aiEnsureParseManager();
+  const run = aiState._activeStep2Run;
+  if (manager.state !== 'running' || !run) return;
+  run.pauseRequested = true;
+  run.paused = true;
+  run.stopped = true;
+  run.stopReason = 'paused';
+  const reason = new Error('用户暂停 Step 2');
+  reason.code = 'USER_PAUSE';
+  run.stopError = reason;
+  if (!run.controller.signal.aborted) run.controller.abort(reason);
+  const active = aiState.daySplits.find(split => split.id === manager.activeDayId);
+  if (active) {
+    const progress = aiDayParseProgress(active);
+    if (active.parseState === 'parsing' || progress.done < progress.total || !active.parsed) {
+      active.parseState = 'partial';
+      active.partialParseMessage = '解析已暂停；成功项目已保存，继续时只处理剩余项目。';
+    }
+  }
+  aiUpdateParseManager({
+    state: 'paused',
+    stopReason: '用户暂停',
+  });
+  aiRenderExistingDayCards();
+  aiUpdateProgress();
+  aiSaveCacheToServer();
+}
+
+function aiSetDayParseExcluded(index, excluded) {
+  const split = aiState.daySplits[index];
+  if (!split) return;
+  const manager = aiEnsureParseManager();
+  if (manager.state === 'running' && manager.activeDayId === split.id) {
+    alert('请先暂停当前解析，再排除这个日期。');
+    return;
+  }
+  window.AIParseManager.setExcluded(split, excluded, aiFactsForSplit(split));
+  if (excluded) manager.queueDayIds = manager.queueDayIds.filter(id => id !== split.id);
+  split.partialParseMessage = excluded
+    ? '本日已移出“全部解析”队列，逐项检查点仍然保留。'
+    : '本日已恢复到解析队列。';
+  aiUpdateParseManager({});
+  aiRenderDayCard(index);
+  aiUpdateProgress();
+  aiSaveCacheToServer();
+}
+
+async function aiInvalidateDayTypeReviews() {
+  let changed = false;
+  aiState.daySplits.forEach(split => {
+    if (!split?.parsed || split.status === 'imported') return;
+    const facts = aiFactsForSplit(split);
+    window.AIParserCore.applyDayTypeClassification(
+      split.parsed,
+      facts,
+      { templateId: '', reason: '', sourceLines: [] },
+      typeof getDayTypeTemplates === 'function' ? getDayTypeTemplates() : []
+    );
+    if (split.pendingProposal?.parsed) {
+      window.AIParserCore.applyDayTypeClassification(
+        split.pendingProposal.parsed,
+        facts,
+        { templateId: '', reason: '', sourceLines: [] },
+        typeof getDayTypeTemplates === 'function' ? getDayTypeTemplates() : []
+      );
+      split.resumeAsProposal = true;
+    }
+    split.finalReviewState = 'pending';
+    split.finalReviewError = '';
+    split.reviewProposals = [];
+    const progress = aiDayParseProgress(split);
+    split.parseState = progress.done === progress.total ? 'partial' : split.parseState;
+    split.partialParseMessage = '日期类型模板已变化；逐项结果保持不变，继续时只重新执行最终复查。';
+    aiValidateDraftDay(split);
+    split.status = aiHasBlockingIssues(split) ? 'blocked' : 'review';
+    changed = true;
+  });
+  if (!changed) return;
+  aiRenderExistingDayCards();
+  aiUpdateImportBtn();
+  aiUpdateProgress();
+  await aiSaveCacheToServer();
+}
+
+function aiCheckpointLine(record) {
+  return Number(record?.line ?? record?.sourceLine);
+}
+
+function aiValidItemCheckpoint(record, sourceFacts) {
+  const line = aiCheckpointLine(record);
+  if (!Number.isFinite(line) || record?.parseStatus !== 'ok') return false;
+  if (!sourceFacts.nonEmptyLines.includes(line)) return false;
+  return String(record.text || '') === String(sourceFacts.lines[line - 1] || '').trim();
+}
+
+function aiCheckpointRecord(result, sourceFacts) {
+  const line = Number(result.line);
+  return {
+    ...result,
+    sourceLine: line,
+    text: String(sourceFacts.lines[line - 1] || '').trim(),
+    parseStatus: 'ok',
+    parserVersion: AI_PARSER_VERSION,
+  };
+}
+
+function aiFailedCheckpointRecord(line, sourceFacts, error) {
+  return {
+    line: Number(line),
+    sourceLine: Number(line),
+    text: String(sourceFacts.lines[Number(line) - 1] || '').trim(),
+    parseStatus: 'error',
+    parserVersion: AI_PARSER_VERSION,
+    error: error?.message || String(error || '解析失败'),
+    errorStatus: Number(error?.status) || null,
+  };
+}
+
+function aiStep2StopMessage(info) {
+  if (!info) return '';
+  const prefix = info.reason === 'rate-limit'
+    ? '接口返回 429（请求过多），Step 2 已立即停止，未进行重试。'
+    : `解析失败波次累计达到 ${info.failedWaves || 3} 次，Step 2 已停止。`;
+  const location = [info.date, info.lines?.length ? `本日相对行 ${info.lines.join('、')}` : '']
+    .filter(Boolean)
+    .join(' · ');
+  return `${prefix}${location ? `\n位置：${location}` : ''}${info.error ? `\n最后错误：${info.error}` : ''}`;
+}
+
+function aiStopStep2Run(run, split, scheduleResult) {
+  if (!run || run.stopped) return;
+  run.stopped = true;
+  run.stopReason = scheduleResult.stopReason;
+  run.stopError = scheduleResult.stopError || null;
+  if (!run.controller.signal.aborted) run.controller.abort(run.stopError);
+  const rejected = (scheduleResult.results || []).filter(entry =>
+    entry.status === 'rejected' && entry.error?.name !== 'AbortError'
+  );
+  aiState.step2StopInfo = {
+    reason: run.stopReason,
+    failedWaves: run.failedWaves,
+    date: split?.date || '',
+    lines: [...new Set(rejected.map(entry => Number(entry.item)).filter(Number.isFinite))],
+    error: run.stopError?.message || String(run.stopError || ''),
+    stoppedAt: new Date().toISOString(),
+  };
+  aiUpdateParseManager({
+    state: 'stopped',
+    activeDayId: split?.id || null,
+    stopReason: aiState.step2StopInfo.reason,
+  });
+  aiRenderStep2StopInfo();
+  if (!run.transactional) aiSaveCacheToServer();
+  if (!run.notified) {
+    run.notified = true;
+    setTimeout(() => alert(aiStep2StopMessage(aiState.step2StopInfo)), 0);
+  }
+}
+
+async function aiParseTargetLinesInWaves(index, split, sourceFacts, targetLines, options = {}) {
+  const scheduler = window.AIStep2Scheduler;
+  if (!scheduler) throw new Error('Step 2 调度模块未加载');
+  const run = options.run || aiCreateStep2Run();
+  const checkpointByLine = new Map();
+  (options.existingResults || split.itemParseResults || []).forEach(record => {
+    const line = aiCheckpointLine(record);
+    if (Number.isFinite(line)) checkpointByLine.set(line, record);
+  });
+
+  const scheduleResult = await scheduler.runAdjacentWaves({
+    items: targetLines,
+    concurrency: run.concurrency,
+    initialFailedWaves: run.failedWaves,
+    failureLimit: 3,
+    signal: run.controller.signal,
+    processItem: async (line, waveContext) => {
+      const lineResults = await aiRequestDayLineResults(
+        split,
+        sourceFacts,
+        [line],
+        { signal: waveContext.signal }
+      );
+      return lineResults[0];
+    },
+    onWaveComplete: async summary => {
+      run.failedWaves = summary.failedWaves;
+      summary.settled.forEach(entry => {
+        const line = Number(entry.item);
+        if (entry.status === 'fulfilled') {
+          checkpointByLine.set(line, aiCheckpointRecord(entry.value, sourceFacts));
+          if (options.progress) options.progress.doneItems += 1;
+        } else if (entry.error?.name !== 'AbortError') {
+          checkpointByLine.set(line, aiFailedCheckpointRecord(line, sourceFacts, entry.error));
+        }
+      });
+      split.itemParseResults = [...checkpointByLine.values()]
+        .sort((a, b) => aiCheckpointLine(a) - aiCheckpointLine(b));
+      const completed = split.itemParseResults.filter(record => record.parseStatus === 'ok').length;
+      split.partialParseMessage = `正在解析 ${split.date}：已完成 ${completed} / ${sourceFacts.nonEmptyLines.length} 项；失败波次 ${run.failedWaves} / 3。`;
+      split.parseState = 'parsing';
+      if (aiState._activeStep2Run === run) aiUpdateParseManager({});
+      aiRenderDayCard(index);
+      aiUpdateProgress();
+      if (options.checkpoint !== false) await aiSaveCacheToServer();
+    },
+  });
+
+  run.failedWaves = scheduleResult.failedWaves;
+  if (scheduleResult.stopped) {
+    if (scheduleResult.stopReason === 'aborted' && run.pauseRequested) {
+      run.paused = true;
+      run.stopped = true;
+      run.stopReason = 'paused';
+    } else {
+      aiStopStep2Run(run, split, scheduleResult);
+    }
+  }
+  return {
+    run,
+    scheduleResult,
+    checkpoints: [...checkpointByLine.values()].sort((a, b) => aiCheckpointLine(a) - aiCheckpointLine(b)),
+  };
 }
 
 async function aiParseSingleDayByUnits(index, options = {}) {
@@ -2004,46 +2128,100 @@ async function aiParseSingleDayByUnits(index, options = {}) {
   }
 
   aiRunSourcePreflight(aiState.daySplits);
-  const asProposal = Boolean(options.asProposal && split.parsed);
+  const asProposal = Boolean((options.asProposal || split.resumeAsProposal) && split.parsed);
   const previousParsed = split.parsed;
   const previousIssues = split.issues || [];
   const sourceFacts = window.AIParserCore.extractFacts(split.text);
+  const run = options.step2Run || aiCreateStep2Run();
+  const force = Boolean(options.force);
+  const reusableResults = force
+    ? []
+    : (split.itemParseResults || []).filter(record => aiValidItemCheckpoint(record, sourceFacts));
+  const reusableLines = new Set(reusableResults.map(aiCheckpointLine));
+  const pendingLines = sourceFacts.nonEmptyLines.filter(line => !reusableLines.has(line));
+  let assembledParsed = null;
+  let finalReviewFailure = null;
 
   split.parsingLocked = true;
   split.status = 'parsing';
+  split.parseState = 'parsing';
   split.error = null;
   split.pendingProposal = null;
   split.reviewProposals = [];
-  split.itemParseResults = [];
+  split.finalReviewState = 'pending';
+  split.finalReviewError = '';
+  split.resumeAsProposal = asProposal;
+  split.itemParseResults = reusableResults;
   split.sourceFacts = sourceFacts;
   split.issues = aiMergeIssueLists(previousIssues, split.sourceIssues || []);
-  split.partialParseMessage = `正在按日批量解析 ${sourceFacts.nonEmptyLines.length} 行原文…`;
+  split.partialParseMessage = `正在解析 ${split.date}：待处理 ${pendingLines.length} / ${sourceFacts.nonEmptyLines.length} 项，并发 ${run.concurrency}。`;
   aiRenderDayCard(index);
   if (options.scrollAnchor) aiRestoreScrollAnchor(options.scrollAnchor);
 
   try {
-    const lineResults = await aiRequestDayLineResults(split, sourceFacts);
-    split.itemParseResults = lineResults.map(result => ({
-      ...result,
-      sourceLine: Number(result.line),
-      text: sourceFacts.lines[Number(result.line) - 1]?.trim() || '',
-      parseStatus: 'ok',
-    }));
+    if (pendingLines.length) {
+      await aiParseTargetLinesInWaves(index, split, sourceFacts, pendingLines, {
+        run,
+        progress: options.progress,
+      });
+    }
+    if (run.stopped) throw run.stopError || new Error('Step 2 已停止');
+
+    const validCheckpoints = (split.itemParseResults || [])
+      .filter(record => aiValidItemCheckpoint(record, sourceFacts));
+    const lineResults = validCheckpoints.map(record => {
+      const { sourceLine, text, parseStatus, parserVersion, error, errorStatus, ...result } = record;
+      return result;
+    }).sort((a, b) => Number(a.line) - Number(b.line));
+    const completedLines = new Set(lineResults.map(result => Number(result.line)));
+    const missingLines = sourceFacts.nonEmptyLines.filter(line => !completedLines.has(line));
+    if (missingLines.length) {
+      const error = new Error(`本日仍有 ${missingLines.length} 项解析失败：相对行 ${missingLines.join('、')}。成功项目已保存，可点击继续解析。`);
+      error.code = 'PARTIAL_DAY_PARSE';
+      throw error;
+    }
+
     const parsed = aiPrepareV2Parsed(split, sourceFacts, lineResults);
+    assembledParsed = parsed;
     const validationSplit = { ...split, parsed, issues: [] };
     aiValidateDraftDay(validationSplit);
 
-    let reviewProposals = [];
+    let finalReviewResult = {
+      dayClassification: { templateId: '', reason: '', sourceLines: [] },
+      reviewProposals: [],
+    };
     try {
-      reviewProposals = await aiRunReviewProposal(split, parsed, validationSplit.issues || [], sourceFacts);
+      split.finalReviewState = 'reviewing';
+      split.partialParseMessage = '本日项目解析完成，正在进行 AI 最终复查；并发已临时降为 1。';
+      aiRenderDayCard(index);
+      aiUpdateProgress();
+      finalReviewResult = await aiRunFinalReviewStage(
+        split,
+        parsed,
+        validationSplit.issues || [],
+        sourceFacts,
+        { signal: run.controller.signal }
+      );
     } catch (error) {
-      reviewProposals = [{
-        type: 'source',
-        sourceLines: [],
-        severity: 'warning',
-        message: `AI 最终复查失败：${error.message || error}`,
-        confidence: null,
-      }];
+      finalReviewFailure = error;
+      if (!run.pauseRequested && error?.name !== 'AbortError' && aiIsRateLimitError(error)) {
+        aiStopStep2Run(run, split, {
+          stopped: true,
+          stopReason: 'rate-limit',
+          stopError: error,
+          failedWaves: run.failedWaves,
+          results: [],
+        });
+      }
+    }
+    const reviewProposals = finalReviewResult.reviewProposals || [];
+    if (!finalReviewFailure) {
+      window.AIParserCore.applyDayTypeClassification(
+        parsed,
+        sourceFacts,
+        finalReviewResult.dayClassification,
+        typeof getDayTypeTemplates === 'function' ? getDayTypeTemplates() : []
+      );
     }
 
     if (asProposal) {
@@ -2062,25 +2240,50 @@ async function aiParseSingleDayByUnits(index, options = {}) {
       split.parsed = parsed;
       split.pendingProposal = null;
       split.reviewProposals = reviewProposals;
-      split.partialParseMessage = '本日原文已完成批量逐行解析和整日 AI 复查。';
     }
 
-    split.error = null;
     split.sourceDirty = false;
     split.draftDirty = false;
     aiValidateDraftDay(split);
     split.status = aiHasBlockingIssues(split) ? 'blocked' : 'review';
-    if (options.progress) {
-      options.progress.doneItems += sourceFacts.nonEmptyLines.length;
-      options.progress.doneDays += 1;
+    if (finalReviewFailure) {
+      const paused = run.pauseRequested || finalReviewFailure?.name === 'AbortError';
+      split.finalReviewState = paused ? 'pending' : 'error';
+      split.finalReviewError = finalReviewFailure.message || String(finalReviewFailure);
+      split.error = paused ? null : `AI 最终复查失败：${split.finalReviewError}`;
+      split.parseState = 'partial';
+      split.partialParseMessage = paused
+        ? '最终复查已暂停；逐项结果和组装草稿均已保存，继续时只执行最终复查。'
+        : '逐项解析和草稿组装已经完成，但最终复查失败。点击“继续最终复查”即可补做，不会重新解析已有项目。';
+    } else {
+      split.finalReviewState = 'complete';
+      split.finalReviewError = '';
+      split.resumeAsProposal = false;
+      split.error = null;
+      split.parseState = 'complete';
+      split.partialParseMessage = asProposal
+        ? 'AI 已按日重新解析并完成最终复查。新结果尚未覆盖最终草稿，请审核下方提案。'
+        : '本日原文已完成批量逐行解析和整日 AI 复查。';
+      if (options.progress) {
+        options.progress.doneDays += 1;
+      }
     }
   } catch (error) {
-    split.parsed = previousParsed;
+    split.parsed = !asProposal && assembledParsed ? assembledParsed : previousParsed;
     split.issues = aiMergeIssueLists(previousIssues, split.sourceIssues || []);
-    if (previousParsed) aiValidateDraftDay(split);
-    split.status = previousParsed ? (aiHasBlockingIssues(split) ? 'blocked' : 'review') : 'error';
-    split.error = error.message;
-    if (options.progress) options.progress.doneDays += 1;
+    if (split.parsed) aiValidateDraftDay(split);
+    if (run.paused || run.pauseRequested || error?.code === 'USER_PAUSE') {
+      split.status = split.parsed ? (aiHasBlockingIssues(split) ? 'blocked' : 'review') : 'pending';
+      split.parseState = 'partial';
+      split.finalReviewState = assembledParsed ? 'pending' : split.finalReviewState;
+      split.error = null;
+      split.partialParseMessage = '解析已暂停；已完成项目保留，继续时只解析剩余项目。';
+    } else {
+      split.status = split.parsed ? (aiHasBlockingIssues(split) ? 'blocked' : 'review') : 'error';
+      split.error = error.message;
+      const progress = aiDayParseProgress(split);
+      split.parseState = progress.done > 0 ? 'partial' : 'error';
+    }
   }
 
   split.parsingLocked = false;
@@ -2093,328 +2296,46 @@ async function aiParseSingleDayByUnits(index, options = {}) {
 }
 
 async function aiParseSingleDay(index, options = {}) {
-  return aiParseSingleDayByUnits(index, options);
-}
-
-async function aiParseSingleDayLegacy(index, options = {}) {
   const split = aiState.daySplits[index];
-  if (!split) return;
-  if (split.parsingLocked || split.status === 'parsing') {
-    split.partialParseMessage = '正在解析，请稍候…';
-    aiRenderDayCard(index);
-    if (options.scrollAnchor) aiRestoreScrollAnchor(options.scrollAnchor);
-    return false;
-  }
-  aiRunSourcePreflight(aiState.daySplits);
-  const asProposal = Boolean(options.asProposal && split.parsed);
-  const previousParsed = split.parsed;
-  const previousIssues = split.issues || [];
-
-  split.parsingLocked = true;
-  split.status = 'parsing';
-  split.error = null;
-  split.issues = aiMergeIssueLists(previousIssues, split.sourceIssues || []);
-  aiRenderDayCard(index);
-  if (options.scrollAnchor) aiRestoreScrollAnchor(options.scrollAnchor);
-
-  const actHint = aiGetActHint();
-  const tmplHint = aiGetTemplateHint();
-
-  const sessTmplHint = aiGetSessionTemplateHint();
-
-  const sessTmplSection = sessTmplHint ? `
-## 【特殊时段模板库】解析 sessions 时优先匹配
-以下是用户预定义的特殊时段模板（如吃饭、活动、休息等非学习时段），**解析 sessions 时必须先在此处匹配**：
-${sessTmplHint}
-
-### 特殊时段模板匹配规则
-1. 对每个时段的描述文字，逐一与各特殊时段模板的关键词列表进行比对
-2. 如有任意一个关键词命中 → 该 session 标记为特殊时段：
-   - 添加 "type": "special"
-   - 添加 "name": "模板名称"（如"午饭"）
-   - nominalMinutes 和 actualMinutes 都设为 0（特殊时段没有名义/实际专注）
-   - restMinutes 设为 0
-   - 只保留 startTime 和 endTime（时钟时长由程序自动计算）
-3. 未命中任何特殊时段模板 → 按正常规则从文字中解析时长（普通学习时段）
-
-> **重要提示**：特殊时段（type=special）会被从「可支配时长」中扣除，从而影响时间利用率计算（利用率 = 实际专注 ÷ 可支配时长）。请务必准确识别真正无法专注的时段并标记 type=special，这样利用率才能真实反映可学习时间的利用情况。
-` : '';
-
-  const hasAnyCats = getLevel1Names().length > 0 || getLevel2Names().length > 0 || getLevel3Names().length > 0;
-
-  const tmplSection = tmplHint ? `
-## 【第一优先级】任务模板库（优先于活动分类）
-以下是用户预先定义的任务模板，**每条任务的 activityType 必须先在此处匹配**：
-${tmplHint}
-
-### 模板匹配规则
-1. 对任务描述的每个词/短语，逐一与各模板的关键词列表进行比对
-2. 如有任意一个关键词命中 → 直接使用该模板的 activityType（禁止自行推断）
-3. 多个模板同时命中 → 选择关键词匹配数最多的模板
-4. 模板库完全未命中 → 进入第二优先级（活动分类推断，见下方）
-5. 活动分类也无法匹配 → 将 activityType 设为空字符串 ""，并在该 task 上加字段 "needsClassification": true；note 字段只写有意义的补充描述，若无则留空 ""
-` : `
-## 【重要】无任务模板库
-当前用户没有定义任何任务模板。${!hasAnyCats ? '也没有定义任何活动分类。' : ''}
-**严格规则：**
-- 你**严禁**自行发明、推断、猜测或凭空创建任何 activityType 类别名称
-- ${hasAnyCats ? '只能使用下方【已有活动分类】中列出的类别名称' : '由于分类列表也为空，所有任务的 activityType 必须设为空字符串 ""'}
-- ${hasAnyCats ? '如果下方分类也无法匹配，则' : ''}每个任务都必须添加字段 "needsClassification": true
-- name 字段仍然必须从用户原文中提取一个简洁有意义的任务名称
-- note 字段只写有意义的补充描述，若无则留空 ""
-`;
-
-  const system = `你是学习追踪器的数据录入助手。将用户的一天文字记录解析为 JSON。
-
-## 目标 JSON 结构
-{
-  "wakeTime": "HH:MM",      // 起床时间（24小时制），无则 ""
-  "sleepTime": "HH:MM",     // 睡觉时间（凌晨如 00:30），无则 ""
-  "dayNote": "",             // 一整天的总结性备注/感受/计划（非特定时段或任务的备注），无则 ""
-  "sessions": [
-    {
-      "startTime": "HH:MM",
-      "endTime": "HH:MM",
-      "nominalMinutes": <整数>,   // 计划投入的学习时长（若时间块内有安排好的非学习事项如午饭，可小于时钟时长；无特殊情况则等于时钟时长）
-      "actualMinutes": <整数>,    // 实际专注 = 名义时长 - 摸鱼/分心时间
-      "restMinutes": <整数>,      // 该时段内的计划休息时长（如番茄钟间隔休息、课间休息等），默认 0
-      "note": "本时段专属备注，仅填写时段层面的元信息（如中断原因、专注方式、环境等），禁止写入科目/任务内容，那些属于 tasks；无则 \"\""
+  if (!split) return false;
+  const ownsRun = !options.step2Run;
+  let run = options.step2Run;
+  if (ownsRun) {
+    if (aiEnsureParseManager().state === 'running') {
+      alert('已有 Step 2 解析正在运行，请先暂停。');
+      return false;
     }
-  ],
-  "tasks": [
-    {
-      "name": "任务名称",                    // 见下方「任务名称生成规则」
-      "activityType": "一级 > 二级 > 三级",  // 按下方优先级规则确定，必须严格使用 "一级 > 二级 > 三级" 格式
-      "minutes": <整数>,                     // 该科目的实际学习分钟
-      "quantity": <数字|null>,               // 完成的数量（如刷了30道题、读了20页），无则 null
-      "quantityUnit": "单位",               // 数量的单位（如"道题"、"页"、"单词"），无则 ""
-      "note": "具体内容"
-    }
-  ]
-}
-
-## 解析规则
-1. sessions = 有明确起止时间的学习块；tasks = 按科目/类型拆分的内容明细
-2. 一个 session 可对应多个 tasks（同一时段学多科）
-3. **时间分解公式**：时钟时长 = 实际专注(actualMinutes) + 休息时间(restMinutes) + 分心时间（自动计算，不用输出）。三者互不重叠。
-4. **摸鱼/分心**：如"中间摸了20分钟"→ 从 actualMinutes 扣除（actualMinutes 减少，restMinutes 不变）；若时间块内有安排好的非学习事项（如午饭）→ nominalMinutes 可相应减少
-5. **休息时间识别与关联规则（重要）**：
-   每个专注时段(session)都有一个 restMinutes 字段，代表该时段内的计划休息时长。识别规则：
-   - 用户可能在时段描述后面写休息信息："9:00-11:30 刷题，休息了15分钟" → 该session的restMinutes=15
-   - 用户可能在两个时段之间写休息："9:00-11:00 数学" → "休息30分钟" → "11:30-13:00 英语"，此时这30分钟休息应归入前一个时段(数学)的restMinutes
-   - "番茄钟休息"、"课间休息"、"中间休息了X分钟"等，都应计入对应时段的restMinutes
-   - "做了4个番茄钟(25+5)" → restMinutes=4×5=20（需要推算）
-   - 如果休息时间无法明确归属某个时段，归入紧邻的前一个时段
-   - 若未提及任何休息则 restMinutes=0
-   - 注意与"特殊时段"区分："12:00-12:30 午休" / "14:00-14:20 休息" → 这是独立的非学习时段，应标记为特殊时段(type=special)，restMinutes=0
-   - actualMinutes 的计算中，休息时间不从actualMinutes中扣除——它是独立字段。分心时间才从actualMinutes中扣除
-   - 专注效率的计算公式是：actualMinutes ÷ (时钟时长 - restMinutes)，所以准确识别restMinutes非常重要
-6. **通用归属原则（重要）**：在用户的文字记录中，夹在两个专注时段或任务记录之间的附属信息（如休息描述、总结、感想、补充说明等），通常属于它上方/前面的那个时段或任务。这是普遍规则，除非上下文明确表明该信息属于后面的时段
-7. **actualMinutes 计算**：actualMinutes = 时钟时长 − restMinutes − 分心时长。注意不要把休息时间重复扣减——休息时间只计入 restMinutes，不要同时从 actualMinutes 中再扣一次
-8. 无明确时段信息但有科目和时长的，只放 tasks，不放 sessions
-9. 只输出 JSON，无代码块标记，无解释文字
-
-## 【重要】时间格式转换规则（12小时制 ↔ 24小时制）
-所有输出时间必须使用24小时制（HH:MM）。用户输入可能使用12小时制，你必须根据上下文正确转换：
-
-1. **睡觉时间 (sleepTime)**：
-   - 睡觉时间通常在晚上或凌晨，不可能是中午
-   - "12:xx" 在没有明确标注 "PM"/"下午"/"中午" 的情况下，**必须视为凌晨 00:xx**
-   - 例如 "睡觉 12:30" → sleepTime: "00:30"
-   - 例如 "睡觉 1:00" → sleepTime: "01:00"（凌晨1点）
-   - "23:00"、"23:30" 等已经是24小时制，直接使用
-
-2. **起床时间 (wakeTime)**：
-   - 起床时间通常在早上或上午
-   - "12:xx" 在没有明确标注 "AM"/"凌晨" 的情况下，视为中午 12:xx
-   - 例如 "起床 7:30" → wakeTime: "07:30"
-
-3. **时段起止时间 (sessions)**：
-   - 根据相邻时间和上下文推断AM/PM
-   - 晚上时段中出现 "12:xx" 应视为凌晨 "00:xx"，例如 "21:00-12:30" → startTime: "21:00", endTime: "00:30"
-   - 下午时段中出现 "1:00" 应视为 "13:00"（根据上下文判断）
-
-4. **明确标注直接处理**：
-   - "AM"/"凌晨"/"早上" → 00-11时
-   - "PM"/"下午"/"晚上" → 12-23时
-   - "午夜"/"凌晨0点"/"半夜12点" → 00:00
-
-## 【重要】数量与单位识别规则
-用户的文字记录中经常会包含完成的数量信息，你必须仔细识别并提取：
-1. 识别各种数量描述：如"刷了30道题"、"背了200个单词"、"读了15页"、"写了3篇作文"、"做了2套卷子"等
-2. 提取 quantity（数字）和 quantityUnit（单位，如"道题"、"个单词"、"页"、"篇"、"套"等）
-3. **模板单位优先**：如果该任务命中了模板，且模板定义了 quantityUnit，则必须使用模板的 quantityUnit（即使用户文字中的单位表述略有不同）
-4. 如果用户文字中没有提到任何数量信息，quantity 设为 null，quantityUnit 设为 ""
-5. 数量信息通常紧跟在任务描述中，如"9:00-11:00 刷题30道"、"背单词200个"、"阅读20页"
-
-## 【重要】备注识别规则
-用户的文字记录中，不属于日期、时间、科目、时长等结构化信息的"自言自语"、吐槽、感受、补充说明等文字都是**备注**，必须正确归类到对应字段：
-
-1. **任务备注（task.note）**：紧跟在某个任务/科目记录下方的非结构化文字（如吐槽、补充说明、心得），属于该任务的备注
-2. **时段备注（session.note）**：紧跟在某段专注时段（有起止时间的时间块）下方的非结构化文字（如吐槽、中断原因、专注感受），属于该时段的备注。注意：时段备注只写时段层面的元信息，不写科目/任务内容
-3. **全天备注（dayNote）**：在"睡觉时间"那一行下方出现的自言自语、总结性文字、对一整天的回顾/感受/吐槽，属于整天的备注，应放入 dayNote 字段。如果文末（通常在睡觉时间之后）有总结性的段落，也归入 dayNote
-
-请仔细根据文字出现的**位置**来判断它属于哪种备注，不要遗漏任何非结构化的文字内容。
-
-## 任务名称生成规则（name 字段）
-- 如果命中了模板且该模板有名称（名称非空）→ 直接使用模板的名称
-- 如果命中了模板但该模板无名称 → 从用户原文中提取/总结一个简洁的任务名称（如"刷LeetCode"、"英语精读"）
-- 如果未命中任何模板 → 从用户原文中提取/总结一个简洁的任务名称
-- name 字段**不能为空**，必须为每个任务生成一个有意义的名称
-${sessTmplSection}
-${tmplSection}
-## 【第二优先级】已有活动分类（模板未命中时使用）
-${actHint}
-
-## 【必须输出】审核辅助字段
-本次输出不仅用于导入，还要供用户逐项审核。请遵守：
-下方原文每行都带有 [L数字] 前缀，所有相对行号字段都以该数字为准。
-1. 每条 session 和 task 都添加 sourceLines 数组，写出它对应于本日原文中的相对行号（从 1 开始）
-2. 每条 session 和 task 都添加 aiMeta：
-   {"confidence":0到1之间的小数,"reason":"简短依据","matchMode":"keyword-exact|template-semantic|category-semantic|unclassified"}
-3. task 若命中已有任务模板，添加 templateId；否则 templateId 设为 ""
-4. task 尽量提取 completionStatus（completed|partial|review|unknown）、progressText、errorCount
-5. 输出 aiIssues 数组。只记录会影响导入正确性的硬错误，例如明显笔误、无法安全解析、时间字段冲突、缺少必要字段：
-   {"level":"error|warning|info","code":"简短代码","message":"问题说明","sourceLines":[相对行号],"original":"原文字段","suggestion":"给用户看的建议文字或空字符串","sourceReplacement":"只有确认可安全替换原文字段时才填写精确替换值，否则为空字符串","targetPath":"可以安全自动写入时填写 parsed 开头的字段路径，否则为空字符串","suggestedValue":"用户接受建议后应写入 targetPath 的值，没有安全写入路径时留空","confidence":0到1}
-   AI 只允许给出建议，无权替用户修改疑似错误。存在硬错误时，parsed 中不得悄悄写入建议值，必须等待用户手动修改。
-   禁止为普通审计噪音输出 aiIssues：模板数量单位与原文单位不同、普通任务未添加 linkedSessionId、普通任务总时长与 session 实际专注总时长不完全一致、任务和时段无法一一对应。此类不确定性只写入对应 aiMeta.reason，不进入 aiIssues。
-6. 输出 unassignedLines 数组。任何无法归属的非空原文行必须放入：
-   {"line":相对行号,"text":"原文","reason":"无法归属原因"}
-7. 输出 consumedLines 数组，列出已经被日期、起床、睡觉、备注、session、task 或 unassignedLines 覆盖的全部非空相对行号。必须逐行核对，不允许静默漏行
-8. 识别特殊学习时段：如果长时间外出、回学校或上课中明确包含零散学习，session.type 设为 "special-study"，保留外层 startTime/endTime，并将汇总学习时长写入 actualMinutes。不得编造内部片段的起止时间
-9. 特殊学习时段中明确列出的学习项目仍需拆为 tasks，并添加 linkedSessionId 指向该 session
-10. 普通非学习时段 type 仍为 "special"
-
-## 当天日期（供参考）
-${split.date}
-
-## 本日原文在源文件中的行号范围
-第 ${split.startLine || '?'} 行到第 ${split.endLine || '?'} 行` + aiGetExtraParsePrompt();
-
-  try {
-    const raw = await aiCall([{ role: 'user', content: aiNumberSplitLines(split.text) }], system, 2048, 'parse');
-    let cleaned = raw.replace(/```json|```/g, '').trim();
-    const objStart = cleaned.indexOf('{');
-    const objEnd = cleaned.lastIndexOf('}');
-    if (objStart !== -1 && objEnd > objStart) {
-      cleaned = cleaned.slice(objStart, objEnd + 1);
-    } else {
-      throw new Error('返回内容不完整，未找到 JSON 对象。末尾：' + raw.slice(-100));
-    }
-    let parsed;
-    try { parsed = JSON.parse(cleaned); }
-    catch (e) { throw new Error('JSON 解析失败：' + e.message + '\n…末尾内容：' + raw.slice(-200)); }
-
-    parsed.sessions = parsed.sessions || [];
-    parsed.tasks = parsed.tasks || [];
-    parsed.aiIssues = parsed.aiIssues || [];
-    parsed.unassignedLines = parsed.unassignedLines || [];
-    parsed.consumedLines = parsed.consumedLines || [];
-
-    // 补充 ID
-    parsed.sessions.forEach(s => { if (!s.id) s.id = uid(); });
-    parsed.tasks.forEach(t => { if (!t.id) t.id = uid(); });
-
-    // 后处理：数量单位——模板单位优先 + 自动计算速度
-    (parsed.tasks || []).forEach(t => {
-      // 模板单位优先：如果命中模板且模板有 quantityUnit，覆盖 AI 返回的单位
-      const _tmpls = (typeof getTaskTemplates === 'function') ? getTaskTemplates() : [];
-      if (t.activityType && _tmpls.length) {
-        const matched = _tmpls.find(tm => tm.activityType === t.activityType);
-        if (matched && matched.quantityUnit) {
-          t.quantityUnit = matched.quantityUnit;
-        }
-      }
-      // 自动计算速度：rate = quantity / minutes，即每分钟完成数量
-      if (t.quantity && t.minutes && t.minutes > 0) {
-        t.rate = +(t.quantity / t.minutes).toFixed(2);
-      } else {
-        t.rate = null;
-      }
+    aiState.step2StopInfo = null;
+    aiRenderStep2StopInfo();
+    if (split.parseExcluded) window.AIParseManager.setExcluded(split, false, aiFactsForSplit(split));
+    run = aiCreateStep2Run();
+    aiState._activeStep2Run = run;
+    aiUpdateParseManager({
+      state: 'running',
+      mode: 'single',
+      activeDayId: split.id,
+      queueDayIds: [split.id],
+      concurrency: run.concurrency,
+      startedAt: new Date().toISOString(),
+      stopReason: '',
     });
-
-    // 后处理：兼容旧格式——若 AI 仍在 note 末尾追加了 " [待分类]"，转换为布尔标志
-    (parsed.tasks || []).forEach(t => {
-      if (t.note && t.note.endsWith(' [待分类]')) {
-        t.note = t.note.slice(0, -6).trim();
-        t.needsClassification = true;
-      }
-    });
-
-    // 后处理：验证 activityType 合法性——若无模板且无分类，强制清空AI可能伪造的类别
-    const _allCats = [...getLevel1Names(), ...getLevel2Names(), ...getLevel3Names()];
-    const _allTemplates = (typeof getTaskTemplates === 'function') ? getTaskTemplates() : [];
-    const _validTypes = new Set([
-      ..._allTemplates.map(t => t.activityType).filter(Boolean),
-      ..._allCats,
-    ]);
-    if (_validTypes.size === 0) {
-      // 无任何合法类别：所有 activityType 必须清空
-      (parsed.tasks || []).forEach(t => {
-        if (t.activityType) {
-          console.warn(`[AI后处理] 清除伪造类别: "${t.activityType}" (任务: ${t.name})`);
-          t.activityType = '';
-          t.needsClassification = true;
-        }
-      });
-    } else {
-      // 有合法类别：检查每个 activityType 是否存在于合法集合中
-      (parsed.tasks || []).forEach(t => {
-        if (t.activityType && !_validTypes.has(t.activityType)) {
-          // 尝试部分匹配（如 AI 返回 "数学" 但合法的是 "学习 > 数学 > 刷题"）
-          const found = [..._validTypes].find(v => v.includes(t.activityType) || t.activityType.includes(v));
-          if (found) {
-            t.activityType = found;
-          } else {
-            console.warn(`[AI后处理] 清除无效类别: "${t.activityType}" (任务: ${t.name})`);
-            t.activityType = '';
-            t.needsClassification = true;
-          }
-        }
-      });
-    }
-
-    aiResolveParsedTaskTemplates(parsed);
-
-    if (asProposal) {
-      const proposalSplit = { ...split, parsed, issues: [] };
-      aiValidateDraftDay(proposalSplit);
-      split.parsed = previousParsed;
-      split.pendingProposal = {
-        parsed,
-        issues: proposalSplit.issues || [],
-        differences: aiBuildProposalDifferences(previousParsed, parsed),
-        createdAt: new Date().toISOString(),
-      };
-    } else {
-      split.parsed = parsed;
-      split.pendingProposal = null;
-    }
-    split.error = null;
-    split.sourceDirty = false;
-    split.partialParseMessage = asProposal
-      ? 'AI 已重新解析本日原文。新结果尚未覆盖最终草稿，请审核下方提案。'
-      : '本日原文已完成解析；请对照原文审核最终草稿。';
-    split.draftDirty = false;
-    aiValidateDraftDay(split);
-    split.status = aiHasBlockingIssues(split) ? 'blocked' : 'review';
-
-  } catch (e) {
-    split.parsed = previousParsed;
-    split.issues = aiMergeIssueLists(previousIssues, split.sourceIssues || []);
-    if (previousParsed) aiValidateDraftDay(split);
-    split.status = previousParsed ? (aiHasBlockingIssues(split) ? 'blocked' : 'review') : 'error';
-    split.error = e.message;
+    aiUpdateProgress();
+    options = { ...options, step2Run: run };
+    await aiSaveCacheToServer();
   }
-
-  split.parsingLocked = false;
-  aiRenderDayCard(index);
-  if (options.scrollAnchor) aiRestoreScrollAnchor(options.scrollAnchor);
-  aiUpdateImportBtn();
-  aiUpdateProgress();
-  // 每次解析完暂存到后端
-  aiSaveCacheToServer();
-  return split.status !== 'error';
+  aiSetNetworkConcurrency(run?.concurrency || aiGetParseConcurrency());
+  const result = await aiParseSingleDayByUnits(index, options);
+  if (ownsRun) {
+    aiState._activeStep2Run = null;
+    if (run.paused) {
+      aiUpdateParseManager({ state: 'paused', activeDayId: split.id, stopReason: '用户暂停' });
+    } else if (!run.stopped) {
+      aiUpdateParseManager({ state: 'idle', activeDayId: null, stopReason: '' });
+    }
+    aiUpdateProgress();
+    await aiSaveCacheToServer();
+  }
+  return result;
 }
 
 async function aiStep2ParseAll() {
@@ -2422,58 +2343,398 @@ async function aiStep2ParseAll() {
   const btn = document.getElementById('ai-btn-parse-all');
   const concurrency = aiGetParseConcurrency();
   aiSetNetworkConcurrency(concurrency);
-  btn.disabled = true;
-  btn.textContent = `⏳ 按日批量解析中…并发 ${concurrency}`;
+  const manager = aiEnsureParseManager();
+  if (manager.state === 'running') return;
+  aiState.step2StopInfo = null;
+  aiRenderStep2StopInfo();
+  const resumeQueue = ['paused', 'stopped'].includes(manager.state) &&
+    manager.mode === 'all' &&
+    manager.queueDayIds.length;
+  const eligible = aiState.daySplits.filter(split =>
+    window.AIParseManager.eligibleForQueue(split, aiFactsForSplit(split))
+  );
+  const queueIds = resumeQueue
+    ? manager.queueDayIds.filter(id => eligible.some(split => split.id === id))
+    : eligible.map(split => split.id);
+  const pending = queueIds.map(id => {
+    const i = aiState.daySplits.findIndex(split => split.id === id);
+    return { s: aiState.daySplits[i], i };
+  }).filter(entry => entry.i >= 0 && entry.s);
 
-  const pending = aiState.daySplits
-    .map((s, i) => ({ s, i }))
-    .filter(({ s }) => s.status === 'pending' || s.status === 'error');
-  const progress = {
-    doneItems: 0,
-    totalItems: pending.reduce((sum, { s }) => sum + aiBuildLineParseUnits(s).length, 0),
-    doneDays: 0,
-    totalDays: pending.length,
-  };
-  aiState.itemParseProgress = progress;
-
-  // 显示进度条
-  const pw = document.getElementById('ai-progress-wrap');
-  if (pw) pw.style.display = 'block';
-  aiUpdateProgress();
-
-  let nextIndex = 0;
-  const workerCount = Math.min(concurrency, pending.length);
-  const workers = Array.from({ length: workerCount }, async () => {
-    while (nextIndex < pending.length) {
-      const { i } = pending[nextIndex++];
-      await aiParseSingleDay(i, { progress });
+  if (!pending.length) {
+    aiUpdateParseManager({
+      state: 'idle',
+      mode: 'all',
+      activeDayId: null,
+      queueDayIds: [],
+      stopReason: '没有待解析、部分解析或失败的日期',
+    });
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '🤖 Step 2：全部解析';
     }
-  });
-  await Promise.all(workers);
+    aiUpdateProgress();
+    await aiSaveCacheToServer();
+    return;
+  }
 
-  aiState.itemParseProgress = null;
+  const run = aiCreateStep2Run(concurrency);
+  aiState._activeStep2Run = run;
+  aiUpdateParseManager({
+    state: 'running',
+    mode: 'all',
+    activeDayId: null,
+    queueDayIds: queueIds,
+    concurrency,
+    startedAt: new Date().toISOString(),
+    stopReason: '',
+  });
   aiUpdateProgress();
-  btn.disabled = false;
-  btn.textContent = '🤖 Step 2：全部解析';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = `⏳ 逐日解析中…本日并发 ${concurrency}`;
+  }
+
+  for (const { s, i } of pending) {
+    if (run.stopped) break;
+    s.parseState = 'parsing';
+    aiUpdateParseManager({ activeDayId: s.id });
+    await aiSaveCacheToServer();
+    const progress = aiDayParseProgress(s);
+    if (s.parsed && progress.done === progress.total && s.finalReviewState !== 'complete') {
+      await aiRetryFinalReview(i, { step2Run: run });
+    } else {
+      await aiParseSingleDay(i, { step2Run: run });
+    }
+    if (!run.stopped) aiUpdateParseManager({ activeDayId: null });
+  }
+
+  aiState._activeStep2Run = null;
+  if (run.paused) {
+    aiUpdateParseManager({ state: 'paused', stopReason: '用户暂停' });
+  } else if (!run.stopped) {
+    aiUpdateParseManager({ state: 'idle', activeDayId: null, stopReason: '' });
+  }
+  aiUpdateProgress();
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = run.stopped ? '▶ 继续 Step 2 解析' : '🤖 Step 2：全部解析';
+  }
+  await aiSaveCacheToServer();
 }
 
 function aiUpdateProgress() {
-  const total = aiState.daySplits.length;
-  const done = aiState.daySplits.filter(s => ['review', 'blocked', 'confirmed', 'imported'].includes(s.status)).length;
-  const itemProgress = aiState.itemParseProgress;
-  const pct = itemProgress && itemProgress.totalItems
-    ? Math.round(itemProgress.doneItems / itemProgress.totalItems * 100)
-    : (total ? Math.round(done / total * 100) : 0);
+  const snapshot = window.AIParseManager.buildSnapshot(
+    aiState.daySplits,
+    aiEnsureParseManager(),
+    aiFactsForSplit
+  );
   const bar = document.getElementById('ai-progress-bar');
   const label = document.getElementById('ai-progress-label');
   const pctEl = document.getElementById('ai-progress-pct');
-  if (bar) bar.style.width = pct + '%';
-  if (label) {
-    label.textContent = itemProgress
-      ? `已解析 ${itemProgress.doneItems} / ${itemProgress.totalItems} 项 · 已完成 ${itemProgress.doneDays} / ${itemProgress.totalDays} 天`
-      : `已解析 ${done} / ${total} 天 · 已确认 ${aiState.daySplits.filter(s => s.status === 'confirmed' || s.status === 'imported').length} 天`;
+  const wrap = document.getElementById('ai-progress-wrap');
+  if (wrap) wrap.style.display = aiState.daySplits.length ? 'block' : 'none';
+  if (bar) bar.style.width = snapshot.percent + '%';
+  if (label) label.textContent = `项目 ${snapshot.done} / ${snapshot.total} · 最终复查 ${snapshot.reviewDone} / ${snapshot.reviewTotal}`;
+  if (pctEl) pctEl.textContent = snapshot.percent + '%';
+  aiRenderParseManager();
+  aiRenderStep2StopInfo();
+}
+
+async function aiRetryFinalReview(index, options = {}) {
+  const split = aiState.daySplits[index];
+  const ownsRun = !options.step2Run;
+  if (!split?.parsed || split.parsingLocked || (ownsRun && aiEnsureParseManager().state === 'running')) return false;
+  const asProposal = Boolean(split.resumeAsProposal && split.pendingProposal?.parsed);
+  const parsed = asProposal ? split.pendingProposal.parsed : split.parsed;
+  const sourceFacts = window.AIParserCore.extractFacts(split.text);
+  const run = options.step2Run || aiCreateStep2Run();
+
+  if (ownsRun) {
+    aiState.step2StopInfo = null;
+    aiState._activeStep2Run = run;
+    aiUpdateParseManager({
+      state: 'running',
+      mode: 'single',
+      activeDayId: split.id,
+      queueDayIds: [split.id],
+      concurrency: run.concurrency,
+      startedAt: new Date().toISOString(),
+      stopReason: '',
+    });
   }
-  if (pctEl) pctEl.textContent = pct + '%';
+  split.parsingLocked = true;
+  split.status = 'parsing';
+  split.parseState = 'parsing';
+  split.finalReviewState = 'reviewing';
+  split.finalReviewError = '';
+  split.error = null;
+  split.partialParseMessage = '正在补做 AI 最终复查；逐项结果不会重新解析，并发临时降为 1。';
+  aiRenderDayCard(index);
+  aiUpdateProgress();
+
+  try {
+    const validationSplit = { ...split, parsed, issues: [] };
+    aiValidateDraftDay(validationSplit);
+    const result = await aiRunFinalReviewStage(
+      split,
+      parsed,
+      validationSplit.issues || [],
+      sourceFacts,
+      { signal: run.controller.signal }
+    );
+    window.AIParserCore.applyDayTypeClassification(
+      parsed,
+      sourceFacts,
+      result.dayClassification,
+      typeof getDayTypeTemplates === 'function' ? getDayTypeTemplates() : []
+    );
+    if (asProposal && split.parsed && split.parsed !== parsed) {
+      window.AIParserCore.applyDayTypeClassification(
+        split.parsed,
+        sourceFacts,
+        result.dayClassification,
+        typeof getDayTypeTemplates === 'function' ? getDayTypeTemplates() : []
+      );
+    }
+
+    if (asProposal) {
+      const proposalSplit = {
+        ...split,
+        parsed,
+        issues: [],
+        reviewProposals: result.reviewProposals || [],
+        sourceFacts,
+      };
+      aiValidateDraftDay(proposalSplit);
+      split.pendingProposal = {
+        ...split.pendingProposal,
+        parsed,
+        issues: proposalSplit.issues || [],
+        differences: aiBuildProposalDifferences(split.parsed, parsed),
+        createdAt: new Date().toISOString(),
+      };
+      split.reviewProposals = [];
+    } else {
+      split.reviewProposals = result.reviewProposals || [];
+    }
+
+    split.sourceFacts = sourceFacts;
+    split.finalReviewState = 'complete';
+    split.finalReviewError = '';
+    split.resumeAsProposal = false;
+    split.parseState = 'complete';
+    split.partialParseMessage = asProposal
+      ? '最终复查已补完；AI 重解析结果仍作为提案等待审核。'
+      : '最终复查已补完；日期类型与复查建议已更新。';
+    aiValidateDraftDay(split);
+    split.status = aiHasBlockingIssues(split) ? 'blocked' : 'review';
+  } catch (error) {
+    const paused = run.pauseRequested || error?.name === 'AbortError';
+    if (!paused && aiIsRateLimitError(error)) {
+      aiStopStep2Run(run, split, {
+        stopped: true,
+        stopReason: 'rate-limit',
+        stopError: error,
+        failedWaves: run.failedWaves,
+        results: [],
+      });
+    }
+    split.finalReviewState = paused ? 'pending' : 'error';
+    split.finalReviewError = error.message || String(error);
+    split.parseState = 'partial';
+    split.error = paused ? null : `AI 最终复查失败：${split.finalReviewError}`;
+    split.partialParseMessage = paused
+      ? '最终复查已暂停；继续时仍只补最终复查。'
+      : '最终复查失败；逐项结果与现有草稿均已保留，可再次点击“继续最终复查”。';
+    aiValidateDraftDay(split);
+    split.status = aiHasBlockingIssues(split) ? 'blocked' : 'review';
+  } finally {
+    split.parsingLocked = false;
+    if (ownsRun) {
+      aiState._activeStep2Run = null;
+      if (run.paused) {
+        aiUpdateParseManager({ state: 'paused', activeDayId: split.id, stopReason: '用户暂停' });
+      } else if (!run.stopped) {
+        aiUpdateParseManager({ state: 'idle', activeDayId: null, stopReason: '' });
+      }
+    }
+    aiRenderDayCard(index);
+    aiUpdateImportBtn();
+    aiUpdateProgress();
+    await aiSaveCacheToServer();
+  }
+  return split.finalReviewState === 'complete';
+}
+
+function aiContinueDayParse(index) {
+  const split = aiState.daySplits[index];
+  if (!split) return;
+  const progress = aiDayParseProgress(split);
+  if (split.parsed && progress.done === progress.total && split.finalReviewState !== 'complete') {
+    aiRetryFinalReview(index);
+    return;
+  }
+  aiParseSingleDay(index, { asProposal: Boolean(split.resumeAsProposal && split.parsed) });
+}
+
+function aiContinueParseManager() {
+  const manager = aiEnsureParseManager();
+  if (manager.mode === 'single' && manager.activeDayId) {
+    const index = aiState.daySplits.findIndex(split => split.id === manager.activeDayId);
+    if (index >= 0) {
+      aiContinueDayParse(index);
+      return;
+    }
+  }
+  aiStep2ParseAll();
+}
+
+function aiParseStateMeta(day) {
+  const finalReviewSuffix = day.done === day.total && day.finalReviewState !== 'complete'
+    ? day.finalReviewState === 'error'
+      ? ' · 最终复查失败'
+      : ' · 等待最终复查'
+    : '';
+  const reviewSuffix = day.state === 'complete'
+    ? day.reviewStatus === 'blocked'
+      ? ' · 存在错误'
+      : ['review', 'confirmed', 'imported'].includes(day.reviewStatus)
+        ? ' · 待审核/已确认'
+        : ''
+    : '';
+  const values = {
+    pending: { label: '待解析', symbol: '○' },
+    parsing: { label: '解析中', symbol: '▶' },
+    partial: { label: `部分解析${finalReviewSuffix}`, symbol: '◐' },
+    complete: { label: `解析完成${reviewSuffix}`, symbol: '✓' },
+    excluded: { label: '已排除', symbol: '⊘' },
+    error: { label: '解析失败', symbol: '!' },
+  };
+  return values[day.state] || values.pending;
+}
+
+function aiParseManagerDayActions(day, index, manager) {
+  if (day.state === 'parsing') {
+    return `<button class="btn btn-ghost btn-sm" onclick="aiPauseStep2()" title="暂停整个解析批次">Ⅱ</button>`;
+  }
+  if (day.state === 'excluded') {
+    return `<button class="btn btn-ghost btn-sm" onclick="aiSetDayParseExcluded(${index},false)" title="恢复到解析队列">↩</button>`;
+  }
+  if (['pending', 'partial', 'error'].includes(day.state)) {
+    const missingItems = Math.max(0, day.total - day.done);
+    const label = missingItems > 0 && (day.done > 0 || day.failed > 0)
+      ? `继续补全 ${missingItems} 项`
+      : missingItems === 0 && day.finalReviewState !== 'complete'
+        ? '继续最终复查'
+        : '解析';
+    const disabled = manager.state === 'running' ? 'disabled title="已有解析正在运行"' : '';
+    return `<button class="btn btn-primary btn-sm" onclick="aiContinueDayParse(${index})" ${disabled}>${label}</button>
+      <button class="btn btn-ghost btn-sm" onclick="aiSetDayParseExcluded(${index},true)" ${disabled} title="移出全部解析队列">⊘</button>`;
+  }
+  return '';
+}
+
+function aiRenderParseManager() {
+  const el = document.getElementById('ai-parse-manager');
+  if (!el || !window.AIParseManager) return;
+  if (!aiState.daySplits.length) {
+    el.innerHTML = '';
+    return;
+  }
+  const snapshot = window.AIParseManager.buildSnapshot(
+    aiState.daySplits,
+    aiEnsureParseManager(),
+    aiFactsForSplit
+  );
+  const manager = snapshot.manager;
+  const parseAllBtn = document.getElementById('ai-btn-parse-all');
+  if (parseAllBtn) {
+    parseAllBtn.disabled = manager.state === 'running';
+    parseAllBtn.textContent = manager.state === 'running'
+      ? '⏳ Step 2 解析中'
+      : ['paused', 'stopped'].includes(manager.state) && manager.mode === 'all'
+        ? '▶ 继续 Step 2 解析'
+        : '🤖 Step 2：全部解析';
+  }
+  snapshot.days.forEach(day => {
+    const split = aiState.daySplits.find(item => item.id === day.id);
+    if (split && split.parseState !== 'parsing') split.parseState = day.state;
+  });
+  const managerState = {
+    idle: '空闲',
+    running: '解析中',
+    paused: '已暂停',
+    stopped: '已停止',
+  }[manager.state] || '空闲';
+  const mode = manager.mode === 'single' ? '单日解析' : '全部解析';
+  const groups = [
+    ['parsing', '解析中'],
+    ['partial', '部分解析'],
+    ['pending', '待解析'],
+    ['error', '解析失败'],
+    ['complete', '解析完成'],
+    ['excluded', '已排除'],
+  ];
+  const groupHtml = groups.map(([state, title]) => {
+    const days = snapshot.days.filter(day => day.state === state);
+    if (!days.length) return '';
+    return `<section class="ai-parse-manager-group ai-parse-manager-${state}">
+      <div class="ai-parse-manager-group-title">${title}<span>${days.length}</span></div>
+      ${days.map(day => {
+        const index = aiState.daySplits.findIndex(split => split.id === day.id);
+        const meta = aiParseStateMeta(day);
+        return `<div class="ai-parse-manager-row">
+          <span class="ai-parse-manager-symbol">${meta.symbol}</span>
+          <b>${escHtml(day.date || '未定日期')}</b>
+          <span class="ai-parse-manager-state">${escHtml(meta.label)}</span>
+          <div class="ai-parse-manager-day-progress" aria-label="${day.done}/${day.total}">
+            <span style="width:${day.percent}%"></span>
+          </div>
+          <span class="ai-parse-manager-count">${day.done}/${day.total}${day.failed ? ` · 失败${day.failed}` : ''}</span>
+          <div class="ai-parse-manager-actions">${aiParseManagerDayActions(day, index, manager)}</div>
+        </div>`;
+      }).join('')}
+    </section>`;
+  }).join('');
+  const control = manager.state === 'running'
+    ? '<button class="btn btn-ghost btn-sm" onclick="aiPauseStep2()">Ⅱ 暂停</button>'
+    : ['paused', 'stopped'].includes(manager.state)
+      ? '<button class="btn btn-primary btn-sm" onclick="aiContinueParseManager()">▶ 继续</button>'
+      : '';
+  el.innerHTML = `<div class="ai-parse-manager">
+    <div class="ai-parse-manager-head">
+      <div><b>Step 2 解析管理器</b><span>${mode} · ${managerState}</span></div>
+      <div class="ai-parse-manager-controls">${control}</div>
+    </div>
+    ${manager.stopReason ? `<div class="ai-parse-manager-message">${escHtml(manager.stopReason)}</div>` : ''}
+    <div class="ai-parse-manager-groups">${groupHtml}</div>
+  </div>`;
+}
+
+function aiRenderStep2StopInfo() {
+  const el = document.getElementById('ai-step2-stop');
+  if (!el) return;
+  const info = aiState.step2StopInfo;
+  if (!info) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  const title = info.reason === 'rate-limit'
+    ? '请求过多，Step 2 已立即停止'
+    : '连续运行风险过高，Step 2 已停止';
+  const location = [info.date, info.lines?.length ? `相对行 ${info.lines.join('、')}` : '']
+    .filter(Boolean)
+    .join(' · ');
+  el.style.display = 'block';
+  el.innerHTML = `<div class="ai-step2-stop-panel">
+    <div><b>${escHtml(title)}</b>${location ? `<span>${escHtml(location)}</span>` : ''}</div>
+    <div>${escHtml(info.error || '请检查接口状态后继续。')}</div>
+    <div class="ai-issue-actions">
+      <button class="btn btn-primary btn-sm" onclick="aiContinueParseManager()">从检查点继续解析</button>
+    </div>
+  </div>`;
 }
 
 // ============================================================
@@ -2489,7 +2750,7 @@ function aiAbsoluteSourceLines(split, lines) {
 function aiSafeApplyFromAI(issue) {
   const path = issue.targetPath || issue.apply?.path || '';
   const allowed = [
-    /^parsed\.(wakeTime|sleepTime|dayNote|specialDay|excludeFromRating)$/,
+    /^parsed\.(wakeTime|sleepTime|dayType|dayNote|specialDay|specialDayReason|excludeFromRating)$/,
     /^parsed\.sessions\.\d+\.(type|name|startTime|endTime|nominalMinutes|actualMinutes|restMinutes|note)$/,
     /^parsed\.tasks\.\d+\.(name|templateId|activityType|minutes|quantity|quantityUnit|completionStatus|progressText|errorCount|note)$/,
   ];
@@ -2525,8 +2786,10 @@ function aiBuildProposalDifferences(before, after) {
   [
     ['wakeTime', '起床时间'],
     ['sleepTime', '睡觉时间'],
+    ['dayType', '日期类型'],
     ['dayNote', '全天备注'],
     ['specialDay', '特殊日'],
+    ['specialDayReason', '特殊日原因'],
     ['excludeFromRating', '不参与评分'],
   ].forEach(([field, label]) => {
     if (aiProposalEqual(before?.[field], after?.[field])) return;
@@ -2586,16 +2849,6 @@ function aiBuildProposalDifferences(before, after) {
     });
   });
   return differences;
-}
-
-function aiProposalFindItemIndex(items, item) {
-  if (!item) return -1;
-  if (item.id) {
-    const byId = items.findIndex(candidate => candidate.id === item.id);
-    if (byId >= 0) return byId;
-  }
-  const sourceKey = (item.sourceLines || []).map(Number).join(',');
-  return items.findIndex(candidate => (candidate.sourceLines || []).map(Number).join(',') === sourceKey);
 }
 
 function aiProposalChangedFields(before, after) {
@@ -2726,6 +2979,16 @@ function aiResolveTaskTemplate(task, templates = aiGetTaskTemplatesSafe()) {
   const selectedTemplate = task.templateId ? aiTaskTemplateById(task.templateId, templates) : null;
   if (selectedTemplate) {
     task.activityType = selectedTemplate.activityType || task.activityType || '';
+    task.fieldMeta = task.fieldMeta || {};
+    if (selectedTemplate.name && task.fieldMeta.name?.origin !== 'manual') {
+      task.name = selectedTemplate.name;
+      task.fieldMeta.name = {
+        value: selectedTemplate.name,
+        sourceLines: task.sourceLines || [],
+        origin: 'template-default',
+        raw: selectedTemplate.name,
+      };
+    }
     if (selectedTemplate.quantityUnit && !task.quantityUnit) task.quantityUnit = selectedTemplate.quantityUnit;
     if (selectedTemplate.defaultMinutes && task.minutes == null) task.minutes = selectedTemplate.defaultMinutes;
     if (selectedTemplate.note && !task.note) task.note = selectedTemplate.note;
@@ -2738,6 +3001,16 @@ function aiResolveTaskTemplate(task, templates = aiGetTaskTemplatesSafe()) {
   if (!uniqueTemplate) return null;
   task.templateId = uniqueTemplate.id;
   task.activityType = uniqueTemplate.activityType || task.activityType || '';
+  task.fieldMeta = task.fieldMeta || {};
+  if (uniqueTemplate.name && task.fieldMeta.name?.origin !== 'manual') {
+    task.name = uniqueTemplate.name;
+    task.fieldMeta.name = {
+      value: uniqueTemplate.name,
+      sourceLines: task.sourceLines || [],
+      origin: 'template-default',
+      raw: uniqueTemplate.name,
+    };
+  }
   if (uniqueTemplate.quantityUnit && !task.quantityUnit) task.quantityUnit = uniqueTemplate.quantityUnit;
   if (uniqueTemplate.defaultMinutes && task.minutes == null) task.minutes = uniqueTemplate.defaultMinutes;
   if (uniqueTemplate.note && !task.note) task.note = uniqueTemplate.note;
@@ -2939,14 +3212,6 @@ function aiValidateDraftDay(split) {
   return split.issues;
 }
 
-function aiHasOpenErrors(split) {
-  return (split.issues || []).some(issue => issue.status === 'open' && issue.level === 'error');
-}
-
-function aiHasOpenReviewIssues(split) {
-  return (split.issues || []).some(issue => issue.status === 'open' && (issue.level === 'error' || issue.level === 'warning'));
-}
-
 function aiIssueBlocksConfirmation(issue) {
   return issue.status === 'open' && (
     issue.level === 'error' ||
@@ -2960,7 +3225,8 @@ function aiHasBlockingIssues(split) {
 }
 
 function aiCanConfirmSplit(split) {
-  return Boolean(split?.parsed) && !split.draftDirty && !split.sourceDirty && !split.pendingProposal && !aiHasBlockingIssues(split);
+  return Boolean(split?.parsed) && split.finalReviewState === 'complete' &&
+    !split.draftDirty && !split.sourceDirty && !split.pendingProposal && !aiHasBlockingIssues(split);
 }
 
 function aiScheduleCacheSave() {
@@ -3004,6 +3270,31 @@ function aiDraftSetField(index, path, value, type = 'text') {
   if (!split) return;
   const parsedValue = type === 'number' ? (value === '' ? null : Number(value)) : type === 'boolean' ? Boolean(value) : value;
   aiSetByPath(split, path, parsedValue);
+  const taskNameMatch = String(path || '').match(/^parsed\.tasks\.(\d+)\.name$/);
+  if (taskNameMatch) {
+    const task = split.parsed?.tasks?.[Number(taskNameMatch[1])];
+    if (task) {
+      task.fieldMeta = task.fieldMeta || {};
+      task.fieldMeta.name = {
+        value: parsedValue,
+        sourceLines: task.sourceLines || [],
+        origin: 'manual',
+        raw: '人工修改任务名称',
+      };
+    }
+  }
+  const dayFieldMatch = String(path || '').match(/^parsed\.(dayType|specialDay|specialDayReason|excludeFromRating)$/);
+  if (dayFieldMatch && split.parsed) {
+    const field = dayFieldMatch[1];
+    split.parsed.fieldMeta = split.parsed.fieldMeta || {};
+    split.parsed.fieldMeta[field] = {
+      value: parsedValue,
+      sourceLines: [],
+      origin: 'manual',
+      raw: '人工修改本日字段',
+    };
+    if (field === 'dayType') split.parsed.dayTypeTemplateId = '';
+  }
   if (path === 'date') split.importMode = '';
   aiMarkDraftDirty(index);
 }
@@ -3012,6 +3303,39 @@ function aiMarkDraftDirty(index, render = false) {
   const split = aiState.daySplits[index];
   if (!split?.parsed) return;
   // 内嵌表格就是最终草稿。字段变更后立即进行本地校验。
+  aiRevalidateAndRender(index);
+}
+
+function aiDraftApplyDayTypeTemplate(index, name) {
+  const split = aiState.daySplits[index];
+  if (!split?.parsed) return;
+  const value = String(name || '').trim();
+  const template = typeof getDayTypeTemplates === 'function'
+    ? getDayTypeTemplates().find(item => item.name === value)
+    : null;
+  split.parsed.fieldMeta = split.parsed.fieldMeta || {};
+  split.parsed.dayType = value;
+  split.parsed.dayTypeTemplateId = template?.id || '';
+  split.parsed.fieldMeta.dayType = {
+    value,
+    sourceLines: [],
+    origin: 'manual',
+    raw: template ? `人工选择日期类型模板：${template.name}` : '人工填写日期类型',
+  };
+  if (template) {
+    ['specialDay', 'excludeFromRating'].forEach(field => {
+      split.parsed[field] = Boolean(template[field]);
+      split.parsed.fieldMeta[field] = {
+        value: Boolean(template[field]),
+        sourceLines: [],
+        origin: 'manual',
+        raw: `人工选择日期类型模板：${template.name}`,
+      };
+    });
+  }
+  split.partialParseMessage = template
+    ? `已人工套用日期类型“${template.name}”，并同步特殊天与评分开关。`
+    : '已人工修改日期类型；特殊天与评分开关保持不变。';
   aiRevalidateAndRender(index);
 }
 
@@ -3057,23 +3381,6 @@ function aiDraftDeleteTask(index, taskIndex) {
 function aiDraftApplyTaskTemplate(index, taskIndex, templateId) {
   const split = aiState.daySplits[index];
   const task = split?.parsed?.tasks?.[taskIndex];
-  const tmpl = (typeof getTaskTemplates === 'function' ? getTaskTemplates() : []).find(item => item.id === templateId);
-  if (!task) return;
-  task.templateId = templateId || '';
-  if (tmpl) {
-    task.activityType = tmpl.activityType || task.activityType || '';
-    if (tmpl.quantityUnit) task.quantityUnit = tmpl.quantityUnit;
-    if (tmpl.defaultMinutes && !task.minutes) task.minutes = tmpl.defaultMinutes;
-    if (tmpl.note && !task.note) task.note = tmpl.note;
-    task.needsClassification = false;
-    task.aiMeta = { evidenceLevel: 'manual', evidenceLabel: '人工确认', reason: '人工套用模板', matchMode: 'manual' };
-  }
-  aiMarkDraftDirty(index, true);
-}
-
-function aiDraftApplyTaskTemplate(index, taskIndex, templateId) {
-  const split = aiState.daySplits[index];
-  const task = split?.parsed?.tasks?.[taskIndex];
   if (!task) return;
   const templates = aiGetTaskTemplatesSafe();
   const previousTemplate = aiTaskTemplateById(task.templateId, templates);
@@ -3093,6 +3400,16 @@ function aiDraftApplyTaskTemplate(index, taskIndex, templateId) {
 
   task.templateId = tmpl.id;
   task.activityType = tmpl.activityType || '';
+  task.fieldMeta = task.fieldMeta || {};
+  if (tmpl.name && task.fieldMeta.name?.origin !== 'manual') {
+    task.name = tmpl.name;
+    task.fieldMeta.name = {
+      value: tmpl.name,
+      sourceLines: task.sourceLines || [],
+      origin: 'template-default',
+      raw: tmpl.name,
+    };
+  }
   if (tmpl.quantityUnit) task.quantityUnit = tmpl.quantityUnit;
   if (tmpl.defaultMinutes && !task.minutes) task.minutes = tmpl.defaultMinutes;
   if (tmpl.note && !task.note) task.note = tmpl.note;
@@ -3215,7 +3532,7 @@ async function aiConfirmSourceRevision(index, reparse = false) {
   await aiSaveCacheToServer();
 
   if (reparse) {
-    await aiParseSingleDay(index, { asProposal: Boolean(split.parsed), scrollAnchor });
+    await aiParseSingleDay(index, { asProposal: Boolean(split.parsed), scrollAnchor, force: true });
     split.sourceEditorOpen = true;
     split.sourceDirty = split.status === 'error';
     split.partialParseMessage = split.status === 'error'
@@ -3243,7 +3560,7 @@ async function aiReparseDayWithProposal(index) {
   split.error = null;
   aiRenderDayCard(index);
   aiRestoreScrollAnchor(scrollAnchor);
-  await aiParseSingleDay(index, { asProposal: Boolean(split.parsed), scrollAnchor });
+  await aiParseSingleDay(index, { asProposal: Boolean(split.parsed), scrollAnchor, force: true });
 }
 
 function aiMapUnitLocalLines(unit, localLines, replacementLines) {
@@ -3299,7 +3616,7 @@ function aiApplyUnitParsedResult(split, unit, parsed, replacementLines) {
   const kind = String(parsed.kind || '').toLowerCase();
   if (kind === 'field') {
     const field = parsed.field;
-    const allowed = ['wakeTime', 'sleepTime', 'dayNote', 'specialDay', 'excludeFromRating'];
+    const allowed = ['wakeTime', 'sleepTime', 'dayType', 'dayNote', 'specialDay', 'specialDayReason', 'excludeFromRating'];
     if (!allowed.includes(field)) throw new Error('本项解析返回了不支持的字段：' + field);
     split.parsed[field] = parsed.value ?? '';
     aiRemoveUnitItem(split, unit);
@@ -3357,6 +3674,7 @@ async function aiParseSingleUnit(index, unit, sourceText, options = {}) {
   const split = aiState.daySplits[index];
   if (!split) return false;
   const replacementLines = String(sourceText || '').replace(/\r\n?/g, '\n').split('\n');
+  const run = aiCreateStep2Run();
 
   try {
     if (!replacementLines.join('').trim()) {
@@ -3376,7 +3694,12 @@ async function aiParseSingleUnit(index, unit, sourceText, options = {}) {
         { length: replacementLines.length },
         (_, offset) => unit.startOffset + offset + 1
       ).filter(line => sourceFacts.nonEmptyLines.includes(line));
-      const lineResults = await aiRequestDayLineResults(split, sourceFacts, targetLines);
+      const lineResults = await aiRequestDayLineResults(
+        split,
+        sourceFacts,
+        targetLines,
+        { signal: run.controller.signal }
+      );
       const subsetFacts = {
         ...sourceFacts,
         nonEmptyLines: targetLines,
@@ -3425,6 +3748,15 @@ async function aiParseSingleUnit(index, unit, sourceText, options = {}) {
     aiScheduleCacheSave();
     return true;
   } catch (e) {
+    if (aiIsRateLimitError(e)) {
+      aiStopStep2Run(run, split, {
+        stopped: true,
+        stopReason: 'rate-limit',
+        stopError: e,
+        failedWaves: 0,
+        results: targetLinesForUnitError(unit, e),
+      });
+    }
     split.sourceDirty = true;
     split.partialParseMessage = '本项原文已保存，但本项重解析失败：' + e.message;
     aiRenderDayCard(index);
@@ -3434,11 +3766,40 @@ async function aiParseSingleUnit(index, unit, sourceText, options = {}) {
   }
 }
 
+function targetLinesForUnitError(unit, error) {
+  return (unit?.relativeLines || []).map(line => ({
+    item: Number(line),
+    status: 'rejected',
+    error,
+  }));
+}
+
 function aiIsSourceIssue(split, issue) {
   return (split.sourceIssues || []).some(sourceIssue => sourceIssue.id === issue.id);
 }
 
+function aiHasStructuredSourceRewrite(issue) {
+  return Boolean(
+    issue &&
+    Array.isArray(issue.sourceLines) &&
+    issue.sourceLines.length &&
+    typeof issue.expectedSource === 'string' &&
+    typeof issue.replacementSource === 'string'
+  );
+}
+
+function aiStructuredSourceRelativeLines(split, issue) {
+  return [...new Set((issue.sourceLines || []).map(line => Number(line) - Number(split.startLine || 1) + 1))]
+    .filter(line => Number.isFinite(line) && line >= 1)
+    .sort((a, b) => a - b);
+}
+
 function aiCanPatchSourceSuggestion(split, issue) {
+  if (aiHasStructuredSourceRewrite(issue)) {
+    const relativeLines = aiStructuredSourceRelativeLines(split, issue);
+    return relativeLines.length > 0 &&
+      relativeLines.every((line, index) => index === 0 || line === relativeLines[index - 1] + 1);
+  }
   const replacement = issue.sourceReplacement ?? issue.suggestion;
   if ((!aiIsSourceIssue(split, issue) && !issue.sourceReplacement) || replacement == null || replacement === '') return false;
   if (issue.code === 'DUPLICATE_DATE' && /^\d{4}-\d{2}-\d{2}$/.test(String(replacement))) return true;
@@ -3453,6 +3814,7 @@ function aiCanPatchSourceSuggestion(split, issue) {
 function aiCanAcceptIssue(split, issue) {
   if (!issue || issue.status !== 'open') return false;
   if (issue.apply?.path) return true;
+  if (aiHasStructuredSourceRewrite(issue)) return true;
   return aiCanPatchSourceSuggestion(split, issue);
 }
 
@@ -3593,12 +3955,194 @@ async function aiAcceptIssueSuggestion(index, issueIndex) {
   const issue = split?.issues?.[issueIndex];
   if (!split || !issue || !aiCanAcceptIssue(split, issue)) return;
 
+  if (aiHasStructuredSourceRewrite(issue)) {
+    await aiAcceptStructuredSourceRewrite(index, issueIndex);
+    return;
+  }
+
+  if (issue.apply?.path) {
+    aiSetByPath(split, issue.apply.path, issue.apply.value);
+    issue.status = 'accepted';
+    split.partialParseMessage = `已采纳 AI 字段建议并更新 ${issue.apply.path}。`;
+    aiRevalidateAndRender(index);
+    return;
+  }
+
   if (aiCanPatchSourceSuggestion(split, issue)) {
     aiStageIssueSuggestion(index, issueIndex);
     return;
   }
 
   alert('这条建议无法安全自动写入原文。请手动修改对应原文片段后，点击“保存本项原文并重解析本项”。');
+}
+
+function aiSourceTransactionSnapshot() {
+  return {
+    rawInput: aiState.rawInput,
+    sourceMeta: aiProposalClone(aiState.sourceMeta || {}),
+    sourceIssues: aiProposalClone(aiState.sourceIssues || []),
+    daySplits: aiProposalClone(aiState.daySplits || []),
+    step2StopInfo: aiProposalClone(aiState.step2StopInfo),
+    parseManager: aiProposalClone(aiEnsureParseManager()),
+  };
+}
+
+function aiRestoreSourceTransaction(snapshot) {
+  aiState.rawInput = snapshot.rawInput;
+  aiState.sourceMeta = snapshot.sourceMeta;
+  aiState.sourceIssues = snapshot.sourceIssues;
+  aiState.daySplits = snapshot.daySplits.map(aiNormalizeCachedSplit);
+  aiState.step2StopInfo = snapshot.step2StopInfo;
+  aiState.parseManager = window.AIParseManager.createManager(snapshot.parseManager);
+  const rawEl = document.getElementById('ai-rawInput');
+  if (rawEl) rawEl.value = aiState.rawInput;
+  aiRenderSourceMeta();
+}
+
+function aiBlockingIssueFingerprint(issue) {
+  return [
+    issue.code || '',
+    issue.target || issue.targetPath || '',
+    issue.original || '',
+    issue.level || '',
+  ].join('|');
+}
+
+async function aiAcceptStructuredSourceRewrite(index, issueIndex) {
+  const split = aiState.daySplits[index];
+  const issue = split?.issues?.[issueIndex];
+  if (!split || !aiHasStructuredSourceRewrite(issue) || aiSplitIsBusy(split)) return;
+
+  const snapshot = aiSourceTransactionSnapshot();
+  const beforeBlocking = new Set(
+    (split.issues || []).filter(aiIssueBlocksConfirmation).map(aiBlockingIssueFingerprint)
+  );
+  const relativeLines = aiStructuredSourceRelativeLines(split, issue);
+  const oldStartLine = split.startLine;
+  const oldEndLine = split.endLine;
+  const run = aiCreateStep2Run();
+  run.transactional = true;
+  let committed = false;
+
+  clearTimeout(aiState._saveTimer);
+  split.reparseLocked = true;
+  split.partialParseMessage = '正在采纳 AI 原文修改并重新提取最终草稿…';
+  aiRenderDayCard(index);
+
+  try {
+    const rewrite = window.AIStep2Scheduler.sourceRewrite(
+      split.text,
+      relativeLines,
+      issue.expectedSource,
+      issue.replacementSource
+    );
+    split.text = rewrite.text;
+    const heading = String(split.text || '').split('\n')[0]?.match(/^(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日/);
+    if (heading) {
+      const year = heading[1] || String(split.date || '').slice(0, 4) || String(new Date().getFullYear());
+      split.date = `${year}-${String(Number(heading[2])).padStart(2, '0')}-${String(Number(heading[3])).padStart(2, '0')}`;
+      split.importMode = '';
+    }
+    split.pendingProposal = null;
+    split.reviewProposals = [];
+    split.error = null;
+    split.sourceDirty = true;
+    split.status = 'parsing';
+    aiSyncRawInputFromSplit(index, oldStartLine, oldEndLine);
+    aiRunSourcePreflight(aiState.daySplits);
+
+    const sourceFacts = window.AIParserCore.extractFacts(split.text);
+    const lineCountChanged = rewrite.oldLineCount !== rewrite.newLineCount;
+    const existingResults = (snapshot.daySplits[index]?.itemParseResults || [])
+      .filter(record => aiValidItemCheckpoint(record, sourceFacts))
+      .filter(record => !lineCountChanged || aiCheckpointLine(record) < rewrite.startLine);
+    const reusableLines = new Set(existingResults.map(aiCheckpointLine));
+    const targetLines = sourceFacts.nonEmptyLines.filter(line => !reusableLines.has(line));
+
+    split.itemParseResults = existingResults;
+    split.sourceFacts = sourceFacts;
+    aiSetNetworkConcurrency(run.concurrency);
+    if (targetLines.length) {
+      await aiParseTargetLinesInWaves(index, split, sourceFacts, targetLines, {
+        run,
+        existingResults,
+        checkpoint: false,
+      });
+    }
+    if (run.stopped) throw run.stopError || new Error('Step 2 已停止');
+
+    const validResults = (split.itemParseResults || [])
+      .filter(record => aiValidItemCheckpoint(record, sourceFacts));
+    const resultLines = new Set(validResults.map(aiCheckpointLine));
+    const missingLines = sourceFacts.nonEmptyLines.filter(line => !resultLines.has(line));
+    if (missingLines.length) {
+      throw new Error(`修改后的原文仍有未完成项目：相对行 ${missingLines.join('、')}`);
+    }
+
+    const lineResults = validResults.map(record => {
+      const { sourceLine, text, parseStatus, parserVersion, error, errorStatus, ...result } = record;
+      return result;
+    }).sort((a, b) => Number(a.line) - Number(b.line));
+    split.parsed = aiPrepareV2Parsed(split, sourceFacts, lineResults);
+    split.sourceFacts = sourceFacts;
+    split.reviewProposals = [];
+    split.pendingProposal = null;
+    split.issues = [];
+    split.sourceDirty = false;
+    split.draftDirty = false;
+    aiValidateDraftDay(split);
+
+    const newBlocking = (split.issues || [])
+      .filter(aiIssueBlocksConfirmation)
+      .filter(item => !beforeBlocking.has(aiBlockingIssueFingerprint(item)));
+    if (newBlocking.length) {
+      throw new Error(`修改后的草稿产生新的阻断错误：${newBlocking[0].message}`);
+    }
+
+    split.sourceEditHistory = [
+      ...(split.sourceEditHistory || []),
+      {
+        type: 'ai-source-rewrite',
+        sourceLines: relativeLines,
+        expectedSource: issue.expectedSource,
+        replacementSource: issue.replacementSource,
+        reason: issue.reason || issue.message || '',
+        acceptedAt: new Date().toISOString(),
+      },
+    ];
+    split.partialParseMessage = '已采纳 AI 原文修改，并用修改后的原文重新提取和更新最终草稿。';
+    split.status = aiHasBlockingIssues(split) ? 'blocked' : 'review';
+    split.reparseLocked = false;
+    aiState.daySplits.forEach((other, otherIndex) => {
+      if (otherIndex === index || !other.parsed) return;
+      aiValidateDraftDay(other);
+      if (other.status !== 'imported') other.status = aiHasBlockingIssues(other) ? 'blocked' : other.status;
+    });
+    committed = true;
+    aiRenderExistingDayCards();
+    aiUpdateImportBtn();
+    await aiSaveCacheToServer();
+  } catch (error) {
+    const stopInfo = run.stopped ? aiProposalClone(aiState.step2StopInfo) : null;
+    aiRestoreSourceTransaction(snapshot);
+    if (stopInfo) aiState.step2StopInfo = stopInfo;
+    const restored = aiState.daySplits[index];
+    if (restored) {
+      restored.reparseLocked = false;
+      restored.partialParseMessage = `AI 原文修改未生效，已完整回滚：${error.message || error}`;
+    }
+    aiRenderExistingDayCards();
+    aiUpdateImportBtn();
+    await aiSaveCacheToServer();
+    if (error?.code === 'STALE_SOURCE_REWRITE') {
+      alert('原文已经变化，这条 AI 建议已过期，没有执行任何修改。');
+    } else if (!run.stopped) {
+      alert('采纳 AI 原文修改失败，已恢复原文和旧草稿：' + (error.message || error));
+    }
+  } finally {
+    if (committed && aiState.daySplits[index]) aiState.daySplits[index].reparseLocked = false;
+    aiRenderStep2StopInfo();
+  }
 }
 
 function aiSetAnnotationUnitDraft(index, key, value) {
@@ -3696,7 +4240,8 @@ function aiConfirmDay(index) {
 
 function aiIsMeaningfulDay(day) {
   return Boolean(day && (
-    day.wakeTime || day.sleepTime || day.dayNote || day.specialDay ||
+    day.wakeTime || day.sleepTime || day.dayType || day.dayNote || day.specialDay ||
+    day.specialDayReason || day.excludeFromRating ||
     (day.sessions && day.sessions.length) || (day.tasks && day.tasks.length)
   ));
 }
@@ -3771,6 +4316,7 @@ function aiBuildDayFromParsed(parsed) {
   return {
     wakeTime: parsed.wakeTime || '',
     sleepTime: parsed.sleepTime || '',
+    dayType: parsed.dayType || '',
     specialDay: Boolean(parsed.specialDay),
     specialDayReason: parsed.specialDayReason || '',
     excludeFromRating: Boolean(parsed.excludeFromRating),
@@ -3793,6 +4339,10 @@ function aiMergeDayData(split) {
   const day = getDay(split.date);
   if (p.wakeTime) day.wakeTime = p.wakeTime;
   if (p.sleepTime) day.sleepTime = p.sleepTime;
+  if (p.dayType) day.dayType = p.dayType;
+  if (p.specialDay) day.specialDay = true;
+  if (p.specialDayReason) day.specialDayReason = p.specialDayReason;
+  if (p.excludeFromRating) day.excludeFromRating = true;
   if (p.dayNote) {
     day.dayNote = day.dayNote ? (day.dayNote + '\n' + p.dayNote) : p.dayNote;
   }
@@ -3830,10 +4380,16 @@ function aiImportDay(split, mode) {
 // ============================================================
 function aiClearAll() {
   if (aiState.daySplits.length > 0 && !confirm('清空当前分割结果？')) return;
+  if (aiState._activeStep2Run && !aiState._activeStep2Run.controller.signal.aborted) {
+    aiState._activeStep2Run.controller.abort(new Error('用户清空解析数据'));
+  }
+  aiState._activeStep2Run = null;
   aiState.daySplits = [];
   aiState.rawInput = '';
   aiState.sourceMeta = { fileName: '', lineCount: 0, charCount: 0, loadedAt: '' };
   aiState.sourceIssues = [];
+  aiState.step2StopInfo = null;
+  aiState.parseManager = window.AIParseManager.createManager();
   const el = document.getElementById('ai-rawInput');
   if (el) el.value = '';
   aiMsg('split', '', 'muted');
@@ -3911,16 +4467,6 @@ function aiRenderExistingDayCards() {
   aiUpdateProgress();
 }
 
-function aiSourcePreflightCardHtml(split) {
-  const issues = split.sourceIssues || [];
-  if (!issues.length) return '';
-  return `<div class="ai-preflight ai-split-preflight">
-    <b>源文件预检</b>
-    ${issues.slice(0, 4).map(issue => `<div class="ai-preflight-item">${escHtml(issue.message || '')}</div>`).join('')}
-    ${issues.length > 4 ? `<div class="ai-preflight-item">还有 ${issues.length - 4} 条预检提示，Step 2 解析后会进入正式审核。</div>` : ''}
-  </div>`;
-}
-
 function aiConfidenceHtml(aiMeta) {
   const evidence = aiMeta?.evidenceLabel || ({
     'source-explicit': '原文明确',
@@ -3942,20 +4488,6 @@ function aiConfidenceHtml(aiMeta) {
   if (!Number.isFinite(confidence)) return '';
   const level = confidence >= 0.9 ? 'high' : confidence >= 0.65 ? 'medium' : 'low';
   return `<span class="ai-confidence ai-confidence-${level}" title="${escAttr(aiMeta?.reason || '')}">${Math.round(confidence * 100)}%</span>`;
-}
-
-function aiLegacyAnnotationActionsHtml(index, issueIndex, split, issue, offset = null) {
-  if (issue.status !== 'open') {
-    return `<span class="ai-annotation-status">${issue.status === 'accepted' ? '已采纳 AI 建议' : '已处理'}</span>`;
-  }
-  if (offset != null) {
-    return `<div class="ai-issue-actions">
-      ${aiCanPatchSourceSuggestion(split, issue) ? `<button class="btn btn-success btn-sm" onclick="aiStageIssueSuggestion(${index},${issueIndex})">${issue.suggestionStaged ? 'AI 建议已填入' : '采用 AI 建议'}</button>` : ''}
-    </div>`;
-  }
-  return `<div class="ai-issue-actions">
-    ${aiCanAcceptIssue(split, issue) ? `<button class="btn btn-success btn-sm" onclick="aiAcceptIssueSuggestion(${index},${issueIndex})">接受 AI 建议</button>` : ''}
-  </div>`;
 }
 
 function aiInlineEditableTarget(issue) {
@@ -3998,202 +4530,29 @@ function aiConfirmAnnotationFieldRevision(index, issueIndex, type = 'text') {
   aiRevalidateAndRender(index);
 }
 
-function aiHighlightAnnotatedLine(line, issues) {
-  let html = escHtml(line || ' ');
-  for (const issue of issues) {
-    const original = String(issue.original || '').trim();
-    if (!original || !String(line).includes(original)) continue;
-    const escaped = escHtml(original);
-    html = html.replace(escaped, `<mark class="ai-source-mark">${escaped}</mark>`);
-    break;
-  }
-  return html;
-}
-
 function aiAnnotationCommentHtml(index, issueIndex, split, issue, offset = null) {
   const confidence = issue.confidence == null ? NaN : Number(issue.confidence);
   const displayedSuggestion = issue.suggestion ?? issue.sourceReplacement;
   const suggestionText = displayedSuggestion && typeof displayedSuggestion === 'object'
     ? JSON.stringify(displayedSuggestion, null, 2)
     : displayedSuggestion;
+  const sourceRewriteHtml = aiHasStructuredSourceRewrite(issue)
+    ? `<div class="ai-source-rewrite-preview">
+        <div><b>当前原文</b><pre>${escHtml(issue.expectedSource)}</pre></div>
+        <div><b>AI 建议改为</b><pre>${escHtml(issue.replacementSource || '（删除这些行）')}</pre></div>
+        ${issue.reason ? `<div class="ai-source-rewrite-reason">依据：${escHtml(issue.reason)}</div>` : ''}
+      </div>`
+    : '';
   return `<div class="ai-annotation-comment ai-annotation-${issue.level} ${issue.status !== 'open' ? 'ai-annotation-resolved' : ''}">
     <div class="ai-annotation-title">
       <b>${issue.level === 'error' ? '错误' : issue.level === 'warning' ? 'AI 建议' : '提示'}</b>
       ${Number.isFinite(confidence) ? `<span>${Math.round(confidence * 100)}%</span>` : ''}
     </div>
     <div>${escHtml(issue.message)}</div>
-    ${issue.original ? `<div class="ai-annotation-original">发现：${escHtml(String(issue.original))}</div>` : ''}
-    ${suggestionText != null && suggestionText !== '' ? `<div class="ai-suggestion">建议改为：${escHtml(String(suggestionText))}</div>` : ''}
+    ${sourceRewriteHtml || (issue.original ? `<div class="ai-annotation-original">发现：${escHtml(String(issue.original))}</div>` : '')}
+    ${!sourceRewriteHtml && suggestionText != null && suggestionText !== '' ? `<div class="ai-suggestion">建议改为：${escHtml(String(suggestionText))}</div>` : ''}
     ${offset == null ? aiInlineFieldEditorHtml(index, issueIndex, split, issue) : ''}
     ${aiAnnotationActionsHtml(index, issueIndex, split, issue, offset)}
-  </div>`;
-}
-
-function aiProposalValueHtml(value) {
-  if (value == null || value === '') return '<span class="c-muted">空</span>';
-  const text = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
-  return `<code>${escHtml(text)}</code>`;
-}
-
-function aiProposalHtml(index, split) {
-  const proposal = split.pendingProposal;
-  if (!proposal) return '';
-  const differences = (proposal.differences || []).filter(aiProposalDiffHasRealChange);
-  const issueCount = (proposal.issues || []).filter(issue => issue.level === 'error' || issue.level === 'warning').length;
-  return `<div class="ai-proposal">
-    <div class="ai-proposal-header">
-      <div><b>AI 重解析提案</b><span>新结果尚未写入最终草稿${issueCount ? ` · 包含 ${issueCount} 条新提醒` : ''}</span></div>
-      <div>
-        <button class="btn btn-success btn-sm" onclick="aiAcceptProposal(${index})">全部采纳</button>
-        <button class="btn btn-ghost btn-sm" onclick="aiKeepCurrentDraft(${index})">保留当前草稿</button>
-      </div>
-    </div>
-    ${differences.length ? `<div class="ai-proposal-list">${differences.map((diff, diffIndex) => `
-      <div class="ai-proposal-item ${diff.status !== 'open' ? 'ai-proposal-item-done' : ''}">
-        <div><b>${escHtml(diff.label)}</b>${diff.affectedLines?.length ? `<span>原文相对行 ${diff.affectedLines.join('、')}</span>` : ''}</div>
-        <div class="ai-proposal-change">${escHtml(aiProposalDiffSummary(diff))}</div>
-        ${diff.status === 'open' ? `<div class="ai-proposal-actions">
-          <button class="btn btn-success btn-sm" onclick="aiApplyProposalDifference(${index},${diffIndex})">定位原文并手动修改</button>
-          <button class="btn btn-ghost btn-sm" onclick="aiKeepDraftForProposalDifference(${index},${diffIndex})">保留原值</button>
-        </div>` : `<span class="ai-annotation-status">${diff.status === 'accepted' ? '已采纳' : '保留原值'}</span>`}
-      </div>`).join('')}</div>` : '<div class="ai-review-ok">结构化草稿没有变化。你仍可检查 AI 新提醒，或直接保留当前草稿。</div>'}
-  </div>`;
-}
-
-function aiLegacyDraftTopFieldsHtml(index, split) {
-  const p = split.parsed;
-  if (!p) return '';
-  return `<div class="ai-linked-overview">
-    <div class="ai-linked-heading">本日最终录入草稿 <span>直接修改字段，最终导入以这里为准</span></div>
-    <div class="ai-draft-grid">
-      <label>日期<input value="${escAttr(split.date)}" onchange="aiDraftSetField(${index},'date',this.value)"></label>
-      <label>起床<input value="${escAttr(p.wakeTime || '')}" placeholder="HH:MM" onchange="aiDraftSetField(${index},'parsed.wakeTime',this.value)"></label>
-      <label>睡觉<input value="${escAttr(p.sleepTime || '')}" placeholder="HH:MM" onchange="aiDraftSetField(${index},'parsed.sleepTime',this.value)"></label>
-      <label class="ai-checkbox"><input type="checkbox" ${p.specialDay ? 'checked' : ''} onchange="aiDraftSetField(${index},'parsed.specialDay',this.checked,'boolean')"> 特殊日</label>
-      <label class="ai-checkbox"><input type="checkbox" ${p.excludeFromRating ? 'checked' : ''} onchange="aiDraftSetField(${index},'parsed.excludeFromRating',this.checked,'boolean')"> 不参与评分</label>
-      <label class="ai-full">全天备注<textarea onchange="aiDraftSetField(${index},'parsed.dayNote',this.value)">${escHtml(p.dayNote || '')}</textarea></label>
-    </div>
-  </div>`;
-}
-
-function aiLinkedSessionHtml(index, session, sessionIndex) {
-  return `<div class="ai-linked-draft-row ai-linked-session">
-    <span class="ai-linked-kind">时段 ${sessionIndex + 1}</span>
-    <select title="类型" onchange="aiDraftSetField(${index},'parsed.sessions.${sessionIndex}.type',this.value)">
-      <option value="normal" ${session.type === 'normal' || !session.type ? 'selected' : ''}>普通专注</option>
-      <option value="special" ${session.type === 'special' ? 'selected' : ''}>不可用</option>
-      <option value="special-study" ${session.type === 'special-study' ? 'selected' : ''}>特殊学习</option>
-    </select>
-    <input value="${escAttr(session.name || '')}" placeholder="名称" onchange="aiDraftSetField(${index},'parsed.sessions.${sessionIndex}.name',this.value)">
-    <input value="${escAttr(session.startTime || '')}" placeholder="开始 HH:MM" onchange="aiDraftSetField(${index},'parsed.sessions.${sessionIndex}.startTime',this.value)">
-    <input value="${escAttr(session.endTime || '')}" placeholder="结束 HH:MM" onchange="aiDraftSetField(${index},'parsed.sessions.${sessionIndex}.endTime',this.value)">
-    <input type="number" value="${session.nominalMinutes ?? ''}" placeholder="名义" title="名义分钟" onchange="aiDraftSetField(${index},'parsed.sessions.${sessionIndex}.nominalMinutes',this.value,'number')">
-    <input type="number" value="${session.actualMinutes ?? ''}" placeholder="实际" title="实际分钟" onchange="aiDraftSetField(${index},'parsed.sessions.${sessionIndex}.actualMinutes',this.value,'number')">
-    <input type="number" value="${session.restMinutes ?? ''}" placeholder="休息" title="休息分钟" onchange="aiDraftSetField(${index},'parsed.sessions.${sessionIndex}.restMinutes',this.value,'number')">
-    ${aiConfidenceHtml(session.aiMeta)}
-    <button class="btn btn-danger btn-sm" onclick="aiDraftDeleteSession(${index},${sessionIndex})">删除</button>
-  </div>`;
-}
-
-function aiLinkedTaskHtml(index, task, taskIndex) {
-  const templates = typeof getTaskTemplates === 'function' ? getTaskTemplates() : [];
-  return `<div class="ai-linked-draft-row ai-linked-task">
-    <span class="ai-linked-kind">任务 ${taskIndex + 1}</span>
-    <input value="${escAttr(task.name || '')}" placeholder="任务名称" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.name',this.value)">
-    <select title="模板" onchange="aiDraftApplyTaskTemplate(${index},${taskIndex},this.value)">
-      <option value="">不套用模板</option>
-      ${templates.map(template => `<option value="${escAttr(template.id)}" ${task.templateId === template.id ? 'selected' : ''}>${escHtml(template.name || template.activityType || '未命名模板')}</option>`).join('')}
-    </select>
-    <input value="${escAttr(task.activityType || '')}" placeholder="活动分类路径" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.activityType',this.value)">
-    <input type="number" value="${task.minutes ?? ''}" placeholder="分钟" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.minutes',this.value,'number')">
-    <input type="number" value="${task.quantity ?? ''}" placeholder="数量" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.quantity',this.value,'number')">
-    <input value="${escAttr(task.quantityUnit || '')}" placeholder="单位" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.quantityUnit',this.value)">
-    <input value="${escAttr(task.note || '')}" placeholder="备注" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.note',this.value)">
-    ${aiConfidenceHtml(task.aiMeta)}
-    <button class="btn btn-danger btn-sm" onclick="aiDraftDeleteTask(${index},${taskIndex})">删除</button>
-  </div>`;
-}
-
-function aiItemBelongsToUnit(item, unit) {
-  const firstLine = (item.sourceLines || []).map(Number).find(Number.isFinite);
-  return Number.isFinite(firstLine) && unit.relativeLines.includes(firstLine);
-}
-
-function aiUnitDraftHtml(index, split, unit) {
-  const p = split.parsed;
-  if (!p) return '';
-  const sessions = (p.sessions || []).map((item, itemIndex) => ({ item, itemIndex })).filter(entry => aiItemBelongsToUnit(entry.item, unit));
-  const tasks = (p.tasks || []).map((item, itemIndex) => ({ item, itemIndex })).filter(entry => aiItemBelongsToUnit(entry.item, unit));
-  if (!sessions.length && !tasks.length) return '<div class="ai-linked-empty">本段目前没有绑定草稿行。重新解析后可更新归属。</div>';
-  return `<div class="ai-linked-draft">
-    ${sessions.map(entry => aiLinkedSessionHtml(index, entry.item, entry.itemIndex)).join('')}
-    ${tasks.map(entry => aiLinkedTaskHtml(index, entry.item, entry.itemIndex)).join('')}
-  </div>`;
-}
-
-function aiUnlinkedDraftHtml(index, split) {
-  const p = split.parsed;
-  if (!p) return '';
-  const sessions = (p.sessions || []).map((item, itemIndex) => ({ item, itemIndex })).filter(entry => !(entry.item.sourceLines || []).length);
-  const tasks = (p.tasks || []).map((item, itemIndex) => ({ item, itemIndex })).filter(entry => !(entry.item.sourceLines || []).length);
-  return `<div class="ai-unlinked-draft">
-    <div class="ai-linked-heading">未绑定原文的草稿行 <span>人工新增项目会暂时出现在这里</span></div>
-    ${sessions.map(entry => aiLinkedSessionHtml(index, entry.item, entry.itemIndex)).join('')}
-    ${tasks.map(entry => aiLinkedTaskHtml(index, entry.item, entry.itemIndex)).join('')}
-    <div class="ai-unlinked-actions">
-      <button class="btn btn-ghost btn-sm" onclick="aiDraftAddSession(${index},'normal')">+ 普通专注</button>
-      <button class="btn btn-ghost btn-sm" onclick="aiDraftAddSession(${index},'special')">+ 不可用时段</button>
-      <button class="btn btn-ghost btn-sm" onclick="aiDraftAddSession(${index},'special-study')">+ 特殊学习</button>
-      <button class="btn btn-ghost btn-sm" onclick="aiDraftAddTask(${index})">+ 添加任务</button>
-    </div>
-  </div>`;
-}
-
-function aiLegacyIssueListHtml(index, split) {
-  const issues = split.issues || [];
-  const commentsByOffset = new Map();
-  const generalIssues = [];
-  const busyAttr = aiBusyAttr(split);
-  issues.forEach((issue, issueIndex) => {
-    const offsets = (issue.sourceLines || [])
-      .map(line => Number(line) - Number(split.startLine))
-      .filter(offset => Number.isFinite(offset) && offset >= 0 && offset < lines.length);
-    if (!offsets.length) {
-      generalIssues.push({ issue, issueIndex });
-      return;
-    }
-    const offset = offsets[0];
-    if (!commentsByOffset.has(offset)) commentsByOffset.set(offset, []);
-    commentsByOffset.get(offset).push({ issue, issueIndex });
-  });
-
-  const sourceUnits = aiBuildSourceReviewUnits(split).map(unit => {
-    const comments = unit.offsets.flatMap(offset => commentsByOffset.get(offset) || []);
-    const lineLabel = unit.startOffset === unit.endOffset
-      ? `第 ${split.startLine + unit.startOffset} 行`
-      : `第 ${split.startLine + unit.startOffset}-${split.startLine + unit.endOffset} 行`;
-    return `<div class="ai-source-unit ${comments.length ? 'ai-source-unit-flagged' : ''}">
-      <div class="ai-source-unit-head">
-        <span>${lineLabel}</span>
-        <button class="btn btn-primary btn-sm" onclick="aiConfirmAnnotationUnitRevision(${index},'${unit.key}')" ${busyAttr}>保存本段并让 AI 重新解析</button>
-      </div>
-      <textarea id="ai-source-unit-${index}-${unit.key}" class="ai-source-unit-input" oninput="aiSetAnnotationUnitDraft(${index},'${unit.key}',this.value)">${escHtml(split.annotationUnitDrafts?.[unit.key] ?? unit.text)}</textarea>
-      ${comments.length ? `<div class="ai-source-unit-comments">${comments.map(item => aiAnnotationCommentHtml(index, item.issueIndex, split, item.issue, unit.startOffset)).join('')}</div>` : ''}
-      ${aiUnitDraftHtml(index, split, unit)}
-    </div>`;
-  }).join('');
-
-  return `<div class="ai-annotation-wrap">
-    <div class="ai-annotation-heading">原文与最终草稿对照 <span>空行仅作为分隔；修改本项原文后由 AI 只重解析本项。</span></div>
-    ${split.partialParseMessage ? `<div class="ai-partial-parse-message">${escHtml(split.partialParseMessage)}</div>` : ''}
-    ${aiProposalHtml(index, split)}
-    ${aiDraftTopFieldsHtml(index, split)}
-    ${sourceUnits ? `<div class="ai-source-units">${sourceUnits}</div>` : '<div class="ai-review-ok">本日原文没有可审核的非空内容。</div>'}
-    ${aiUnlinkedDraftHtml(index, split)}
-    ${generalIssues.length ? `<div class="ai-general-comments">
-      <b>字段批注</b>
-      ${generalIssues.map(item => aiAnnotationCommentHtml(index, item.issueIndex, split, item.issue)).join('')}
-    </div>` : ''}
   </div>`;
 }
 
@@ -4218,6 +4577,11 @@ function aiAnnotationActionsHtml(index, issueIndex, split, issue, offset = null)
   if (issue.status !== 'open') {
     return `<span class="ai-annotation-status">${issue.status === 'accepted' ? '已接受 AI 建议' : '已保留当前草稿'}</span>`;
   }
+  if (aiHasStructuredSourceRewrite(issue)) {
+    return `<div class="ai-issue-actions">
+      <button class="btn btn-success btn-sm" onclick="aiAcceptIssueSuggestion(${index},${issueIndex})">采纳 AI 原文修改并重提取</button>
+    </div>`;
+  }
   if (offset != null) {
     return `<div class="ai-issue-actions">
       ${aiCanPatchSourceSuggestion(split, issue) ? `<button class="btn btn-success btn-sm" onclick="aiStageIssueSuggestion(${index},${issueIndex})">${issue.suggestionStaged ? 'AI 建议已填入' : '填入 AI 文本建议'}</button>` : ''}
@@ -4231,14 +4595,21 @@ function aiAnnotationActionsHtml(index, issueIndex, split, issue, offset = null)
 function aiDraftTopFieldsHtml(index, split) {
   if (!split.parsed) return '';
   const p = split.parsed;
+  const dayTypeTemplates = typeof getDayTypeTemplates === 'function' ? getDayTypeTemplates() : [];
   return `<div class="ai-linked-draft ai-day-fields">
     <div class="ai-linked-draft-title">最终草稿 · 本日字段</div>
     <div class="ai-draft-grid">
       <label>日期<input value="${escAttr(split.date)}" onchange="aiDraftSetField(${index},'date',this.value)"></label>
       <label>起床<input value="${escAttr(p.wakeTime || '')}" placeholder="HH:MM" onchange="aiDraftSetField(${index},'parsed.wakeTime',this.value)"></label>
       <label>睡觉<input value="${escAttr(p.sleepTime || '')}" placeholder="HH:MM" onchange="aiDraftSetField(${index},'parsed.sleepTime',this.value)"></label>
+      <label>日期类型
+        <input list="ai-day-type-options-${index}" value="${escAttr(p.dayType || '')}" placeholder="可选" onchange="aiDraftApplyDayTypeTemplate(${index},this.value)">
+        <datalist id="ai-day-type-options-${index}">${dayTypeTemplates.map(template => `<option value="${escAttr(template.name || '')}">`).join('')}</datalist>
+        ${p.fieldMeta?.dayType?.raw ? `<span class="form-hint">判断依据：${escHtml(p.fieldMeta.dayType.raw)}</span>` : ''}
+      </label>
       <label class="ai-checkbox"><input type="checkbox" ${p.specialDay ? 'checked' : ''} onchange="aiDraftSetField(${index},'parsed.specialDay',this.checked,'boolean')"> 特殊日</label>
       <label class="ai-checkbox"><input type="checkbox" ${p.excludeFromRating ? 'checked' : ''} onchange="aiDraftSetField(${index},'parsed.excludeFromRating',this.checked,'boolean')"> 不参与评分</label>
+      <label class="ai-full">特殊日原因<input value="${escAttr(p.specialDayReason || '')}" placeholder="可选，不会被日期类型名称覆盖" onchange="aiDraftSetField(${index},'parsed.specialDayReason',this.value)"></label>
       <label class="ai-full">全天备注<textarea onchange="aiDraftSetField(${index},'parsed.dayNote',this.value)">${escHtml(p.dayNote || '')}</textarea></label>
     </div>
     <div class="ai-linked-add-actions">
@@ -4267,26 +4638,6 @@ function aiCompactSessionDraftHtml(index, session, sessionIndex) {
     <input title="备注" value="${escAttr(session.note || '')}" placeholder="备注" onchange="aiDraftSetField(${index},'parsed.sessions.${sessionIndex}.note',this.value)">
     ${aiConfidenceHtml(session.aiMeta)}
     <button class="btn btn-danger btn-sm" onclick="aiDraftDeleteSession(${index},${sessionIndex})">删除</button>
-  </div>`;
-}
-
-function aiCompactTaskDraftHtml(index, task, taskIndex) {
-  const templates = typeof getTaskTemplates === 'function' ? getTaskTemplates() : [];
-  return `<div class="ai-linked-row ai-linked-task">
-    <span class="ai-linked-kind">任务</span>
-    <input title="任务名称" value="${escAttr(task.name || '')}" placeholder="任务名称" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.name',this.value)">
-    <select title="任务模板" onchange="aiDraftApplyTaskTemplate(${index},${taskIndex},this.value)">
-      <option value="">不套用模板</option>
-      ${templates.map(template => `<option value="${escAttr(template.id)}" ${task.templateId === template.id ? 'selected' : ''}>${escHtml(template.name || template.activityType || '未命名模板')}</option>`).join('')}
-    </select>
-    <input title="活动分类" value="${escAttr(task.activityType || '')}" placeholder="活动分类路径" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.activityType',this.value)">
-    <input title="分钟" type="number" value="${task.minutes ?? ''}" placeholder="分钟" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.minutes',this.value,'number')">
-    <input title="数量" type="number" value="${task.quantity ?? ''}" placeholder="数量" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.quantity',this.value,'number')">
-    <input title="单位" value="${escAttr(task.quantityUnit || '')}" placeholder="单位" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.quantityUnit',this.value)">
-    <input title="正确率" type="number" value="${task.accuracy ?? ''}" placeholder="正确率" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.accuracy',this.value,'number')">
-    <input title="备注" value="${escAttr(task.note || '')}" placeholder="备注" onchange="aiDraftSetField(${index},'parsed.tasks.${taskIndex}.note',this.value)">
-    ${aiConfidenceHtml(task.aiMeta)}
-    <button class="btn btn-danger btn-sm" onclick="aiDraftDeleteTask(${index},${taskIndex})">删除</button>
   </div>`;
 }
 
@@ -4367,69 +4718,7 @@ function aiProposalPanelHtml(index, split, unit = null) {
   </div>`;
 }
 
-function aiIssueListHtml(index, split) {
-  const issues = split.issues || [];
-  const units = aiBuildSourceReviewUnits(split);
-  const p = split.parsed;
-  const issueEntries = issues.map((issue, issueIndex) => ({ issue, issueIndex }));
-  const sourceIssueEntries = new Set();
-  const busyAttr = aiBusyAttr(split);
-  const primaryLine = item => Number((item.sourceLines || [])[0]);
-  const sessions = p?.sessions || [];
-  const tasks = p?.tasks || [];
-
-  const unitHtml = units.map(unit => {
-    const unitIssues = issueEntries.filter(entry => (entry.issue.sourceLines || []).some(line => {
-      const offset = Number(line) - Number(split.startLine);
-      return offset >= unit.startOffset && offset <= unit.endOffset;
-    }));
-    unitIssues.forEach(entry => sourceIssueEntries.add(entry));
-    const unitSessions = sessions.map((item, itemIndex) => ({ item, itemIndex }))
-      .filter(entry => unit.relativeLines.includes(primaryLine(entry.item)));
-    const unitTasks = tasks.map((item, itemIndex) => ({ item, itemIndex }))
-      .filter(entry => unit.relativeLines.includes(primaryLine(entry.item)));
-    return `<section id="${aiUnitWrapId(index, unit.key)}" class="ai-source-unit ${unitIssues.length ? 'ai-source-unit-flagged' : ''}">
-      <div class="ai-source-unit-head">
-        <b>原文第 ${split.startLine + unit.startOffset}${unit.endOffset > unit.startOffset ? `-${split.startLine + unit.endOffset}` : ''} 行</b>
-        <span>${unitIssues.length ? `${unitIssues.length} 条建议或校验结果` : '未发现批注'}</span>
-      </div>
-      <textarea id="ai-source-unit-${index}-${unit.key}" class="ai-source-unit-input" oninput="aiSetAnnotationUnitDraft(${index},'${unit.key}',this.value)">${escHtml(split.annotationUnitDrafts?.[unit.key] ?? unit.text)}</textarea>
-      <button class="btn btn-primary btn-sm ai-source-unit-confirm" onclick="aiConfirmAnnotationUnitRevision(${index},'${unit.key}')" ${busyAttr}>保存片段并重解析本片段</button>
-      ${unitIssues.length ? `<div class="ai-source-unit-comments">${unitIssues.map(entry => aiAnnotationCommentHtml(index, entry.issueIndex, split, entry.issue, unit.startOffset)).join('')}</div>` : ''}
-      ${(unitSessions.length || unitTasks.length) ? `<div class="ai-linked-draft">
-        <div class="ai-linked-draft-title">最终草稿 · 对应表格行</div>
-        ${unitSessions.map(entry => aiCompactSessionDraftHtml(index, entry.item, entry.itemIndex)).join('')}
-        ${unitTasks.map(entry => aiCompactTaskDraftHtml(index, entry.item, entry.itemIndex)).join('')}
-      </div>` : '<div class="ai-source-unlinked">当前没有与本片段关联的最终草稿行。</div>'}
-      ${aiProposalPanelHtml(index, split, unit)}
-    </section>`;
-  }).join('');
-
-  const generalIssues = issueEntries.filter(entry => !sourceIssueEntries.has(entry));
-  const unlinkedSessions = sessions.map((item, itemIndex) => ({ item, itemIndex }))
-    .filter(entry => !units.some(unit => unit.relativeLines.includes(primaryLine(entry.item))));
-  const unlinkedTasks = tasks.map((item, itemIndex) => ({ item, itemIndex }))
-    .filter(entry => !units.some(unit => unit.relativeLines.includes(primaryLine(entry.item))));
-
-  return `<div class="ai-annotation-wrap">
-    <div class="ai-annotation-heading">原文与最终草稿对照 <span>空行仅作为段落间隔；修改本项原文后，AI 只重解析本项并同步最终草稿。</span></div>
-    ${split.partialParseMessage ? `<div class="ai-partial-parse-message">${escHtml(split.partialParseMessage)}</div>` : ''}
-    ${aiDraftTopFieldsHtml(index, split)}
-    ${aiProposalPanelHtml(index, split)}
-    <div class="ai-source-units">${unitHtml || '<div class="ai-review-ok">本日没有非空原文片段。</div>'}</div>
-    ${(unlinkedSessions.length || unlinkedTasks.length) ? `<div class="ai-linked-draft ai-unlinked-draft">
-      <div class="ai-linked-draft-title">最终草稿 · 尚未关联到原文片段</div>
-      ${unlinkedSessions.map(entry => aiCompactSessionDraftHtml(index, entry.item, entry.itemIndex)).join('')}
-      ${unlinkedTasks.map(entry => aiCompactTaskDraftHtml(index, entry.item, entry.itemIndex)).join('')}
-    </div>` : ''}
-    ${generalIssues.length ? `<div class="ai-general-comments">
-      <b>字段批注与整体校验</b>
-      ${generalIssues.map(entry => aiAnnotationCommentHtml(index, entry.issueIndex, split, entry.issue)).join('')}
-    </div>` : ''}
-  </div>`;
-}
-
-// Record-level review renderer. This overrides the older paragraph renderer above.
+// Record-level review renderer.
 function aiIssueListHtml(index, split) {
   const issues = split.issues || [];
   const units = aiBuildSourceReviewUnits(split);
@@ -4510,19 +4799,35 @@ function aiRenderDayCard(index) {
     imported: { icon: '📥', label: '已导入', color: 'var(--hp)' },
   };
   const meta = STATUS_META[split.status] || STATUS_META.pending;
+  const parseProgress = aiDayParseProgress(split);
+  const parseState = split.parseExcluded ? 'excluded' : window.AIParseManager.deriveDayState(split, aiFactsForSplit(split));
+  const parseMeta = aiParseStateMeta({
+    state: parseState,
+    reviewStatus: split.status,
+    finalReviewState: split.finalReviewState,
+    done: parseProgress.done,
+    total: parseProgress.total,
+  });
   const p = split.parsed;
   const openReviewCount = (split.issues || []).filter(issue => issue.status === 'open' && (issue.level === 'error' || issue.level === 'warning')).length;
   const meaningfulTarget = aiIsMeaningfulDay(state.data?.[split.date]);
   const importMode = split.importMode || aiDefaultImportMode(split.date);
   const canConfirm = aiCanConfirmSplit(split);
-  const busy = aiSplitIsBusy(split);
+  const busy = aiSplitIsBusy(split) || aiEnsureParseManager().state === 'running';
+  const missingItems = Math.max(0, parseProgress.total - parseProgress.done);
+  const continueLabel = missingItems > 0 && (parseProgress.done > 0 || parseProgress.failed > 0)
+    ? `继续补全 ${missingItems} 项`
+    : missingItems === 0 && split.finalReviewState !== 'complete'
+      ? '继续最终复查'
+      : '解析';
 
   el.innerHTML = `<div class="ai-review-card ${split.status === 'blocked' ? 'ai-review-card-blocked' : ''}">
     <div class="ai-review-header">
       <div><span class="ai-status-icon">${meta.icon}</span> <b style="color:${meta.color}">${escHtml(split.date)}</b> <span>${meta.label}</span>
+        <span class="ai-parse-state-label">${escHtml(parseMeta.label)} · ${parseProgress.done}/${parseProgress.total}</span>
         <span class="ai-source-lines">第 ${split.startLine || '?'}-${split.endLine || '?'} 行</span></div>
       <div class="ai-review-actions">
-        ${(split.status === 'pending' || split.status === 'error') ? `<button class="btn btn-primary btn-sm" onclick="aiParseSingleDay(${index})" ${busy ? 'disabled title="正在解析，请稍候"' : ''}>🤖 解析</button>` : ''}
+        ${['pending', 'partial', 'error'].includes(parseState) && !split.parseExcluded ? `<button class="btn btn-primary btn-sm" onclick="aiContinueDayParse(${index})" ${busy ? 'disabled title="正在解析，请稍候"' : ''}>${escHtml(continueLabel)}</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="aiToggleRaw(${index})">查看原文</button>
         <button class="btn btn-ghost btn-sm" onclick="aiToggleSourceEditor(${index})">${split.sourceEditorOpen ? '收起原文编辑' : '修改原文'}</button>
         ${p ? `<button class="btn btn-primary btn-sm" onclick="aiReparseDayWithProposal(${index})" ${busy ? 'disabled title="正在解析，请稍候"' : ''}>让 AI 重新解析本日原文</button>
@@ -4534,6 +4839,7 @@ function aiRenderDayCard(index) {
     ${split.error ? `<div class="ai-issue ai-issue-error">${escHtml(split.error.slice(0, 500))}</div>` : ''}
     ${p ? `<div class="ai-review-summary">
       <span>起床 <b>${escHtml(p.wakeTime || '-')}</b></span><span>睡觉 <b>${escHtml(p.sleepTime || '-')}</b></span>
+      <span>日期类型 <b>${escHtml(p.dayType || '-')}</b></span>
       <span>时段 <b>${(p.sessions || []).length}</b></span><span>任务 <b>${(p.tasks || []).length}</b></span>
       <span>待处理 <b class="${openReviewCount ? 'c-red' : 'c-green'}">${openReviewCount}</b></span>
     </div>

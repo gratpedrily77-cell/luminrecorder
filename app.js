@@ -82,8 +82,6 @@ function applyThemeColors(s) {
 
 let SETTINGS = loadSettings();
 
-function getS() { return SETTINGS; }
-
 // ============================================================
 // TOOLTIP SYSTEM
 // ============================================================
@@ -521,45 +519,6 @@ async function deleteCatItem(level, name) {
   await saveAllStorage();
 }
 
-async function renameCatItem(level, oldName, newName) {
-  if (!oldName || !newName || !newName.trim()) return;
-  newName = newName.trim();
-  if (oldName === newName) return;
-  const list = getCatList(level);
-  const idx = list.indexOf(oldName);
-  if (idx >= 0) list[idx] = newName;
-  // Update all tasks and templates that reference oldName at this level position
-  _renameCatInTasksFlat(level, oldName, newName);
-  _renameCatInTemplatesFlat(level, oldName, newName);
-  await saveAllStorage();
-}
-
-function _renameCatInTasksFlat(level, oldName, newName) {
-  Object.keys(state.data).forEach(k => {
-    if (k.startsWith('__')) return;
-    const day = state.data[k];
-    (day.tasks || []).forEach(t => {
-      if (!t.activityType) return;
-      const parts = t.activityType.split(' > ');
-      if (parts[level - 1] === oldName) {
-        parts[level - 1] = newName;
-        t.activityType = parts.join(' > ');
-      }
-    });
-  });
-}
-
-function _renameCatInTemplatesFlat(level, oldName, newName) {
-  (getTaskTemplates() || []).forEach(t => {
-    if (!t.activityType) return;
-    const parts = t.activityType.split(' > ');
-    if (parts[level - 1] === oldName) {
-      parts[level - 1] = newName;
-      t.activityType = parts.join(' > ');
-    }
-  });
-}
-
 // ============================================================
 // UNIT LIBRARY (数量单位库)
 // ============================================================
@@ -586,7 +545,6 @@ async function deleteUnitItem(name) {
  * 生成单位增强选择器 HTML
  */
 function unitSelectorHtml(inputId, currentValue, msgId) {
-  const items = getUnitList();
   return `
     <div class="cat-selector" id="${inputId}_wrap">
       <div class="cat-selector-input-row">
@@ -723,6 +681,41 @@ async function saveSessionTemplate(tmpl) {
   await saveAllStorage();
 }
 
+// ============================================================
+// DAY TYPE TEMPLATES (日期类型模板)
+// ============================================================
+function getDayTypeTemplates() {
+  if (!state.data.__dayTypeTemplates__) state.data.__dayTypeTemplates__ = [];
+  return state.data.__dayTypeTemplates__;
+}
+
+async function notifyDayTypeTemplatesChanged() {
+  if (typeof aiInvalidateDayTypeReviews === 'function') {
+    await aiInvalidateDayTypeReviews();
+  }
+}
+
+async function addDayTypeTemplate(tmpl) {
+  tmpl.id = uid();
+  getDayTypeTemplates().push(tmpl);
+  await saveAllStorage();
+  await notifyDayTypeTemplatesChanged();
+}
+
+async function deleteDayTypeTemplate(id) {
+  state.data.__dayTypeTemplates__ = getDayTypeTemplates().filter(t => t.id !== id);
+  await saveAllStorage();
+  await notifyDayTypeTemplatesChanged();
+}
+
+async function saveDayTypeTemplate(tmpl) {
+  const list = getDayTypeTemplates();
+  const idx = list.findIndex(t => t.id === tmpl.id);
+  if (idx >= 0) list[idx] = tmpl; else list.push(tmpl);
+  await saveAllStorage();
+  await notifyDayTypeTemplatesChanged();
+}
+
 /** Switch session type between normal and special */
 function switchSessionType(type) {
   const normalBtn = document.getElementById('sessTypeNormal');
@@ -765,7 +758,7 @@ function applySessionTemplate(id) {
 // ============================================================
 // TASK TEMPLATES
 // ============================================================
-// Structure: { id, name, activityType, keywords:[], defaultMinutes, quantityUnit, note }
+// Structure: { id, name, activityType, keywords:[], aiPrompt, defaultMinutes, quantityUnit, note }
 function getTaskTemplates() {
   if (!state.data.__taskTemplates__) state.data.__taskTemplates__ = [];
   return state.data.__taskTemplates__;
@@ -794,6 +787,8 @@ function applyTemplate(id) {
   if (!id) return;
   const tmpl = getTaskTemplates().find(t => t.id === id);
   if (!tmpl) return;
+  const nameEl = document.getElementById('task_name');
+  if (nameEl && tmpl.name) nameEl.value = tmpl.name;
   const [l1, l2, l3] = parseActPath(tmpl.activityType || '');
   const l1el = document.getElementById('task_l1');
   if (l1el) l1el.value = l1;
@@ -809,7 +804,6 @@ function applyTemplate(id) {
 // ── Template Management Tab ──────────────────────────────────
 function renderTemplates() {
   const templates = getTaskTemplates();
-  const l1Names = getLevel1Names();
 
   document.getElementById('tab-templates').innerHTML = `
     <div style="max-width:900px">
@@ -820,7 +814,7 @@ function renderTemplates() {
         <p style="font-size:12px;color:var(--muted);line-height:1.7;margin:0">
           在这里预定义常用任务模板，与活动类别三级联动绑定。<br>
           · 录入任务时可一键套用，自动填充类别、时长、单位等字段。<br>
-          · <b>AI 录入（Step 2）会优先匹配模板关键词</b>，命中则直接套用模板分类；
+          · <b>AI 录入（Step 2）会优先理解模板专属提示词</b>，再结合关键词和上下文决定是否套用；
           全部未命中时才回退到活动分类推断，若仍无法判断则在 note 中标注 <code>[待分类]</code>。
         </p>
       </div>
@@ -834,8 +828,8 @@ function renderTemplates() {
         <div id="tmpl-form-body" style="display:none;margin-top:14px">
           <div class="form-grid" style="grid-template-columns:1fr 1fr">
             <div class="form-group" style="grid-column:span 2">
-              <label>模板名称 <span style="font-size:10px;color:var(--muted)">（可选，留空则自动生成）</span></label>
-              <input type="text" id="tmpl_name" placeholder="留空则根据活动类别/关键词自动生成">
+              <label>模板名称 <span style="font-size:10px;color:var(--muted)">（可选，留空时 AI 根据原文命名）</span></label>
+              <input type="text" id="tmpl_name" placeholder="留空则只套用活动类别等模板字段">
             </div>
           </div>
 
@@ -866,6 +860,13 @@ function renderTemplates() {
             <input type="text" id="tmpl_keywords"
               placeholder="例：英语,精读,reading,阅读,泛读">
             <div class="form-hint">AI 解析时会逐词比对任务描述；关键词越精准，匹配越准确</div>
+          </div>
+
+          <div class="form-group">
+            <label>模板专属 AI 提示词</label>
+            <textarea id="tmpl_ai_prompt" rows="4"
+              placeholder="详细说明这个模板适用于什么、还可以套用哪些表达、哪些情况不要套用，以及需要特别注意的判断规则。"></textarea>
+            <div class="form-hint">AI 选择模板时优先理解这里的说明，再结合关键词和整日上下文判断</div>
           </div>
 
           <div class="form-grid" style="grid-template-columns:repeat(3,1fr)">
@@ -907,6 +908,10 @@ function renderTemplates() {
       <!-- ⏱ 时段模板库 -->
       <!-- ═══════════════════════════════════════════════ -->
       ${renderSessionTemplatesSection()}
+
+      <!-- 🗓 日期类型模板库 -->
+      <!-- ═══════════════════════════════════════════════ -->
+      ${renderDayTypeTemplatesSection()}
     </div>
   `;
 }
@@ -924,7 +929,7 @@ function renderSessionTemplatesSection() {
           预定义特殊的时段模板（如吃饭、活动、休息等非学习时段）。<br>
           · 特殊时段只有时钟时长（开始→结束的时间跨度），没有名义时长和实际专注。<br>
           · 录入时可一键套用，自动切换为特殊时段模式并填充名称和备注。<br>
-          · <b>AI 录入（Step 2）会优先匹配时段模板关键词</b>，命中则自动标记为特殊时段。
+          · <b>AI 录入（Step 2）会优先理解模板专属提示词</b>，再结合关键词和上下文决定是否采用模板名称。
         </p>
       </div>
 
@@ -947,6 +952,13 @@ function renderSessionTemplatesSection() {
             <label>AI 匹配关键词（逗号分隔）</label>
             <input type="text" id="sess_tmpl_keywords" placeholder="例：午饭,吃饭,午餐,lunch">
             <div class="form-hint">AI 解析时段时会逐词比对描述；关键词越精准，匹配越准确</div>
+          </div>
+
+          <div class="form-group">
+            <label>模板专属 AI 提示词</label>
+            <textarea id="sess_tmpl_ai_prompt" rows="4"
+              placeholder="详细说明这个特殊时段适用于什么、还可以套用哪些表达、哪些情况不要套用，以及需要特别注意的判断规则。"></textarea>
+            <div class="form-hint">AI 选择模板时优先理解这里的说明，再结合关键词和整日上下文判断</div>
           </div>
 
 
@@ -991,6 +1003,7 @@ async function sessTmplSaveNew() {
   const tmpl = {
     name,
     keywords,
+    aiPrompt: document.getElementById('sess_tmpl_ai_prompt').value.trim(),
     note: document.getElementById('sess_tmpl_note').value.trim(),
   };
   await addSessionTemplate(tmpl);
@@ -1016,6 +1029,7 @@ function sessTmplCardHtml(t) {
         ${kws ? `<span>🔑 关键词：<span style="color:var(--text)">${escHtmlApp(kws)}</span></span>` : '<span style="color:var(--dim)">无关键词</span>'}
         ${t.note ? `<span>📝 ${escHtmlApp(t.note)}</span>` : ''}
       </div>
+      ${t.aiPrompt ? `<div class="template-ai-prompt"><b>AI 提示词</b><span>${escHtmlApp(t.aiPrompt)}</span></div>` : ''}
       <div id="sess-tmpl-edit-${t.id}" style="display:none;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
         ${sessTmplEditFormHtml(t)}
       </div>
@@ -1031,6 +1045,11 @@ function sessTmplEditFormHtml(t) {
     <div class="form-group">
       <label>关键词（逗号分隔）</label>
       <input type="text" id="sess-tmpl-edit-kw-${t.id}" value="${escHtmlApp((t.keywords || []).join(','))}">
+    </div>
+    <div class="form-group">
+      <label>模板专属 AI 提示词</label>
+      <textarea id="sess-tmpl-edit-ai-prompt-${t.id}" rows="4"
+        placeholder="说明适用范围、可套用表达、排除情况和注意事项">${escHtmlApp(t.aiPrompt || '')}</textarea>
     </div>
     <div class="form-group">
       <label>备注模板</label>
@@ -1056,6 +1075,7 @@ async function sessTmplSaveEdit(id) {
   const keywords = kwRaw.split(/[,，]/).map(k => k.trim()).filter(Boolean);
   const tmpl = {
     id, name, keywords,
+    aiPrompt: document.getElementById(`sess-tmpl-edit-ai-prompt-${id}`).value.trim(),
     note: document.getElementById(`sess-tmpl-edit-note-${id}`).value.trim(),
   };
   await saveSessionTemplate(tmpl);
@@ -1067,6 +1087,175 @@ async function sessTmplDelete(id) {
   if (!tmpl) return;
   if (!confirm(`删除时段模板「${tmpl.name}」？`)) return;
   await deleteSessionTemplate(id);
+  renderTemplates();
+}
+
+function renderDayTypeTemplatesSection() {
+  const templates = getDayTypeTemplates();
+  return `
+    <div style="margin-top:28px;border-top:2px solid var(--border);padding-top:20px">
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title" style="margin-bottom:6px">🗓 日期类型模板库</div>
+        <p style="font-size:12px;color:var(--muted);line-height:1.7;margin:0">
+          AI 在每日最终复查时阅读整日原文，选择至多一个日期类型。<br>
+          · 专属 AI 提示词优先于关键词；不明确符合任何模板时允许不分类。<br>
+          · 模板决定是否标记特殊天、是否不参与评分，结果先进入待审核草稿。
+        </p>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header" style="cursor:pointer" onclick="dayTypeTmplToggleForm()">
+          <div class="card-title">＋ 新建日期类型模板</div>
+          <span id="day-type-tmpl-form-toggle" style="font-size:12px;color:var(--muted)">▼ 展开</span>
+        </div>
+        <div id="day-type-tmpl-form-body" style="display:none;margin-top:14px">
+          <div class="form-group">
+            <label>类型名称</label>
+            <input type="text" id="day_type_tmpl_name" placeholder="例：旅行日、生病休息日、考试日">
+          </div>
+          <div class="form-group">
+            <label>AI 匹配关键词（逗号分隔）</label>
+            <input type="text" id="day_type_tmpl_keywords" placeholder="例：旅行,出门,酒店,景点">
+          </div>
+          <div class="form-group">
+            <label>模板专属 AI 提示词</label>
+            <textarea id="day_type_tmpl_ai_prompt" rows="4"
+              placeholder="说明怎样判断整天属于这个类型、可包含哪些场景、哪些情况不要归入，以及需要注意的上下文。"></textarea>
+          </div>
+          <div class="day-type-template-flags">
+            <label class="ai-checkbox"><input type="checkbox" id="day_type_tmpl_special"> 标记为特殊天</label>
+            <label class="ai-checkbox"><input type="checkbox" id="day_type_tmpl_exclude"> 不参与评分</label>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:12px">
+            <button class="btn btn-success" onclick="dayTypeTmplSaveNew()">✓ 保存日期类型</button>
+            <button class="btn btn-ghost btn-sm" onclick="dayTypeTmplToggleForm()">取消</button>
+            <span id="day-type-tmpl-save-msg" style="font-size:12px;font-family:var(--mono);color:var(--pol)"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="margin-bottom:12px">🗂 已保存的日期类型（${templates.length} 个）</div>
+        ${templates.length === 0
+      ? '<div class="empty-state"><p>暂无日期类型模板</p></div>'
+      : `<div style="display:grid;gap:10px">${templates.map(dayTypeTmplCardHtml).join('')}</div>`}
+      </div>
+    </div>`;
+}
+
+function dayTypeTmplToggleForm() {
+  const body = document.getElementById('day-type-tmpl-form-body');
+  const toggle = document.getElementById('day-type-tmpl-form-toggle');
+  if (!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? 'block' : 'none';
+  if (toggle) toggle.textContent = open ? '▲ 收起' : '▼ 展开';
+}
+
+function readDayTypeTemplateForm(prefix) {
+  const name = document.getElementById(`${prefix}name`)?.value.trim() || '';
+  const keywords = (document.getElementById(`${prefix}keywords`)?.value || '')
+    .split(/[,，]/)
+    .map(item => item.trim())
+    .filter(Boolean);
+  return {
+    name,
+    keywords,
+    aiPrompt: document.getElementById(`${prefix}ai_prompt`)?.value.trim() || '',
+    specialDay: Boolean(document.getElementById(`${prefix}special`)?.checked),
+    excludeFromRating: Boolean(document.getElementById(`${prefix}exclude`)?.checked),
+  };
+}
+
+async function dayTypeTmplSaveNew() {
+  const tmpl = readDayTypeTemplateForm('day_type_tmpl_');
+  if (!tmpl.name) {
+    alert('请填写日期类型名称');
+    return;
+  }
+  await addDayTypeTemplate(tmpl);
+  const msg = document.getElementById('day-type-tmpl-save-msg');
+  if (msg) {
+    msg.textContent = `✅ 已保存「${tmpl.name}」`;
+    setTimeout(() => { msg.textContent = ''; }, 2500);
+  }
+  renderTemplates();
+}
+
+function dayTypeTmplCardHtml(t) {
+  const keywords = (t.keywords || []).join('、');
+  return `
+    <div id="day-type-tmpl-card-${t.id}" style="border:1px solid var(--border);border-radius:8px;padding:12px;background:rgba(255,255,255,.015)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+        <div>
+          <b>${escHtmlApp(t.name || '未命名类型')}</b>
+          <span class="day-type-flag ${t.specialDay ? 'active' : ''}">特殊天：${t.specialDay ? '是' : '否'}</span>
+          <span class="day-type-flag ${t.excludeFromRating ? 'active' : ''}">不评分：${t.excludeFromRating ? '是' : '否'}</span>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-ghost btn-sm" onclick="dayTypeTmplStartEdit('${t.id}')">✏️ 编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="dayTypeTmplDelete('${t.id}')">删除</button>
+        </div>
+      </div>
+      <div style="margin-top:6px;font-size:11px;color:var(--muted)">
+        ${keywords ? `🔑 关键词：<span style="color:var(--text)">${escHtmlApp(keywords)}</span>` : '<span style="color:var(--dim)">无关键词</span>'}
+      </div>
+      ${t.aiPrompt ? `<div class="template-ai-prompt"><b>AI 提示词</b><span>${escHtmlApp(t.aiPrompt)}</span></div>` : ''}
+      <div id="day-type-tmpl-edit-${t.id}" style="display:none;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
+        ${dayTypeTmplEditFormHtml(t)}
+      </div>
+    </div>`;
+}
+
+function dayTypeTmplEditFormHtml(t) {
+  return `
+    <div class="form-group">
+      <label>类型名称</label>
+      <input type="text" id="day-type-tmpl-edit-${t.id}-name" value="${escHtmlApp(t.name || '')}">
+    </div>
+    <div class="form-group">
+      <label>关键词（逗号分隔）</label>
+      <input type="text" id="day-type-tmpl-edit-${t.id}-keywords" value="${escHtmlApp((t.keywords || []).join(','))}">
+    </div>
+    <div class="form-group">
+      <label>模板专属 AI 提示词</label>
+      <textarea id="day-type-tmpl-edit-${t.id}-ai_prompt" rows="4">${escHtmlApp(t.aiPrompt || '')}</textarea>
+    </div>
+    <div class="day-type-template-flags">
+      <label class="ai-checkbox"><input type="checkbox" id="day-type-tmpl-edit-${t.id}-special" ${t.specialDay ? 'checked' : ''}> 标记为特殊天</label>
+      <label class="ai-checkbox"><input type="checkbox" id="day-type-tmpl-edit-${t.id}-exclude" ${t.excludeFromRating ? 'checked' : ''}> 不参与评分</label>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="btn btn-success btn-sm" onclick="dayTypeTmplSaveEdit('${t.id}')">✓ 保存修改</button>
+      <button class="btn btn-ghost btn-sm" onclick="dayTypeTmplCancelEdit('${t.id}')">取消</button>
+    </div>`;
+}
+
+function dayTypeTmplStartEdit(id) {
+  const el = document.getElementById(`day-type-tmpl-edit-${id}`);
+  if (el) el.style.display = 'block';
+}
+
+function dayTypeTmplCancelEdit(id) {
+  const el = document.getElementById(`day-type-tmpl-edit-${id}`);
+  if (el) el.style.display = 'none';
+}
+
+async function dayTypeTmplSaveEdit(id) {
+  const tmpl = { id, ...readDayTypeTemplateForm(`day-type-tmpl-edit-${id}-`) };
+  if (!tmpl.name) {
+    alert('请填写日期类型名称');
+    return;
+  }
+  await saveDayTypeTemplate(tmpl);
+  renderTemplates();
+}
+
+async function dayTypeTmplDelete(id) {
+  const tmpl = getDayTypeTemplates().find(item => item.id === id);
+  if (!tmpl) return;
+  if (!confirm(`删除日期类型模板「${tmpl.name}」？`)) return;
+  await deleteDayTypeTemplate(id);
   renderTemplates();
 }
 
@@ -1093,6 +1282,7 @@ function tmplCardHtml(t) {
         ${t.quantityUnit ? `<span>📏 单位：${escHtmlApp(t.quantityUnit)}</span>` : ''}
         ${t.note ? `<span>📝 备注：${escHtmlApp(t.note)}</span>` : ''}
       </div>
+      ${t.aiPrompt ? `<div class="template-ai-prompt"><b>AI 提示词</b><span>${escHtmlApp(t.aiPrompt)}</span></div>` : ''}
       <!-- 编辑内嵌区 -->
       <div id="tmpl-edit-${t.id}" style="display:none;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
         ${tmplEditFormHtml(t)}
@@ -1102,9 +1292,6 @@ function tmplCardHtml(t) {
 
 function tmplEditFormHtml(t) {
   const [l1, l2, l3] = parseActPath(t.activityType || '');
-  const l1Names = getLevel1Names();
-  const l2Names = getLevel2Names();
-  const l3Names = getLevel3Names();
   return `
     <div class="form-grid" style="grid-template-columns:1fr 1fr">
       <div class="form-group" style="grid-column:span 2">
@@ -1135,6 +1322,11 @@ function tmplEditFormHtml(t) {
       <label>关键词（逗号分隔）</label>
       <input type="text" id="tmpl-edit-kw-${t.id}" value="${escHtmlApp((t.keywords || []).join(','))}">
     </div>
+    <div class="form-group">
+      <label>模板专属 AI 提示词</label>
+      <textarea id="tmpl-edit-ai-prompt-${t.id}" rows="4"
+        placeholder="说明适用范围、可套用表达、排除情况和注意事项">${escHtmlApp(t.aiPrompt || '')}</textarea>
+    </div>
     <div class="form-grid" style="grid-template-columns:repeat(3,1fr)">
       <div class="form-group"><label>默认时长(分钟)</label>
         <input type="number" id="tmpl-edit-min-${t.id}" value="${t.defaultMinutes || ''}"></div>
@@ -1157,33 +1349,6 @@ function tmplToggleForm() {
   const open = body.style.display === 'none';
   body.style.display = open ? 'block' : 'none';
   if (tog) tog.textContent = open ? '▲ 收起' : '▼ 展开';
-}
-
-
-// Save a single category level from a named input element
-async function saveSingleCat(level, inputId, msgId) {
-  const el = document.getElementById(inputId);
-  const name = (el?.value || '').trim();
-  if (!name) { _showCatMsg(msgId, '⚠️ 请先输入名称', 'var(--red)'); return; }
-  const list = getCatList(level);
-  if (list.includes(name)) { _showCatMsg(msgId, '已存在', 'var(--muted)'); return; }
-  await addCatItem(level, name);
-  _showCatMsg(msgId, `✅ 已保存「${name}」`, 'var(--pol)');
-  // refresh datalists everywhere
-  _refreshAllDataLists();
-}
-
-// Delete a single category level from a named input element
-async function deleteSingleCat(level, inputId, msgId) {
-  const el = document.getElementById(inputId);
-  const name = (el?.value || '').trim();
-  const labels = { 1: '一级', 2: '二级', 3: '三级' };
-  if (!name) { _showCatMsg(msgId, `⚠️ 请先在输入框选择要删除的${labels[level]}类别`, 'var(--red)'); return; }
-  if (!confirm(`确定从类别库中删除${labels[level]}「${name}」？\n（已有任务/模板中引用此类别不受影响）`)) return;
-  await deleteCatItem(level, name);
-  if (el) el.value = '';
-  _showCatMsg(msgId, `🗑️ 已删除「${name}」`, 'var(--muted)');
-  _refreshAllDataLists();
 }
 
 function _showCatMsg(msgId, text, color) {
@@ -1239,6 +1404,7 @@ async function tmplSaveNew() {
     name,
     activityType,
     keywords,
+    aiPrompt: document.getElementById('tmpl_ai_prompt').value.trim(),
     defaultMinutes: parseInt(document.getElementById('tmpl_minutes').value) || null,
     quantityUnit: document.getElementById('tmpl_unit').value.trim(),
     note: document.getElementById('tmpl_note').value.trim(),
@@ -1277,6 +1443,7 @@ async function tmplSaveEdit(id) {
     name,
     activityType: buildActPath(l1, l2, l3),
     keywords,
+    aiPrompt: document.getElementById(`tmpl-edit-ai-prompt-${id}`).value.trim(),
     defaultMinutes: parseInt(document.getElementById(`tmpl-edit-min-${id}`).value) || null,
     quantityUnit: document.getElementById(`tmpl-edit-unit-${id}`).value.trim(),
     note: document.getElementById(`tmpl-edit-note-${id}`).value.trim(),
@@ -1304,7 +1471,6 @@ function escHtmlApp(str) {
  */
 function catSelectorHtml(level, inputId, currentValue, msgId) {
   const labels = { 1: '一级', 2: '二级', 3: '三级' };
-  const items = getCatList(level);
   return `
     <div class="cat-selector" id="${inputId}_wrap">
       <div class="cat-selector-input-row">
@@ -1647,7 +1813,6 @@ function renderEntry() {
   const stats = computeDay(dateStr);
   const sessions = day.sessions || [];
   const tasks = day.tasks || [];
-  const actTypes = getActivityTypes();
 
   document.getElementById('tab-entry').innerHTML = `
     <div class="date-nav">
@@ -1677,6 +1842,15 @@ function renderEntry() {
     <!-- 🏷️ SPECIAL DAY -->
     <div class="card" style="margin-bottom:0;${day.specialDay ? 'border-color:rgba(255,183,77,.4);background:rgba(255,183,77,.04)' : ''}">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
+          日期类型
+          <input id="dayTypeInput" list="dayTypeOptions" value="${escHtmlApp(day.dayType || '')}"
+            placeholder="可选" onchange="applyDayTypeTemplateToEntry(this.value)"
+            style="min-width:140px;background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:5px">
+          <datalist id="dayTypeOptions">
+            ${getDayTypeTemplates().map(t => `<option value="${escHtmlApp(t.name || '')}">`).join('')}
+          </datalist>
+        </label>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;user-select:none">
           <input type="checkbox" id="specialDayCheck" ${day.specialDay ? 'checked' : ''} style="width:18px;height:18px;accent-color:var(--thesis);cursor:pointer">
           <span style="color:${day.specialDay ? 'var(--thesis)' : 'var(--muted)'}">🏷️ 标记为特殊天</span>
@@ -1905,47 +2079,6 @@ function autoCalcRate() {
   }
 }
 
-// 三级独立，不做联动清空（保留函数签名以兼容 onchange）
-function onL1Change() { /* no-op: levels are independent */ }
-function onL2Change() { /* no-op: levels are independent */ }
-
-// Get value from select+custom input combo: prefer custom input if non-empty, else select value
-function getCatValue(selectId, customId) {
-  const customEl = document.getElementById(customId);
-  const customVal = (customEl?.value || '').trim();
-  if (customVal) return customVal;
-  const selectEl = document.getElementById(selectId);
-  return (selectEl?.value || '').trim();
-}
-
-// Save category from select or custom input
-async function saveCatFromSelectOrInput(level, selectId, customId, msgId) {
-  const customEl = document.getElementById(customId);
-  const name = (customEl?.value || '').trim();
-  if (!name) { _showCatMsg(msgId, '⚠️ 请在右侧输入框输入新类别名称', 'var(--red)'); return; }
-  const list = getCatList(level);
-  if (list.includes(name)) { _showCatMsg(msgId, '已存在', 'var(--muted)'); return; }
-  await addCatItem(level, name);
-  _showCatMsg(msgId, `✅ 已保存「${name}」`, 'var(--pol)');
-  customEl.value = '';
-  _refreshAllDataLists();
-}
-
-// Delete category from select dropdown
-async function deleteCatFromSelect(level, selectId, msgId) {
-  const selectEl = document.getElementById(selectId);
-  const name = (selectEl?.value || '').trim();
-  const labels = { 1: '一级', 2: '二级', 3: '三级' };
-  if (!name) { _showCatMsg(msgId, `⚠️ 请先在下拉框选择要删除的${labels[level]}类别`, 'var(--red)'); return; }
-  if (!confirm(`确定从类别库中删除${labels[level]}「${name}」？\n（已有任务/模板中引用此类别不受影响）`)) return;
-  await deleteCatItem(level, name);
-  if (selectEl) selectEl.value = '';
-  _showCatMsg(msgId, `🗑️ 已删除「${name}」`, 'var(--muted)');
-  _refreshAllDataLists();
-}
-
-// saveEntryCats / delCat replaced by saveSingleCat / deleteSingleCat
-
 function toggleForm(id) {
   const el = document.getElementById(id);
   if (el) el.classList.toggle('open');
@@ -1962,20 +2095,36 @@ async function saveDayNote(dateStr) {
   renderEntry(); restoreDraft(dateStr);
 }
 
+function applyDayTypeTemplateToEntry(name) {
+  const tmpl = getDayTypeTemplates().find(item => item.name === String(name || '').trim());
+  if (!tmpl) return;
+  const special = document.getElementById('specialDayCheck');
+  const exclude = document.getElementById('excludeFromRatingCheck');
+  if (special) special.checked = Boolean(tmpl.specialDay);
+  if (exclude) exclude.checked = Boolean(tmpl.excludeFromRating);
+  const reasonWrap = document.getElementById('specialDayReasonWrap');
+  if (reasonWrap) {
+    reasonWrap.style.display = tmpl.specialDay ? 'block' : 'none';
+    reasonWrap.style.marginTop = tmpl.specialDay ? '10px' : '0';
+  }
+}
+
 async function saveSleep(dateStr) {
   const wakeTime = readTimeInput('wakeInput');
   const sleepTime = readTimeInput('sleepInput');
+  const dayType = document.getElementById('dayTypeInput')?.value?.trim() || '';
   const specialDay = document.getElementById('specialDayCheck')?.checked || false;
   const specialDayReason = document.getElementById('specialDayReason')?.value?.trim() || '';
   const excludeFromRating = document.getElementById('excludeFromRatingCheck')?.checked || false;
   const day = getDay(dateStr);
   day.wakeTime = wakeTime;
   day.sleepTime = sleepTime;
+  day.dayType = dayType;
   day.specialDay = specialDay;
   day.specialDayReason = specialDayReason;
   day.excludeFromRating = excludeFromRating;
   cacheToLocal();
-  await apiFetch(`/api/data/${dateStr}/sleep`, { method: 'PUT', body: JSON.stringify({ wakeTime, sleepTime, specialDay, specialDayReason, excludeFromRating }) });
+  await apiFetch(`/api/data/${dateStr}/sleep`, { method: 'PUT', body: JSON.stringify({ wakeTime, sleepTime, dayType, specialDay, specialDayReason, excludeFromRating }) });
   renderEntry(); renderHeader(); restoreDraft(dateStr);
 }
 
@@ -3780,11 +3929,11 @@ function renderSettings() {
         <p style="font-size:12px;color:var(--muted);margin-bottom:10px">AI 接口配置与额外解析指令均在「🤖 AI录入」页管理；Step 2 并发数可在这里快速调整。</p>
         <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-bottom:10px">
           <div class="form-group">
-            <label>Step 2 同时解析天数</label>
-            <input type="number" id="set_aiParseConcurrency" value="${typeof aiNormalizeParseConcurrency === 'function' ? aiNormalizeParseConcurrency(aiCfg.parseConcurrency) : (parseInt(aiCfg.parseConcurrency) || 1)}" min="1" max="2" step="1">
+            <label>Step 2 同时解析本日项目数</label>
+            <input type="number" id="set_aiParseConcurrency" value="${typeof aiNormalizeParseConcurrency === 'function' ? aiNormalizeParseConcurrency(aiCfg.parseConcurrency) : (parseInt(aiCfg.parseConcurrency) || 1)}" min="1" max="10" step="1">
           </div>
         </div>
-        <div class="form-hint" style="margin-bottom:10px">默认 1，最多 2。出现限流时本轮会自动降为串行。</div>
+        <div class="form-hint" style="margin-bottom:10px">日期始终逐日处理；并发数仅控制当前日期相邻项目，范围 1-10。收到 429 会立即停止。</div>
         <button class="btn btn-primary btn-sm" onclick="showTab('ai')">前往 AI 录入页配置 →</button>
       </div>
 
@@ -4976,7 +5125,7 @@ function renderStackedArea() {
   });
 
   // ── 百分比堆积面积图 ──
-  const pctChart = mkChart('stackedPctChart', {
+  mkChart('stackedPctChart', {
     type: 'line',
     data: { labels, datasets: pctDatasets },
     options: {

@@ -88,6 +88,8 @@ def put_sleep(date_str: str):
     day = data.setdefault(date_str, {"wakeTime": "", "sleepTime": "", "sessions": [], "tasks": []})
     day["wakeTime"] = payload.get("wakeTime", day.get("wakeTime", ""))
     day["sleepTime"] = payload.get("sleepTime", day.get("sleepTime", ""))
+    if "dayType" in payload:
+        day["dayType"] = payload["dayType"]
     # 特殊天标记
     if "specialDay" in payload:
         day["specialDay"] = payload["specialDay"]
