@@ -25,18 +25,18 @@ const DEFAULT_SETTINGS = {
   dailyGoalHours: 8,
   wakeGoalHour: 7,
   sleepGoalHour: 0,
-  utilPassPct: 50,
+  utilPassPct: 50,            // 不可用时间占比警戒线
   focusGoodPct: 80,
   focusOkPct: 60,
   weekStartDay: 1, // 1=周一, 0=周日
   // 数据存储
-  autosaveInterval: 3000,
+  snapshotInterval: 30000,
   useLocalStorageCache: true,
   // 评分规则
   ratingActualMin: 480,       // 实际专注>=480min(8h)得1分
   ratingDeviationPct: -10,    // 偏差>=-10%得1分
   ratingWakeLimit: 480,       // 起床<=480min(8:00)得1分
-  ratingUtilPct: 50,          // 利用率>=50%得1分
+  ratingUtilPct: 50,          // 不可用时间占比<=50%得1分
   ratingStarThreshold: 3,     // >=3分⭐
   ratingOkThreshold: 2,       // >=2分👌
   ratingWarnThreshold: 1,     // >=1分⚠️
@@ -54,7 +54,15 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
       const saved = JSON.parse(raw);
-      return { ...DEFAULT_SETTINGS, ...saved };
+      const settings = { ...DEFAULT_SETTINGS, ...saved };
+      if (!Object.prototype.hasOwnProperty.call(saved, 'snapshotInterval')) {
+        settings.snapshotInterval = [30000, 60000].includes(Number(saved.autosaveInterval))
+          ? Number(saved.autosaveInterval)
+          : 30000;
+      }
+      if (![0, 30000, 60000].includes(Number(settings.snapshotInterval))) settings.snapshotInterval = 30000;
+      delete settings.autosaveInterval;
+      return settings;
     }
   } catch (e) { console.warn('加载设置失败', e); }
   return { ...DEFAULT_SETTINGS };
@@ -64,7 +72,7 @@ function saveSettings(s) {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch (e) { console.warn('保存设置失败', e); }
   // Apply theme colors to CSS variables
   applyThemeColors(s);
-  // Update autosave interval
+  // Update local draft and backend snapshot timers
   startDraftAutoSave();
 }
 
@@ -94,7 +102,7 @@ const TIPS = {
   rest: '😴 休息时间\n该时段内的计划休息时长（如番茄钟间隔休息、课间休息等），手动录入。\n\n公式：∑ 各时段休息分钟数（手动输入合计）',
   distract: '😶 分心时间\n时钟时长中扣除实际专注和休息后的剩余时间，反映走神/摸鱼的时长。\n\n公式：时钟时长 − 实际专注 − 休息时间',
   awake: '🌤 清醒时长\n从起床到睡觉的总时长，是当天可用于学习与生活的全部时间。需要录入起床和睡觉时间后才能计算。\n\n公式：睡觉时间 − 起床时间（跨午夜自动修正）',
-  util: '📊 时间利用率\n实际专注占可支配时长的比例，衡量真正可用于学习的时间中有多少真正专注。\n\n≥50% 合格\n\n公式：实际专注 ÷ 可支配时长 × 100%\n可支配时长 = 清醒时长 − 不可用时间\n不可用时间包括普通特殊时段的完整跨度，以及特殊学习时段中没有学习的部分。\n特殊学习时段中的实际学习仍计入实际专注。',
+  util: '📊 不可用时间占比\n不可用时长占清醒时长的比例，表示一天清醒时间中有多少被吃饭、通勤、外出等特殊时段占用。数值越低，代表可支配时间越多；它不用于衡量专注效率。\n\n≤30% 较低 · ≤50% 中等 · >50% 较高\n\n公式：不可用时长 ÷ 清醒时长 × 100%\n不可用时长包括普通特殊时段的完整跨度，以及特殊学习时段中未学习的部分。',
   deviation: '📉 偏差率（实际 vs 名义）\n实际专注与名义时长的差值比，反映真实专注量 vs 计划目标的差距。\n\n正值 = 超额完成计划\n负值 = 未达计划（走神多或提前结束）\n\n公式：(实际专注 − 名义时长) ÷ 名义时长 × 100%',
   clockDev: '⚡ 时钟偏差（学习口径时钟 vs 名义）\n普通专注跨度与特殊学习实际分钟之和，与名义时长相比的偏差。完全不可用时段不会混入计划偏差。\n\n正值 = 学习口径时钟超过计划\n负值 = 比计划提前结束\n\n公式：(普通专注时钟 + 特殊学习实际分钟 − 名义时长) ÷ 名义时长 × 100%',
   sessRate: '🎯 专注率（单时段）\n该时段的实际专注占有效时段时长的比例，反映单次时段的专注密度。\n\n公式：实际专注 ÷ (时钟时长 − 休息时间) × 100%',
@@ -117,6 +125,20 @@ function tipIcon(key) {
   if (!text) return '';
   const escaped = text.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
   return `<span class="tip-icon" data-tip="${escaped}" onmouseenter="showTip(event,this)" onmouseleave="hideTip()" onmousemove="_moveTip(event)">ⓘ</span>`;
+}
+
+function showPersistentSaveNotice(message = '备注已保存') {
+  let notice = document.getElementById('persistent-save-notice');
+  if (!notice) {
+    notice = document.createElement('div');
+    notice.id = 'persistent-save-notice';
+    notice.setAttribute('role', 'status');
+    notice.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:10000;display:flex;align-items:center;gap:12px;max-width:min(420px,calc(100vw - 36px));padding:11px 13px;border:1px solid rgba(102,187,106,.6);border-radius:9px;background:#18251d;color:#b9f6ca;box-shadow:0 8px 28px rgba(0,0,0,.35);font-size:12px';
+    notice.innerHTML = '<span class="persistent-save-notice-text"></span><button type="button" aria-label="关闭提示" style="border:0;background:transparent;color:inherit;cursor:pointer;font-size:16px;padding:0 2px">×</button>';
+    notice.querySelector('button').onclick = () => notice.remove();
+    document.body.appendChild(notice);
+  }
+  notice.querySelector('.persistent-save-notice-text').textContent = `✓ ${message}`;
 }
 
 function showTip(e, el) {
@@ -155,24 +177,35 @@ const state = {
   weekStart: getMondayOfDate(new Date()),
   monthView: { year: new Date().getFullYear(), month: new Date().getMonth() },
   _editingSessionId: null,
+  _sessType: 'normal',
   _editingTaskId: null,
+  forecastEditingId: null,
+  workbookReviewId: null,
+  workbookDraft: null,
+  _serverSnapshot: null,
+  _pendingSnapshotRestore: false,
   _taskFilter: {},  // { entry: '类别', day: '类别', week: '类别', month: '类别' }
   stackedMode: 'week', // 'week' or 'month'
   stackedWeekStart: getMondayOfDate(new Date()),
   stackedMonth: { year: new Date().getFullYear(), month: new Date().getMonth() },
   stackedGroupLevel: 1, // 1=一级, 2=二级, 3=三级
   sessAna: { mode: 'week', weekStart: getMondayOfDate(new Date()), month: { year: new Date().getFullYear(), month: new Date().getMonth() }, catFilter: '' },
-  taskAna: { mode: 'week', weekStart: getMondayOfDate(new Date()), month: { year: new Date().getFullYear(), month: new Date().getMonth() }, level: 1, effScale: 'linear', effYMax: '', catFilter: '', effCatFilter: '' },
+  taskAna: { mode: 'week', weekStart: getMondayOfDate(new Date()), month: { year: new Date().getFullYear(), month: new Date().getMonth() }, level: 1, effScale: 'linear', effYMax: '', catFilter: '', effCatFilter: '', chapterEffTemplateId: '' },
 };
 
 // ============================================================
 // TASK FILTER HELPERS
 // ============================================================
+function isTaskUnclassified(task) {
+  const activityType = String(task?.activityType || '').trim();
+  return !activityType || activityType === '未分类';
+}
+
 function getTaskFilterTypes(tasks) {
   const types = new Set();
   let hasUncat = false;
   tasks.forEach(t => {
-    if (t.activityType) types.add(t.activityType);
+    if (!isTaskUnclassified(t)) types.add(t.activityType);
     else hasUncat = true;
   });
   const sorted = [...types].sort();
@@ -190,7 +223,7 @@ function taskFilterHtml(viewId, tasks) {
       <option value="">全部 (${tasks.length})</option>
       ${types.map(t => {
     const cnt = t === '未分类'
-      ? tasks.filter(x => !x.activityType).length
+      ? tasks.filter(isTaskUnclassified).length
       : tasks.filter(x => x.activityType === t).length;
     return `<option value="${escHtmlApp(t)}" ${cur === t ? 'selected' : ''}>${escHtmlApp(t)} (${cnt})</option>`;
   }).join('')}
@@ -202,7 +235,7 @@ function taskFilterHtml(viewId, tasks) {
 function filterTasksByView(tasks, viewId) {
   const f = state._taskFilter[viewId];
   if (!f) return tasks;
-  if (f === '未分类') return tasks.filter(t => !t.activityType);
+  if (f === '未分类') return tasks.filter(isTaskUnclassified);
   return tasks.filter(t => t.activityType === f);
 }
 
@@ -210,6 +243,59 @@ function applyTaskFilter(viewId, value) {
   state._taskFilter[viewId] = value || '';
   const renders = { entry: renderEntry, day: renderDayOverview, week: renderWeekOverview, month: renderMonthOverview };
   if (renders[viewId]) renders[viewId]();
+}
+
+function initEntryTaskColumnResize() {
+  const table = document.getElementById('entryTaskTable');
+  if (!table) return;
+  const headers = [...table.querySelectorAll('thead th')];
+  if (!headers.length) return;
+
+  const colgroup = document.createElement('colgroup');
+  const cols = headers.map(() => {
+    const col = document.createElement('col');
+    colgroup.appendChild(col);
+    return col;
+  });
+  table.insertBefore(colgroup, table.firstChild);
+
+  const savedWidths = Array.isArray(state._entryTaskColumnWidths)
+    && state._entryTaskColumnWidths.length === headers.length
+    ? state._entryTaskColumnWidths
+    : headers.map(header => Math.ceil(header.getBoundingClientRect().width));
+  savedWidths.forEach((width, index) => { cols[index].style.width = `${width}px`; });
+  table.style.width = `${savedWidths.reduce((sum, width) => sum + width, 0)}px`;
+
+  headers.forEach((header, index) => {
+    const handle = document.createElement('span');
+    handle.className = 'task-column-resizer';
+    handle.title = '拖动调整列宽';
+    handle.addEventListener('pointerdown', event => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = header.getBoundingClientRect().width;
+      const startTableWidth = table.getBoundingClientRect().width;
+      const minWidth = index === 0 ? 46 : 64;
+      document.body.classList.add('resizing-task-column');
+
+      const onMove = moveEvent => {
+        const nextWidth = Math.max(minWidth, Math.round(startWidth + moveEvent.clientX - startX));
+        cols[index].style.width = `${nextWidth}px`;
+        table.style.width = `${Math.max(1, startTableWidth + nextWidth - startWidth)}px`;
+      };
+      const onEnd = () => {
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onEnd);
+        document.removeEventListener('pointercancel', onEnd);
+        document.body.classList.remove('resizing-task-column');
+        state._entryTaskColumnWidths = headers.map(item => Math.round(item.getBoundingClientRect().width));
+      };
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onEnd);
+      document.addEventListener('pointercancel', onEnd);
+    });
+    header.appendChild(handle);
+  });
 }
 
 // ============================================================
@@ -226,6 +312,7 @@ async function apiFetch(path, options = {}) {
 
 const CACHE_KEY = 'tracker_data';
 const DRAFT_KEY_PREFIX = 'tracker_draft_';
+const SNAPSHOT_CACHE_KEY = 'tracker_ui_snapshot';
 
 function cacheToLocal() {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify(state.data)); } catch (e) { console.warn('localStorage写入失败', e); }
@@ -255,43 +342,227 @@ async function saveAllStorage() {
 
 // ── 表单草稿缓存 ─────────────────────────────────────────────
 function saveDraft(dateStr, draftData) {
-  try { localStorage.setItem(DRAFT_KEY_PREFIX + dateStr, JSON.stringify(draftData)); } catch (e) { }
+  const saved = { ...draftData, _savedAt: draftData._savedAt || new Date().toISOString() };
+  try { localStorage.setItem(DRAFT_KEY_PREFIX + dateStr, JSON.stringify(saved)); } catch (e) { }
 }
 function loadDraft(dateStr) {
-  try { const s = localStorage.getItem(DRAFT_KEY_PREFIX + dateStr); return s ? JSON.parse(s) : null; } catch (e) { return null; }
+  let localDraft = null;
+  try {
+    const saved = localStorage.getItem(DRAFT_KEY_PREFIX + dateStr);
+    localDraft = saved ? JSON.parse(saved) : null;
+  } catch (e) { }
+  const snapshot = state._serverSnapshot;
+  const remoteDraft = snapshot?.entryDraftDate === dateStr ? snapshot.entryDraft : null;
+  if (!remoteDraft) return localDraft;
+  if (!localDraft) return remoteDraft;
+  return String(remoteDraft._savedAt || snapshot.updatedAt || '') > String(localDraft._savedAt || '')
+    ? remoteDraft
+    : localDraft;
 }
 function clearDraft(dateStr) {
   try { localStorage.removeItem(DRAFT_KEY_PREFIX + dateStr); } catch (e) { }
+  if (state._serverSnapshot?.entryDraftDate === dateStr) {
+    state._serverSnapshot.entryDraft = null;
+  }
 }
 
-// 自动保存当前页面表单草稿（每3秒）
+function clearAllLocalDrafts() {
+  try {
+    Object.keys(localStorage)
+      .filter(key => key.startsWith(DRAFT_KEY_PREFIX))
+      .forEach(key => localStorage.removeItem(key));
+  } catch (e) { }
+}
+
+function collectEntryDraft() {
+  const draft = { _savedAt: new Date().toISOString() };
+  const wh = document.getElementById('wakeInput_h'), wm = document.getElementById('wakeInput_m');
+  if (wh) draft.wakeH = wh.value;
+  if (wm) draft.wakeM = wm.value;
+  const sh = document.getElementById('sleepInput_h'), sm = document.getElementById('sleepInput_m');
+  if (sh) draft.sleepH = sh.value;
+  if (sm) draft.sleepM = sm.value;
+  const noteEl = document.getElementById('dayNoteInput');
+  if (noteEl) draft.dayNote = noteEl.value;
+  ['sess_name', 'sess_start_h', 'sess_start_m', 'sess_end_h', 'sess_end_m', 'sess_nominal', 'sess_actual', 'sess_rest', 'sess_note'].forEach(id => {
+    const el = document.getElementById(id); if (el) draft[id] = el.value;
+  });
+  ['task_name', 'task_tmpl', 'task_l1', 'task_l1_custom', 'task_l2', 'task_l2_custom', 'task_l3', 'task_l3_custom', 'task_min', 'task_qty', 'task_unit', 'task_new_ordinal_unit', 'task_template_ordinal_unit', 'task_wrong', 'task_acc', 'task_note'].forEach(id => {
+    const el = document.getElementById(id); if (el) draft[id] = el.value;
+  });
+  draft.task_new_ordinal_enabled = Boolean(document.getElementById('task_new_ordinal_enabled')?.checked);
+  draft.task_new_quantity_enabled = Boolean(document.getElementById('task_new_quantity_enabled')?.checked);
+  draft.task_ordinal_numbers = forecastSelectedChapters('.task-chapter-involved');
+  draft.task_completed_ordinals = forecastSelectedChapters('.task-chapter-completed');
+  draft.task_named_item_allocations = taskCollectNamedItemAllocations(false) || [];
+  return draft;
+}
+
+function collectActiveTabFields() {
+  const host = document.getElementById('tab-' + state.tab);
+  if (!host) return {};
+  const fields = {};
+  host.querySelectorAll('input[id],select[id],textarea[id]').forEach(element => {
+    if (element.type === 'file') return;
+    fields[element.id] = element.type === 'checkbox' || element.type === 'radio'
+      ? { checked: element.checked }
+      : { value: element.value };
+  });
+  return fields;
+}
+
+function collectOpenPanelIds() {
+  const ids = [];
+  document.querySelectorAll('.form-panel.open[id]').forEach(element => ids.push(element.id));
+  ['tmpl-form-body', 'sess-tmpl-form-body', 'day-type-tmpl-form-body'].forEach(id => {
+    const element = document.getElementById(id);
+    if (element && element.style.display !== 'none') ids.push(id);
+  });
+  return ids;
+}
+
+function buildServerSnapshot() {
+  let entryDraft = loadDraft(state.selectedDate);
+  if (state.tab === 'entry') {
+    entryDraft = collectEntryDraft();
+    saveDraft(state.selectedDate, entryDraft);
+  }
+  return {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    tab: state.tab,
+    selectedDate: state.selectedDate,
+    entryDraftDate: state.selectedDate,
+    entryDraft,
+    editingSessionId: state._editingSessionId,
+    editingTaskId: state._editingTaskId,
+    sessionType: state._sessType || 'normal',
+    forecastEditingId: state.forecastEditingId,
+    workbookReviewId: state.workbookReviewId,
+    workbookDraft: state.workbookDraft,
+    activeFields: collectActiveTabFields(),
+    openPanelIds: collectOpenPanelIds(),
+  };
+}
+
+function saveLocalSnapshotCache(snapshot) {
+  try { localStorage.setItem(SNAPSHOT_CACHE_KEY, JSON.stringify(snapshot)); } catch (error) { }
+}
+
+function loadLocalSnapshotCache() {
+  try {
+    const saved = localStorage.getItem(SNAPSHOT_CACHE_KEY);
+    return saved ? JSON.parse(saved) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function applyLoadedSnapshot(snapshot) {
+  if (!snapshot || !snapshot.updatedAt) return;
+  state._serverSnapshot = snapshot;
+  state._pendingSnapshotRestore = true;
+  if (typeof snapshot.selectedDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(snapshot.selectedDate)) {
+    state.selectedDate = snapshot.selectedDate;
+  }
+  const validTabs = ['entry', 'calendar', 'day', 'week', 'month', 'stacked', 'sessAnalysis', 'taskAnalysis', 'sleep', 'export', 'templates', 'forecast', 'workbookReview', 'settings'];
+  if (validTabs.includes(snapshot.tab)) state.tab = snapshot.tab;
+  state._editingSessionId = snapshot.editingSessionId || null;
+  state._editingTaskId = snapshot.editingTaskId || null;
+  state._sessType = snapshot.sessionType || 'normal';
+  state.forecastEditingId = snapshot.forecastEditingId || null;
+  state.workbookReviewId = snapshot.workbookReviewId || null;
+  if (snapshot.workbookDraft) state.workbookDraft = snapshot.workbookDraft;
+}
+
+async function saveServerSnapshot(showMessage = false) {
+  const snapshot = buildServerSnapshot();
+  saveLocalSnapshotCache(snapshot);
+  state._serverSnapshot = snapshot;
+  try {
+    await apiFetch('/api/snapshot', { method: 'PUT', body: JSON.stringify(snapshot) });
+    if (showMessage) {
+      const message = document.getElementById('snapshot-status');
+      if (message) message.textContent = `✅ 已保存：${new Date(snapshot.updatedAt).toLocaleString()}`;
+    }
+  } catch (error) {
+    console.error('后端快照保存失败，本地草稿仍然保留', error);
+    if (showMessage) {
+      const message = document.getElementById('snapshot-status');
+      if (message) message.textContent = '❌ 后端快照保存失败，本地草稿仍保留';
+    }
+  }
+}
+
+async function loadServerSnapshot() {
+  if (Number(SETTINGS.snapshotInterval) === 0) return;
+  const localSnapshot = loadLocalSnapshotCache();
+  let remoteSnapshot = null;
+  try {
+    remoteSnapshot = await apiFetch('/api/snapshot');
+  } catch (error) {
+    console.warn('后端快照读取失败，继续使用本地草稿', error);
+  }
+  const snapshot = String(localSnapshot?.updatedAt || '') > String(remoteSnapshot?.updatedAt || '')
+    ? localSnapshot
+    : remoteSnapshot?.updatedAt
+      ? remoteSnapshot
+      : localSnapshot;
+  applyLoadedSnapshot(snapshot);
+}
+
+async function clearServerSnapshot(showMessage = true) {
+  try {
+    await apiFetch('/api/snapshot', { method: 'DELETE' });
+    try { localStorage.removeItem(SNAPSHOT_CACHE_KEY); } catch (error) { }
+    state._serverSnapshot = null;
+    state._pendingSnapshotRestore = false;
+    if (showMessage) {
+      const message = document.getElementById('snapshot-status');
+      if (message) message.textContent = '🗑️ 后端快照已清除';
+    }
+  } catch (error) {
+    console.error('清除后端快照失败', error);
+  }
+}
+
+function restorePendingSnapshotUi() {
+  const snapshot = state._serverSnapshot;
+  if (!state._pendingSnapshotRestore || !snapshot || snapshot.tab !== state.tab) return;
+  setTimeout(() => {
+    Object.entries(snapshot.activeFields || {}).forEach(([id, saved]) => {
+      const element = document.getElementById(id);
+      if (!element) return;
+      if (Object.prototype.hasOwnProperty.call(saved, 'checked')) element.checked = Boolean(saved.checked);
+      if (Object.prototype.hasOwnProperty.call(saved, 'value')) element.value = saved.value;
+    });
+    (snapshot.openPanelIds || []).forEach(id => {
+      const element = document.getElementById(id);
+      if (!element) return;
+      if (element.classList.contains('form-panel')) element.classList.add('open');
+      else element.style.display = 'block';
+    });
+    if (state.tab === 'entry') taskTemplateMonitor();
+    state._pendingSnapshotRestore = false;
+  }, 80);
+}
+
+// 本地草稿每3秒保存；后端快照按设置保存
 let _draftTimer = null;
+let _snapshotTimer = null;
 function startDraftAutoSave() {
   if (_draftTimer) clearInterval(_draftTimer);
+  if (_snapshotTimer) clearInterval(_snapshotTimer);
   _draftTimer = setInterval(() => {
     if (state.tab !== 'entry') return;
-    const dateStr = state.selectedDate;
-    const draft = {};
-    // 起床/睡觉时间
-    const wh = document.getElementById('wakeInput_h'), wm = document.getElementById('wakeInput_m');
-    if (wh) draft.wakeH = wh.value;
-    if (wm) draft.wakeM = wm.value;
-    const sh = document.getElementById('sleepInput_h'), sm = document.getElementById('sleepInput_m');
-    if (sh) draft.sleepH = sh.value;
-    if (sm) draft.sleepM = sm.value;
-    // 备注
-    const noteEl = document.getElementById('dayNoteInput');
-    if (noteEl) draft.dayNote = noteEl.value;
-    // 专注时段表单
-    ['sess_name', 'sess_start_h', 'sess_start_m', 'sess_end_h', 'sess_end_m', 'sess_nominal', 'sess_actual', 'sess_rest', 'sess_note'].forEach(id => {
-      const el = document.getElementById(id); if (el) draft[id] = el.value;
-    });
-    // 任务表单
-    ['task_name', 'task_l1', 'task_l1_custom', 'task_l2', 'task_l2_custom', 'task_l3', 'task_l3_custom', 'task_min', 'task_qty', 'task_unit', 'task_acc', 'task_note'].forEach(id => {
-      const el = document.getElementById(id); if (el) draft[id] = el.value;
-    });
-    saveDraft(dateStr, draft);
+    saveDraft(state.selectedDate, collectEntryDraft());
   }, 3000);
+  const snapshotInterval = Number(SETTINGS.snapshotInterval);
+  if ([30000, 60000].includes(snapshotInterval)) {
+    _snapshotTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') saveServerSnapshot();
+    }, snapshotInterval);
+  }
 }
 
 function restoreDraft(dateStr) {
@@ -303,10 +574,36 @@ function restoreDraft(dateStr) {
     if (draft.sleepH) { const el = document.getElementById('sleepInput_h'); if (el && !el.value) el.value = draft.sleepH; }
     if (draft.sleepM) { const el = document.getElementById('sleepInput_m'); if (el && !el.value) el.value = draft.sleepM; }
     if (draft.dayNote) { const el = document.getElementById('dayNoteInput'); if (el && !el.value) el.value = draft.dayNote; }
-    ['sess_name', 'sess_start_h', 'sess_start_m', 'sess_end_h', 'sess_end_m', 'sess_nominal', 'sess_actual', 'sess_rest', 'sess_note',
-      'task_name', 'task_l1', 'task_l1_custom', 'task_l2', 'task_l2_custom', 'task_l3', 'task_l3_custom', 'task_min', 'task_qty', 'task_unit', 'task_acc', 'task_note'].forEach(id => {
-        if (draft[id]) { const el = document.getElementById(id); if (el && !el.value) el.value = draft[id]; }
+    if (draft.task_tmpl) {
+      const templateEl = document.getElementById('task_tmpl');
+      if (templateEl) {
+        templateEl.value = draft.task_tmpl;
+        renderForecastTaskFields(draft.task_tmpl, {
+          ordinalNumbers: draft.task_ordinal_numbers || draft.task_chapter_numbers || [],
+          completedOrdinals: draft.task_completed_ordinals || draft.task_completed_chapters || [],
+        });
+        configureTaskUnitFields(draft.task_tmpl);
+      }
+    } else if (draft.task_new_ordinal_enabled || draft.task_new_quantity_enabled ||
+      (draft.task_ordinal_numbers || []).length) {
+      renderForecastTaskFields('', {
+        ordinalEnabled: draft.task_new_ordinal_enabled,
+        namedItemEnabled: draft.task_new_ordinal_enabled,
+        quantityEnabled: draft.task_new_quantity_enabled,
+        ordinalUnit: draft.task_new_ordinal_unit || '',
+        ordinalNumbers: draft.task_ordinal_numbers || draft.task_chapter_numbers || [],
+        completedOrdinals: draft.task_completed_ordinals || draft.task_completed_chapters || [],
+        namedItemAllocations: draft.task_named_item_allocations || [],
       });
+      configureTaskUnitFields('');
+    }
+    ['sess_name', 'sess_start_h', 'sess_start_m', 'sess_end_h', 'sess_end_m', 'sess_nominal', 'sess_actual', 'sess_rest', 'sess_note',
+      'task_name', 'task_l1', 'task_l1_custom', 'task_l2', 'task_l2_custom', 'task_l3', 'task_l3_custom', 'task_min', 'task_qty', 'task_unit', 'task_new_ordinal_unit', 'task_template_ordinal_unit', 'task_wrong', 'task_acc', 'task_note'].forEach(id => {
+        if (draft[id] !== undefined) { const el = document.getElementById(id); if (el) el.value = draft[id]; }
+      });
+    autoCalcRate();
+    taskTemplateMonitor();
+    updateTaskCategorySequenceUi();
   }, 50);
 }
 
@@ -316,6 +613,95 @@ function restoreDraft(dateStr) {
 function getTodayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function normalizeEditableDate(value) {
+  const text = String(value || '').trim();
+  let match = text.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (!match) match = text.match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/);
+  if (!match) return '';
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return '';
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function setEditableDateSegments(id, value) {
+  const normalized = normalizeEditableDate(value);
+  if (!normalized) return false;
+  const [year, month, day] = normalized.split('-');
+  const input = document.getElementById(id);
+  const wrap = document.getElementById(`${id}_wrap`);
+  const yearInput = document.getElementById(`${id}_year`);
+  const monthInput = document.getElementById(`${id}_month`);
+  const dayInput = document.getElementById(`${id}_day`);
+  const picker = document.getElementById(`${id}_picker`);
+  if (input) input.value = normalized;
+  if (wrap) wrap.dataset.lastDate = normalized;
+  if (yearInput) yearInput.value = year;
+  if (monthInput) monthInput.value = month;
+  if (dayInput) dayInput.value = day;
+  if (picker) picker.value = normalized;
+  return true;
+}
+
+function editableDateSegmentChanged(id, changedPart) {
+  const wrap = document.getElementById(`${id}_wrap`);
+  const yearInput = document.getElementById(`${id}_year`);
+  const monthInput = document.getElementById(`${id}_month`);
+  const dayInput = document.getElementById(`${id}_day`);
+  if (!wrap || !yearInput || !monthInput || !dayInput) return false;
+  const normalized = normalizeEditableDate(`${yearInput.value}-${monthInput.value}-${dayInput.value}`);
+  if (normalized) return setEditableDateSegments(id, normalized);
+
+  setEditableDateSegments(id, wrap.dataset.lastDate);
+  const changedInput = document.getElementById(`${id}_${changedPart}`);
+  if (changedInput) {
+    changedInput.classList.add('invalid');
+    setTimeout(() => changedInput.classList.remove('invalid'), 900);
+  }
+  return false;
+}
+
+function editableDatePicked(id, value) {
+  if (!value) return;
+  setEditableDateSegments(id, value);
+}
+
+function openEditableDatePicker(id) {
+  const picker = document.getElementById(`${id}_picker`);
+  if (!picker) return;
+  if (typeof picker.showPicker === 'function') picker.showPicker();
+  else picker.click();
+}
+
+function editableDateInputHtml(id, value, onChange = '') {
+  const normalized = normalizeEditableDate(value) || getTodayStr();
+  const [year, month, day] = normalized.split('-');
+  const segmentChange = part => onChange
+    ? `if(editableDateSegmentChanged('${id}','${part}')){${onChange}}`
+    : `editableDateSegmentChanged('${id}','${part}')`;
+  const pickerChange = `editableDatePicked('${id}',this.value);${onChange}`;
+  return `<div class="editable-date" id="${id}_wrap" data-last-date="${normalized}">
+    <input type="hidden" id="${id}" value="${normalized}">
+    <input type="text" id="${id}_year" class="editable-date-segment year" value="${year}"
+      inputmode="numeric" autocomplete="off" maxlength="4" aria-label="年"
+      onfocus="this.select()" onchange="${segmentChange('year')}">
+    <span>年</span>
+    <input type="text" id="${id}_month" class="editable-date-segment" value="${month}"
+      inputmode="numeric" autocomplete="off" maxlength="2" aria-label="月"
+      onfocus="this.select()" onchange="${segmentChange('month')}">
+    <span>月</span>
+    <input type="text" id="${id}_day" class="editable-date-segment" value="${day}"
+      inputmode="numeric" autocomplete="off" maxlength="2" aria-label="日"
+      onfocus="this.select()" onchange="${segmentChange('day')}">
+    <span>日</span>
+    <input type="date" id="${id}_picker" class="editable-date-picker" value="${normalized}"
+      tabindex="-1" aria-hidden="true" onchange="${pickerChange}">
+    <button type="button" class="editable-date-button" onclick="openEditableDatePicker('${id}')" title="打开日历">📅</button>
+  </div>`;
 }
 function getMondayOfDate(d) {
   const date = new Date(d);
@@ -405,6 +791,38 @@ function sessionClock(s) {
   if (a == null || b == null) return 0;
   let d = b - a; if (d < 0) d += 1440; return d;
 }
+function sortSessionsByStart(sessions = []) {
+  return sessions
+    .map((session, originalIndex) => ({ session, originalIndex }))
+    .sort((a, b) => {
+      const aStart = parseMin(a.session?.startTime);
+      const bStart = parseMin(b.session?.startTime);
+      const startDiff = (aStart == null ? Infinity : aStart) - (bStart == null ? Infinity : bStart);
+      if (startDiff) return startDiff;
+      const aEnd = parseMin(a.session?.endTime);
+      const bEnd = parseMin(b.session?.endTime);
+      const endDiff = (aEnd == null ? Infinity : aEnd) - (bEnd == null ? Infinity : bEnd);
+      return endDiff || a.originalIndex - b.originalIndex;
+    })
+    .map(({ session }) => session);
+}
+function sessionTimeSegments(s) {
+  const start = parseMin(s?.startTime);
+  const end = parseMin(s?.endTime);
+  if (start == null || end == null || start === end) return [];
+  return end > start
+    ? [[start, end]]
+    : [[start, 1440], [0, end]];
+}
+function sessionsOverlap(first, second) {
+  const firstSegments = sessionTimeSegments(first);
+  const secondSegments = sessionTimeSegments(second);
+  return firstSegments.some(([firstStart, firstEnd]) =>
+    secondSegments.some(([secondStart, secondEnd]) =>
+      firstStart < secondEnd && secondStart < firstEnd
+    )
+  );
+}
 function isUnavailableSession(s) { return s?.type === 'special'; }
 function isSpecialStudySession(s) { return s?.type === 'special-study'; }
 function sessionTypeMeta(s) {
@@ -428,24 +846,49 @@ function timeInputHtml(idPrefix, timeStr) {
   let h = '', m = '';
   if (timeStr) {
     const parts = timeStr.split(':');
-    h = parseInt(parts[0], 10);
-    m = parseInt(parts[1], 10);
+    h = String(Math.min(23, Math.max(0, parseInt(parts[0], 10) || 0))).padStart(2, '0');
+    m = String(Math.min(59, Math.max(0, parseInt(parts[1], 10) || 0))).padStart(2, '0');
   }
-  return `<div class="time-input-group">
-    <input type="number" id="${idPrefix}_h" min="0" max="23" placeholder="时" value="${h !== '' ? h : ''}" onchange="clampTimeInput(this,0,23)">
+  return `<div class="time-input-group" onfocusout="normalizeTimeInputGroupOnExit(event,'${idPrefix}')">
+    <input type="text" inputmode="numeric" maxlength="2" autocomplete="off" aria-autocomplete="none"
+      id="${idPrefix}_h" placeholder="时" value="${h}"
+      oninput="sanitizeTimeDigits(this)">
     <span class="time-sep">:</span>
-    <input type="number" id="${idPrefix}_m" min="0" max="59" placeholder="分" value="${m !== '' ? m : ''}" onchange="clampTimeInput(this,0,59)">
+    <input type="text" inputmode="numeric" maxlength="2" autocomplete="off" aria-autocomplete="none"
+      id="${idPrefix}_m" placeholder="分" value="${m}"
+      oninput="sanitizeTimeDigits(this)">
   </div>`;
 }
 function readTimeInput(idPrefix) {
   const hEl = document.getElementById(idPrefix + '_h');
   const mEl = document.getElementById(idPrefix + '_m');
   if (!hEl || !mEl) return '';
+  normalizeTimeInputPair(idPrefix);
   const h = hEl.value, m = mEl.value;
   if (h === '' && m === '') return '';
-  const hh = String(parseInt(h, 10) || 0).padStart(2, '0');
-  const mm = String(parseInt(m, 10) || 0).padStart(2, '0');
-  return hh + ':' + mm;
+  return h + ':' + m;
+}
+function sanitizeTimeDigits(el) {
+  el.value = String(el.value || '').replace(/\D/g, '').slice(0, 2);
+}
+function normalizeTimeInputGroupOnExit(event, idPrefix) {
+  const nextTarget = event.relatedTarget;
+  if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+  normalizeTimeInputPair(idPrefix);
+}
+function normalizeTimeInputPair(idPrefix) {
+  const hEl = document.getElementById(idPrefix + '_h');
+  const mEl = document.getElementById(idPrefix + '_m');
+  if (!hEl || !mEl) return;
+  sanitizeTimeDigits(hEl);
+  sanitizeTimeDigits(mEl);
+  const hasHour = hEl.value !== '';
+  const hasMinute = mEl.value !== '';
+  if (!hasHour && !hasMinute) return;
+  const hour = hasHour ? Math.min(23, Math.max(0, parseInt(hEl.value, 10) || 0)) : 0;
+  const minute = hasMinute ? Math.min(59, Math.max(0, parseInt(mEl.value, 10) || 0)) : 0;
+  hEl.value = String(hour).padStart(2, '0');
+  mEl.value = String(minute).padStart(2, '0');
 }
 function clampTimeInput(el, min, max) {
   let v = parseInt(el.value, 10);
@@ -520,31 +963,45 @@ async function deleteCatItem(level, name) {
 }
 
 // ============================================================
-// UNIT LIBRARY (数量单位库)
+// UNIT LIBRARIES (数量单位库 / 序数单位库)
 // ============================================================
-function getUnitList() {
-  if (!state.data.__unitList__) state.data.__unitList__ = ['个', '个单词', '道题', '页', '行', '篇', '套'];
+function getOrdinalUnitList() {
+  if (!Array.isArray(state.data.__ordinalUnitList__)) {
+    const templates = Array.isArray(state.data.__taskTemplates__) ? state.data.__taskTemplates__ : [];
+    state.data.__ordinalUnitList__ = [...new Set(templates
+      .map(template => String(template.ordinalUnit || '').trim())
+      .filter(Boolean))];
+  }
+  return state.data.__ordinalUnitList__;
+}
+
+function getUnitList(library = 'quantity') {
+  if (library === 'ordinal') return getOrdinalUnitList();
+  if (!Array.isArray(state.data.__unitList__)) {
+    state.data.__unitList__ = ['个', '个单词', '道题', '页', '行', '篇', '套'];
+  }
   return state.data.__unitList__;
 }
 
-async function addUnitItem(name) {
+async function addUnitItem(name, library = 'quantity') {
   if (!name || !name.trim()) return;
   name = name.trim();
-  const list = getUnitList();
+  const list = getUnitList(library);
   if (!list.includes(name)) list.push(name);
   await saveAllStorage();
 }
 
-async function deleteUnitItem(name) {
+async function deleteUnitItem(name, library = 'quantity') {
   if (!name) return;
-  state.data.__unitList__ = (state.data.__unitList__ || []).filter(n => n !== name);
+  const key = library === 'ordinal' ? '__ordinalUnitList__' : '__unitList__';
+  state.data[key] = getUnitList(library).filter(n => n !== name);
   await saveAllStorage();
 }
 
 /**
  * 生成单位增强选择器 HTML
  */
-function unitSelectorHtml(inputId, currentValue, msgId) {
+function unitSelectorHtml(inputId, currentValue, msgId, library = 'quantity') {
   return `
     <div class="cat-selector" id="${inputId}_wrap">
       <div class="cat-selector-input-row">
@@ -552,22 +1009,22 @@ function unitSelectorHtml(inputId, currentValue, msgId) {
           <input type="text" id="${inputId}" value="${escHtmlApp(currentValue || '')}"
             placeholder="输入搜索或新建单位"
             autocomplete="off"
-            onfocus="unitSelOpen('${inputId}')"
-            oninput="unitSelFilter('${inputId}')"
+            onfocus="unitSelOpen('${inputId}','${msgId}','${library}')"
+            oninput="unitSelFilter('${inputId}','${msgId}','${library}')"
             style="width:100%;box-sizing:border-box">
           <div class="cat-sel-dropdown" id="${inputId}_dd" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:999;
             max-height:200px;overflow-y:auto;background:var(--card);border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;
             box-shadow:0 8px 24px rgba(0,0,0,.3)">
           </div>
         </div>
-        <button class="btn btn-success btn-sm" onclick="unitSelSave('${inputId}','${msgId}')" title="保存到单位库" style="min-width:32px">＋</button>
-        <button class="btn btn-ghost btn-sm" onclick="unitSelDelete('${inputId}','${msgId}')" title="从单位库删除" style="color:var(--red);min-width:32px">🗑</button>
+        <button class="btn btn-success btn-sm" onclick="unitSelSave('${inputId}','${msgId}','${library}')" title="保存到单位库" style="min-width:32px">＋</button>
+        <button class="btn btn-ghost btn-sm" onclick="unitSelDelete('${inputId}','${msgId}','${library}')" title="从单位库删除" style="color:var(--red);min-width:32px">🗑</button>
       </div>
     </div>`;
 }
 
-function unitSelOpen(inputId) {
-  unitSelFilter(inputId);
+function unitSelOpen(inputId, msgId, library = 'quantity') {
+  unitSelFilter(inputId, msgId, library);
   const dd = document.getElementById(inputId + '_dd');
   if (dd) dd.style.display = 'block';
   setTimeout(() => {
@@ -582,58 +1039,87 @@ function unitSelOpen(inputId) {
   }, 0);
 }
 
-function unitSelFilter(inputId) {
+function unitSelFilter(inputId, msgId, library = 'quantity') {
   const input = document.getElementById(inputId);
   const dd = document.getElementById(inputId + '_dd');
   if (!input || !dd) return;
   const query = input.value.trim().toLowerCase();
-  const items = getUnitList();
-  const filtered = query ? items.filter(it => it.toLowerCase().includes(query)) : items;
-  const exactMatch = items.some(it => it.toLowerCase() === query);
+  if (inputId === 'task_unit') {
+    const unitText = input.value.trim();
+    const label = document.getElementById('task_qty_label');
+    const wrongLabel = document.getElementById('task_wrong_label');
+    if (label) label.textContent = unitText ? `数量（${unitText}，可选）` : '数量（可选）';
+    if (wrongLabel) wrongLabel.textContent = unitText ? `错误数量（${unitText}，可选）` : '错误数量（可选）';
+  }
+  if (inputId === 'task_template_ordinal_unit' || inputId === 'task_new_ordinal_unit') {
+    taskUpdateOrdinalUnitPreview(input.value.trim());
+  }
+  const items = getUnitList(library);
+  const matched = query ? items.filter(it => it.toLowerCase().includes(query)) : items;
+  const remaining = query ? items.filter(it => !it.toLowerCase().includes(query)) : [];
+  const exactMatch = items.some(it => it === input.value.trim());
   let html = '';
-  if (filtered.length === 0 && !query) {
+  const renderItems = list => list.map(it => {
+    const isSelected = it === input.value;
+    return `<div style="padding:6px 12px;cursor:pointer;font-size:12px;
+      ${isSelected ? 'background:rgba(105,240,174,.1);color:var(--pol);font-weight:600' : 'color:var(--text)'};"
+      onmousedown="catSelPick('${inputId}','${escHtmlApp(it)}')"
+      onmouseenter="this.style.background='rgba(79,195,247,.1)'"
+      onmouseleave="this.style.background='${isSelected ? 'rgba(105,240,174,.1)' : ''}'">
+      ${escHtmlApp(it)}
+    </div>`;
+  }).join('');
+
+  if (items.length === 0) {
     html = '<div style="padding:8px 12px;font-size:11px;color:var(--dim)">暂无单位，输入后点 ＋ 添加</div>';
   } else {
-    filtered.forEach(it => {
-      const isSelected = it === input.value;
-      html += `<div style="padding:6px 12px;cursor:pointer;font-size:12px;
-        ${isSelected ? 'background:rgba(105,240,174,.1);color:var(--pol);font-weight:600' : 'color:var(--text)'};"
-        onmousedown="catSelPick('${inputId}','${escHtmlApp(it)}')"
-        onmouseenter="this.style.background='rgba(79,195,247,.1)'"
-        onmouseleave="this.style.background='${isSelected ? 'rgba(105,240,174,.1)' : ''}'">
-        ${escHtmlApp(it)}
-      </div>`;
-    });
-    if (query && !exactMatch) {
-      html += `<div style="padding:6px 12px;font-size:11px;color:var(--pol);border-top:1px solid var(--border);cursor:pointer"
-        onmousedown="catSelPick('${inputId}','${escHtmlApp(query)}')"
-        onmouseenter="this.style.background='rgba(105,240,174,.08)'"
-        onmouseleave="this.style.background=''">
-        ＋ 新建「${escHtmlApp(query)}」
-      </div>`;
+    if (query && matched.length) {
+      html += '<div style="padding:5px 12px;font-size:10px;color:var(--dim)">匹配单位</div>';
     }
+    html += renderItems(matched);
+    if (query && remaining.length) {
+      html += '<div style="padding:5px 12px;font-size:10px;color:var(--dim);border-top:1px solid var(--border)">其他已保存单位</div>';
+      html += renderItems(remaining);
+    }
+  }
+  if (query && !exactMatch) {
+    html += `<div style="padding:6px 12px;font-size:11px;color:var(--pol);border-top:1px solid var(--border);cursor:pointer"
+      onmousedown="event.preventDefault();unitSelSaveNew('${inputId}','${msgId}','${library}')"
+      onmouseenter="this.style.background='rgba(105,240,174,.08)'"
+      onmouseleave="this.style.background=''">
+      ＋ 保存为新单位「${escHtmlApp(input.value.trim())}」
+    </div>`;
   }
   dd.innerHTML = html;
   dd.style.display = 'block';
 }
 
-async function unitSelSave(inputId, msgId) {
+async function unitSelSave(inputId, msgId, library = 'quantity') {
   const el = document.getElementById(inputId);
   const name = (el?.value || '').trim();
-  if (!name) { _showCatMsg(msgId, '⚠️ 请先输入单位名称', 'var(--red)'); return; }
-  const list = getUnitList();
-  if (list.includes(name)) { _showCatMsg(msgId, `「${name}」已存在`, 'var(--muted)'); return; }
-  await addUnitItem(name);
+  if (!name) { _showCatMsg(msgId, '⚠️ 请先输入单位名称', 'var(--red)'); return false; }
+  const list = getUnitList(library);
+  if (list.includes(name)) { _showCatMsg(msgId, `「${name}」已存在`, 'var(--muted)'); return false; }
+  await addUnitItem(name, library);
   _showCatMsg(msgId, `✅ 已保存「${name}」`, 'var(--pol)');
+  return true;
 }
 
-async function unitSelDelete(inputId, msgId) {
+async function unitSelSaveNew(inputId, msgId, library = 'quantity') {
+  const saved = await unitSelSave(inputId, msgId, library);
+  if (saved) {
+    const dd = document.getElementById(inputId + '_dd');
+    if (dd) dd.style.display = 'none';
+  }
+}
+
+async function unitSelDelete(inputId, msgId, library = 'quantity') {
   const el = document.getElementById(inputId);
   const name = (el?.value || '').trim();
   if (!name) { _showCatMsg(msgId, '⚠️ 请先输入或选择要删除的单位', 'var(--red)'); return; }
-  if (!getUnitList().includes(name)) { _showCatMsg(msgId, `「${name}」不在单位库中`, 'var(--muted)'); return; }
+  if (!getUnitList(library).includes(name)) { _showCatMsg(msgId, `「${name}」不在单位库中`, 'var(--muted)'); return; }
   if (!confirm(`确定从单位库中删除「${name}」？`)) return;
-  await deleteUnitItem(name);
+  await deleteUnitItem(name, library);
   if (el) el.value = '';
   _showCatMsg(msgId, `🗑️ 已删除「${name}」`, 'var(--muted)');
 }
@@ -689,23 +1175,15 @@ function getDayTypeTemplates() {
   return state.data.__dayTypeTemplates__;
 }
 
-async function notifyDayTypeTemplatesChanged() {
-  if (typeof aiInvalidateDayTypeReviews === 'function') {
-    await aiInvalidateDayTypeReviews();
-  }
-}
-
 async function addDayTypeTemplate(tmpl) {
   tmpl.id = uid();
   getDayTypeTemplates().push(tmpl);
   await saveAllStorage();
-  await notifyDayTypeTemplatesChanged();
 }
 
 async function deleteDayTypeTemplate(id) {
   state.data.__dayTypeTemplates__ = getDayTypeTemplates().filter(t => t.id !== id);
   await saveAllStorage();
-  await notifyDayTypeTemplatesChanged();
 }
 
 async function saveDayTypeTemplate(tmpl) {
@@ -713,7 +1191,6 @@ async function saveDayTypeTemplate(tmpl) {
   const idx = list.findIndex(t => t.id === tmpl.id);
   if (idx >= 0) list[idx] = tmpl; else list.push(tmpl);
   await saveAllStorage();
-  await notifyDayTypeTemplatesChanged();
 }
 
 /** Switch session type between normal and special */
@@ -758,10 +1235,51 @@ function applySessionTemplate(id) {
 // ============================================================
 // TASK TEMPLATES
 // ============================================================
-// Structure: { id, name, activityType, keywords:[], aiPrompt, defaultMinutes, quantityUnit, note }
+// Structure: { id, activityType, defaultMinutes, ordinalEnabled, ordinalUnit, quantityEnabled, quantityUnit, note }
 function getTaskTemplates() {
   if (!state.data.__taskTemplates__) state.data.__taskTemplates__ = [];
   return state.data.__taskTemplates__;
+}
+
+function getTaskTemplateById(id) {
+  return getTaskTemplates().find(template => template.id === id) || null;
+}
+
+function getTaskTemplateForTask(task) {
+  return getTaskTemplateById(resolveTaskTemplateId(task));
+}
+
+function forEachStoredTask(callback) {
+  Object.entries(state.data).forEach(([dateStr, day]) => {
+    if (dateStr.startsWith('__') || !day || !Array.isArray(day.tasks)) return;
+    day.tasks.forEach(task => callback(task, dateStr, day));
+  });
+}
+
+function getTasksForTemplate(templateId) {
+  const tasks = [];
+  forEachStoredTask((task, dateStr, day) => {
+    if (resolveTaskTemplateId(task) === templateId) tasks.push({ task, dateStr, day });
+  });
+  return tasks;
+}
+
+function taskQuantityIsVisible(task) {
+  const template = getTaskTemplateForTask(task);
+  return template ? Boolean(template.quantityEnabled) : true;
+}
+
+function taskOrdinalIsVisible(task) {
+  const template = getTaskTemplateForTask(task);
+  return template ? Boolean(template.namedItemEnabled ?? template.ordinalEnabled) : true;
+}
+
+function visibleTaskQuantity(task) {
+  return taskQuantityIsVisible(task) ? Number(task?.quantity) || 0 : 0;
+}
+
+function visibleTaskQuantityUnit(task) {
+  return taskQuantityIsVisible(task) ? String(task?.quantityUnit || '') : '';
 }
 
 async function addTaskTemplate(tmpl) {
@@ -771,6 +1289,10 @@ async function addTaskTemplate(tmpl) {
 }
 
 async function deleteTaskTemplate(id) {
+  if (getForecastGoals().some(goal => goal.templateId === id)) {
+    alert('该模板已绑定完成预测目标。请先删除对应预测目标，再删除模板。');
+    return;
+  }
   state.data.__taskTemplates__ = getTaskTemplates().filter(t => t.id !== id);
   await saveAllStorage();
 }
@@ -778,17 +1300,59 @@ async function deleteTaskTemplate(id) {
 async function saveTaskTemplate(tmpl) {
   const list = getTaskTemplates();
   const idx = list.findIndex(t => t.id === tmpl.id);
+  const previous = idx >= 0 ? list[idx] : null;
+  if (previous && previous.quantityUnit !== tmpl.quantityUnit) {
+    getTasksForTemplate(tmpl.id).forEach(({ task }) => {
+      if (task.quantity != null) task.quantityUnit = tmpl.quantityUnit || '';
+    });
+  }
   if (idx >= 0) list[idx] = tmpl; else list.push(tmpl);
   await saveAllStorage();
 }
 
+async function commitTaskTemplateUnitChanges(template, ordinalUnit, quantityUnit) {
+  if (!template) return true;
+  const nextOrdinal = String(ordinalUnit || '').trim();
+  const nextQuantity = String(quantityUnit || '').trim();
+  const ordinalChanged = template.ordinalUnit !== nextOrdinal;
+  const quantityChanged = template.quantityUnit !== nextQuantity;
+  if (!ordinalChanged && !quantityChanged) return true;
+  if (template.ordinalEnabled && !nextOrdinal) {
+    alert('序数记录已开启，序数单位不能为空。');
+    return false;
+  }
+  if (template.quantityEnabled && !nextQuantity) {
+    alert('数量记录已开启，数量单位不能为空。');
+    return false;
+  }
+  const affected = getTasksForTemplate(template.id).length;
+  const changes = [
+    ordinalChanged ? `序数单位：${template.ordinalUnit || '空'} → ${nextOrdinal || '空'}` : '',
+    quantityChanged ? `数量单位：${template.quantityUnit || '空'} → ${nextQuantity || '空'}` : '',
+  ].filter(Boolean).join('\n');
+  if (!confirm(`这会全局修改模板「${forecastTemplateLabel(template)}」并影响 ${affected} 条关联任务：\n${changes}\n是否继续？`)) {
+    return false;
+  }
+  const updated = { ...template, ordinalUnit: nextOrdinal, quantityUnit: nextQuantity };
+  await saveTaskTemplate(updated);
+  Object.assign(template, updated);
+  return true;
+}
+
 /** Pre-fill the task entry form from a template */
 function applyTemplate(id) {
-  if (!id) return;
+  renderForecastTaskFields(id);
+  configureTaskUnitFields(id);
+  const message = document.getElementById('task_template_match_msg');
+  if (!id) {
+    const unit = document.getElementById('task_unit');
+    if (unit) unit.value = '';
+    configureTaskUnitFields('');
+    if (message) message.textContent = '当前未套用模板；保存时会按完整类别重新匹配或创建模板。';
+    return;
+  }
   const tmpl = getTaskTemplates().find(t => t.id === id);
   if (!tmpl) return;
-  const nameEl = document.getElementById('task_name');
-  if (nameEl && tmpl.name) nameEl.value = tmpl.name;
   const [l1, l2, l3] = parseActPath(tmpl.activityType || '');
   const l1el = document.getElementById('task_l1');
   if (l1el) l1el.value = l1;
@@ -797,13 +1361,264 @@ function applyTemplate(id) {
   const l3el = document.getElementById('task_l3');
   if (l3el) l3el.value = l3;
   if (tmpl.defaultMinutes) { const el = document.getElementById('task_min'); if (el) el.value = tmpl.defaultMinutes; }
-  if (tmpl.quantityUnit) { const el = document.getElementById('task_unit'); if (el) el.value = tmpl.quantityUnit; }
+  if (tmpl.quantityEnabled && tmpl.quantityUnit) {
+    const el = document.getElementById('task_unit'); if (el) el.value = tmpl.quantityUnit;
+  }
   if (tmpl.note) { const el = document.getElementById('task_note'); if (el) el.value = tmpl.note; }
+  if (message) message.textContent = `正在套用模板「${forecastTemplateLabel(tmpl)}」；修改类别后会自动脱离并重新匹配。`;
+  updateTaskCategorySequenceUi();
+}
+
+function taskCurrentDimensionValues(sourceTemplate = null) {
+  return {
+    ordinalEnabled: sourceTemplate
+      ? Boolean(sourceTemplate.namedItemEnabled ?? sourceTemplate.ordinalEnabled)
+      : Boolean(document.getElementById('task_new_ordinal_enabled')?.checked),
+    namedItemEnabled: sourceTemplate
+      ? Boolean(sourceTemplate.namedItemEnabled ?? sourceTemplate.ordinalEnabled)
+      : Boolean(document.getElementById('task_new_ordinal_enabled')?.checked),
+    quantityEnabled: sourceTemplate
+      ? Boolean(sourceTemplate.quantityEnabled)
+      : Boolean(document.getElementById('task_new_quantity_enabled')?.checked),
+    ordinalUnit: document.getElementById('task_template_ordinal_unit')?.value.trim() ||
+      sourceTemplate?.ordinalUnit || document.getElementById('task_new_ordinal_unit')?.value.trim() || '',
+    ordinalNumbers: forecastSelectedChapters('.task-chapter-involved'),
+    completedOrdinals: forecastSelectedChapters('.task-chapter-completed'),
+    namedItemAllocations: taskCollectNamedItemAllocations(false) || [],
+  };
+}
+
+function taskAutoLinkFromCategories(preservedValues = null) {
+  const select = document.getElementById('task_tmpl');
+  if (!select || select.value) return;
+  const activityType = buildActPath(catSelValue('task_l1'), catSelValue('task_l2'), catSelValue('task_l3'));
+  const message = document.getElementById('task_template_match_msg');
+  if (!activityType) {
+    if (message) message.textContent = '当前完整类别为空，不会继续绑定原模板。';
+    return;
+  }
+  const matches = getTaskTemplates().filter(template => template.activityType === activityType);
+  if (matches.length === 1) {
+    const values = preservedValues || taskCurrentDimensionValues();
+    select.value = matches[0].id;
+    renderForecastTaskFields(matches[0].id, values);
+    configureTaskUnitFields(matches[0].id);
+    if (message) message.textContent = `已按完整类别自动关联模板「${forecastTemplateLabel(matches[0])}」`;
+  } else if (matches.length > 1) {
+    if (message) message.textContent = '该完整类别对应多个模板，请手动选择正确模板。';
+  } else if (message) {
+    message.textContent = '保存任务时将按当前配置自动建立新模板。';
+  }
+}
+
+function taskTemplateMonitor() {
+  const select = document.getElementById('task_tmpl');
+  if (!select) return;
+  const selectedTemplate = getTaskTemplateById(select.value);
+  const activityType = buildActPath(catSelValue('task_l1'), catSelValue('task_l2'), catSelValue('task_l3'));
+  const message = document.getElementById('task_template_match_msg');
+  if (!selectedTemplate) {
+    taskAutoLinkFromCategories();
+    return;
+  }
+  if (selectedTemplate.activityType === activityType) {
+    if (message) message.textContent = `类别与模板「${forecastTemplateLabel(selectedTemplate)}」完全一致，继续使用原模板。`;
+    return;
+  }
+
+  const values = taskCurrentDimensionValues(selectedTemplate);
+  const quantityUnit = document.getElementById('task_unit')?.value.trim() || selectedTemplate.quantityUnit || '';
+  select.value = '';
+  renderForecastTaskFields('', values);
+  const unit = document.getElementById('task_unit');
+  if (unit) unit.value = quantityUnit;
+  configureTaskUnitFields('');
+  if (message) {
+    message.textContent = `检测到类别已修改，已脱离原模板「${forecastTemplateLabel(selectedTemplate)}」，正在按新类别重新匹配。`;
+  }
+  taskAutoLinkFromCategories(values);
+}
+
+function configureTaskUnitFields(templateId) {
+  const template = getTaskTemplateById(templateId);
+  const manualEnabled = Boolean(document.getElementById('task_new_quantity_enabled')?.checked);
+  const showQuantity = template ? Boolean(template.quantityEnabled) : manualEnabled;
+  const quantity = document.getElementById('task_qty');
+  const unit = document.getElementById('task_unit');
+  const rate = document.getElementById('task_rate');
+  const quantityGroup = document.getElementById('task_qty_group');
+  const unitGroup = document.getElementById('task_unit_group');
+  const rateGroup = document.getElementById('task_rate_group');
+  const wrongGroup = document.getElementById('task_wrong_group');
+  const accuracyGroup = document.getElementById('task_accuracy_group');
+  const quantityLabel = document.getElementById('task_qty_label');
+  const wrongLabel = document.getElementById('task_wrong_label');
+  const unitLabel = document.getElementById('task_unit_label');
+  if (quantityGroup) quantityGroup.style.display = showQuantity ? '' : 'none';
+  if (unitGroup) unitGroup.style.display = showQuantity ? '' : 'none';
+  if (rateGroup) rateGroup.style.display = showQuantity ? '' : 'none';
+  if (wrongGroup) wrongGroup.style.display = showQuantity ? '' : 'none';
+  if (accuracyGroup) accuracyGroup.style.display = showQuantity ? '' : 'none';
+  if (template && unit && unit.dataset.templateId !== template.id) {
+    unit.value = template.quantityUnit || '';
+    unit.dataset.templateId = template.id;
+  } else if (!template && unit) {
+    delete unit.dataset.templateId;
+  }
+  if (quantityLabel) {
+    const unitText = (unit?.value || template?.quantityUnit || '').trim();
+    quantityLabel.textContent = unitText ? `数量（${unitText}，可选）` : '数量（可选）';
+    if (wrongLabel) wrongLabel.textContent = unitText ? `错误数量（${unitText}，可选）` : '错误数量（可选）';
+  }
+  if (unitLabel) unitLabel.textContent = template ? '模板数量单位（全局）' : '新模板数量单位';
+  unitGroup?.querySelectorAll('input,select,button').forEach(control => {
+    control.disabled = false;
+  });
+  if (!showQuantity && rate) rate.value = '';
+  if (showQuantity) autoCalcRate();
+}
+
+function taskUpdateOrdinalUnitPreview(unit) {
+  const suffix = document.getElementById('task_ordinal_unit_suffix');
+  if (suffix) suffix.textContent = unit;
+  document.querySelectorAll('.task-ordinal-card').forEach(card => {
+    const label = card.querySelector('b');
+    if (label) label.textContent = `第${card.dataset.ordinal}${unit}`;
+  });
+}
+
+function taskNewUnitToggle() {
+  const ordinalEnabled = Boolean(document.getElementById('task_new_ordinal_enabled')?.checked);
+  const ordinalConfig = document.getElementById('task_new_ordinal_config');
+  const ordinalEditor = document.getElementById('task_ordinal_editor');
+  if (ordinalConfig) ordinalConfig.style.display = ordinalEnabled ? '' : 'none';
+  if (ordinalEditor) ordinalEditor.style.display = ordinalEnabled ? '' : 'none';
+  const minutesInput = document.getElementById('task_min');
+  const quantityInput = document.getElementById('task_qty');
+  if (minutesInput) minutesInput.readOnly = false;
+  if (quantityInput) quantityInput.readOnly = false;
+  configureTaskUnitFields('');
+  if (ordinalEnabled) taskRecalculateNamedItemTotals();
+}
+
+async function taskTemplateToggleFeature(templateId, feature, checkbox) {
+  const template = getTaskTemplateById(templateId);
+  const key = feature === 'ordinal' ? 'namedItemEnabled' : 'quantityEnabled';
+  if (!template || !checkbox) return;
+  const previous = feature === 'ordinal'
+    ? Boolean(template.namedItemEnabled ?? template.ordinalEnabled)
+    : Boolean(template[key]);
+  const next = Boolean(checkbox.checked);
+  if (previous === next) return;
+  const enteredOrdinalUnit = document.getElementById('task_template_ordinal_unit')?.value.trim() || template.ordinalUnit || '';
+  const enteredQuantityUnit = document.getElementById('task_unit')?.value.trim() || template.quantityUnit || '';
+  const unit = feature === 'ordinal' ? enteredOrdinalUnit : enteredQuantityUnit;
+  if (feature !== 'ordinal' && next && !unit) {
+    checkbox.checked = previous;
+    alert('请先在当前任务表单中设置数量单位。');
+    return;
+  }
+  const affected = getTasksForTemplate(templateId).length;
+  const action = next ? '开启' : '关闭';
+  const effect = next ? '恢复显示并重新纳入统计' : '隐藏但不删除历史数据，并停止相关统计';
+  if (!confirm(`${action}模板「${forecastTemplateLabel(template)}」的${feature === 'ordinal' ? '命名章节' : '数量'}记录？\n将影响 ${affected} 条关联任务：${effect}。`)) {
+    checkbox.checked = previous;
+    return;
+  }
+  const values = {
+    ordinalNumbers: forecastSelectedChapters('.task-chapter-involved'),
+    completedOrdinals: forecastSelectedChapters('.task-chapter-completed'),
+    namedItemAllocations: taskCollectNamedItemAllocations(false) || [],
+  };
+  const updated = {
+    ...template,
+    [key]: next,
+    ordinalEnabled: feature === 'ordinal' ? next : template.ordinalEnabled,
+    ordinalUnit: enteredOrdinalUnit,
+    quantityUnit: enteredQuantityUnit,
+  };
+  await saveTaskTemplate(updated);
+  Object.assign(template, updated);
+  renderForecastTaskFields(templateId, values);
+  configureTaskUnitFields(templateId);
+  refreshCurrentTaskVisibility();
+}
+
+function refreshCurrentTaskVisibility() {
+  const day = getDay(state.selectedDate);
+  (day.tasks || []).forEach(task => {
+    const row = document.querySelector(`#tab-entry tr[data-task-id="${task.id}"]`);
+    if (!row) return;
+    const nameCell = row.querySelector('.task-name-cell');
+    const quantityCell = row.querySelector('.task-quantity-cell');
+    const rateCell = row.querySelector('.task-rate-cell');
+    const quantity = visibleTaskQuantity(task);
+    const unit = visibleTaskQuantityUnit(task);
+    const rate = quantity && Number(task.minutes) > 0 ? (quantity / Number(task.minutes)).toFixed(2) : '';
+    if (nameCell) nameCell.innerHTML = `${escHtmlApp(task.name || '')}${taskOrdinalBadgeHtml(task)}`;
+    if (quantityCell) quantityCell.textContent = quantity ? `${quantity}${unit ? ` ${unit}` : ''}` : '-';
+    if (rateCell) rateCell.textContent = rate ? `${rate}${unit ? ` ${unit}/min` : '/min'}` : '-';
+  });
+}
+
+function setTemplateCategoryFilter(level, value) {
+  if (!state._templateCategoryFilter) {
+    state._templateCategoryFilter = { level1: '', level2: '', level3: '' };
+  }
+  const filter = state._templateCategoryFilter;
+  filter[`level${level}`] = value || '';
+  if (level <= 1) {
+    filter.level2 = '';
+    filter.level3 = '';
+  } else if (level === 2) {
+    filter.level3 = '';
+  }
+  renderTemplates();
+}
+
+function clearTemplateCategoryFilter() {
+  state._templateCategoryFilter = { level1: '', level2: '', level3: '' };
+  renderTemplates();
 }
 
 // ── Template Management Tab ──────────────────────────────────
 function renderTemplates() {
   const templates = getTaskTemplates();
+  const filter = state._templateCategoryFilter ||= { level1: '', level2: '', level3: '' };
+  const templateParts = templates.map(template => ({
+    template,
+    parts: parseActPath(template.activityType),
+  }));
+  const uniqueValues = values => [...new Set(values.filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const level1Options = uniqueValues(templateParts.map(item => item.parts[0]));
+  if (filter.level1 && !level1Options.includes(filter.level1)) {
+    filter.level1 = '';
+    filter.level2 = '';
+    filter.level3 = '';
+  }
+  const level2Options = filter.level1
+    ? uniqueValues(templateParts
+      .filter(item => item.parts[0] === filter.level1)
+      .map(item => item.parts[1]))
+    : [];
+  if (filter.level2 && !level2Options.includes(filter.level2)) {
+    filter.level2 = '';
+    filter.level3 = '';
+  }
+  const level3Options = filter.level1 && filter.level2
+    ? uniqueValues(templateParts
+      .filter(item => item.parts[0] === filter.level1 && item.parts[1] === filter.level2)
+      .map(item => item.parts[2]))
+    : [];
+  if (filter.level3 && !level3Options.includes(filter.level3)) filter.level3 = '';
+  const filteredTemplates = templateParts
+    .filter(item =>
+      (!filter.level1 || item.parts[0] === filter.level1)
+      && (!filter.level2 || item.parts[1] === filter.level2)
+      && (!filter.level3 || item.parts[2] === filter.level3)
+    )
+    .map(item => item.template);
 
   document.getElementById('tab-templates').innerHTML = `
     <div style="max-width:900px">
@@ -814,10 +1629,11 @@ function renderTemplates() {
         <p style="font-size:12px;color:var(--muted);line-height:1.7;margin:0">
           在这里预定义常用任务模板，与活动类别三级联动绑定。<br>
           · 录入任务时可一键套用，自动填充类别、时长、单位等字段。<br>
-          · <b>AI 录入（Step 2）会优先理解模板专属提示词</b>，再结合关键词和上下文决定是否套用；
-          全部未命中时才回退到活动分类推断，若仍无法判断则在 note 中标注 <code>[待分类]</code>。
+          · 命名章节库由模板统一保存，并与完成预测共用同一份数据。<br>
         </p>
       </div>
+
+      <div id="template-named-items-manager"></div>
 
       <!-- 新建模板表单 -->
       <div class="card" style="margin-bottom:16px">
@@ -826,13 +1642,6 @@ function renderTemplates() {
           <span id="tmpl-form-toggle" style="font-size:12px;color:var(--muted)">▼ 展开</span>
         </div>
         <div id="tmpl-form-body" style="display:none;margin-top:14px">
-          <div class="form-grid" style="grid-template-columns:1fr 1fr">
-            <div class="form-group" style="grid-column:span 2">
-              <label>模板名称 <span style="font-size:10px;color:var(--muted)">（可选，留空时 AI 根据原文命名）</span></label>
-              <input type="text" id="tmpl_name" placeholder="留空则只套用活动类别等模板字段">
-            </div>
-          </div>
-
           <!-- 三级联动（模板：增强选择器） -->
           <div class="form-group">
             <label>绑定活动类别（可自由组合）</label>
@@ -854,34 +1663,24 @@ function renderTemplates() {
             <div class="form-hint" style="margin-top:2px">＋ 保存到库 · 🗑 从库删除（不影响已有模板/记录）</div>
           </div>
 
-          <!-- 关键词 -->
-          <div class="form-group">
-            <label>AI 匹配关键词（逗号分隔）</label>
-            <input type="text" id="tmpl_keywords"
-              placeholder="例：英语,精读,reading,阅读,泛读">
-            <div class="form-hint">AI 解析时会逐词比对任务描述；关键词越精准，匹配越准确</div>
-          </div>
-
-          <div class="form-group">
-            <label>模板专属 AI 提示词</label>
-            <textarea id="tmpl_ai_prompt" rows="4"
-              placeholder="详细说明这个模板适用于什么、还可以套用哪些表达、哪些情况不要套用，以及需要特别注意的判断规则。"></textarea>
-            <div class="form-hint">AI 选择模板时优先理解这里的说明，再结合关键词和整日上下文判断</div>
-          </div>
-
           <div class="form-grid" style="grid-template-columns:repeat(3,1fr)">
             <div class="form-group">
               <label>默认时长(分钟)</label>
               <input type="number" id="tmpl_minutes" min="1" placeholder="60">
             </div>
-            <div class="form-group">
-              <label>默认数量单位</label>
+            <div class="form-group template-unit-config">
+              <label><input type="checkbox" id="tmpl_quantity_enabled"> 开启数量单位</label>
               ${unitSelectorHtml('tmpl_unit', '', 'tmpl_unit_msg')}
               <div style="font-size:11px;font-family:var(--mono)" id="tmpl_unit_msg"></div>
+              <div class="form-hint">关闭时保留单位文字，但不参与录入和预测。</div>
             </div>
             <div class="form-group">
               <label>备注模板</label>
               <input type="text" id="tmpl_note" placeholder="可选默认备注">
+            </div>
+            <div class="form-group template-unit-config">
+              <label><input type="checkbox" id="tmpl_ordinal_enabled"> 开启命名章节记录</label>
+              <div class="form-hint">保存模板后可在共享章节库中提前录入完整章节名称。</div>
             </div>
           </div>
 
@@ -895,11 +1694,39 @@ function renderTemplates() {
 
       <!-- 模板列表 -->
       <div class="card">
-        <div class="card-title" style="margin-bottom:12px">🗂 已保存的模板（${templates.length} 个）</div>
+        <div class="card-title" style="margin-bottom:12px">🗂 已保存的模板（${filteredTemplates.length}/${templates.length} 个）</div>
+        ${templates.length ? `<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;padding:10px;background:rgba(255,255,255,.025);border:1px solid var(--border);border-radius:7px">
+          <label style="display:flex;flex-direction:column;gap:4px;min-width:150px;font-size:10px;color:var(--muted)">
+            一级分类
+            <select onchange="setTemplateCategoryFilter(1,this.value)" style="font-size:12px">
+              <option value="">全部模板</option>
+              ${level1Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level1 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
+            </select>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;min-width:150px;font-size:10px;color:var(--muted)">
+            二级分类
+            <select onchange="setTemplateCategoryFilter(2,this.value)" ${filter.level1 ? '' : 'disabled'} style="font-size:12px">
+              <option value="">全部二级</option>
+              ${level2Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level2 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
+            </select>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;min-width:150px;font-size:10px;color:var(--muted)">
+            三级分类
+            <select onchange="setTemplateCategoryFilter(3,this.value)" ${filter.level1 && filter.level2 ? '' : 'disabled'} style="font-size:12px">
+              <option value="">全部三级</option>
+              ${level3Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level3 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
+            </select>
+          </label>
+          ${filter.level1 || filter.level2 || filter.level3
+            ? `<button class="btn btn-ghost btn-sm" onclick="clearTemplateCategoryFilter()">✕ 清除筛选</button>`
+            : ''}
+        </div>` : ''}
         ${templates.length === 0
       ? `<div class="empty-state"><p>暂无模板，点击上方「新建模板」开始添加</p></div>`
-      : `<div style="display:grid;gap:10px">
-              ${templates.map(t => tmplCardHtml(t)).join('')}
+      : filteredTemplates.length === 0
+        ? `<div class="empty-state"><p>当前分类组合下没有已保存模板</p><button class="btn btn-ghost btn-sm" onclick="clearTemplateCategoryFilter()">显示全部模板</button></div>`
+        : `<div style="display:grid;gap:10px">
+              ${filteredTemplates.map(t => tmplCardHtml(t)).join('')}
             </div>`
     }
       </div>
@@ -914,6 +1741,14 @@ function renderTemplates() {
       ${renderDayTypeTemplatesSection()}
     </div>
   `;
+  // renderEntry 会因保存任务、恢复快照等操作重新生成表单。
+  // 重绘后必须按当前状态恢复时段类型，避免界面显示“普通时段”
+  // 但保存逻辑仍沿用旧的特殊时段类型。
+  switchSessionType(
+    ['normal', 'special', 'special-study'].includes(state._sessType)
+      ? state._sessType
+      : 'normal'
+  );
 }
 
 // ── Session Template Section (rendered inside templates tab) ──
@@ -929,7 +1764,6 @@ function renderSessionTemplatesSection() {
           预定义特殊的时段模板（如吃饭、活动、休息等非学习时段）。<br>
           · 特殊时段只有时钟时长（开始→结束的时间跨度），没有名义时长和实际专注。<br>
           · 录入时可一键套用，自动切换为特殊时段模式并填充名称和备注。<br>
-          · <b>AI 录入（Step 2）会优先理解模板专属提示词</b>，再结合关键词和上下文决定是否采用模板名称。
         </p>
       </div>
 
@@ -946,21 +1780,6 @@ function renderSessionTemplatesSection() {
               <input type="text" id="sess_tmpl_name" placeholder="例：午饭">
             </div>
           </div>
-
-          <!-- 关键词 -->
-          <div class="form-group">
-            <label>AI 匹配关键词（逗号分隔）</label>
-            <input type="text" id="sess_tmpl_keywords" placeholder="例：午饭,吃饭,午餐,lunch">
-            <div class="form-hint">AI 解析时段时会逐词比对描述；关键词越精准，匹配越准确</div>
-          </div>
-
-          <div class="form-group">
-            <label>模板专属 AI 提示词</label>
-            <textarea id="sess_tmpl_ai_prompt" rows="4"
-              placeholder="详细说明这个特殊时段适用于什么、还可以套用哪些表达、哪些情况不要套用，以及需要特别注意的判断规则。"></textarea>
-            <div class="form-hint">AI 选择模板时优先理解这里的说明，再结合关键词和整日上下文判断</div>
-          </div>
-
 
           <div class="form-group">
             <label>备注模板</label>
@@ -998,22 +1817,18 @@ function sessTmplToggleForm() {
 async function sessTmplSaveNew() {
   const name = document.getElementById('sess_tmpl_name').value.trim();
   if (!name) { alert('请填写模板名称'); return; }
-  const kwRaw = document.getElementById('sess_tmpl_keywords').value;
-  const keywords = kwRaw.split(/[,，]/).map(k => k.trim()).filter(Boolean);
   const tmpl = {
     name,
-    keywords,
-    aiPrompt: document.getElementById('sess_tmpl_ai_prompt').value.trim(),
     note: document.getElementById('sess_tmpl_note').value.trim(),
   };
   await addSessionTemplate(tmpl);
   const msg = document.getElementById('sess-tmpl-save-msg');
   if (msg) { msg.textContent = `✅ 已保存「${name}」`; setTimeout(() => msg.textContent = '', 2500); }
   renderTemplates();
+  if (tmpl.note) showPersistentSaveNotice('时段模板备注已保存');
 }
 
 function sessTmplCardHtml(t) {
-  const kws = (t.keywords || []).join('、');
   return `
     <div id="sess-tmpl-card-${t.id}" style="border:1px solid var(--border);border-radius:8px;padding:12px;background:rgba(255,255,255,.015)">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px">
@@ -1026,10 +1841,8 @@ function sessTmplCardHtml(t) {
         </div>
       </div>
       <div style="margin-top:6px;font-size:11px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap">
-        ${kws ? `<span>🔑 关键词：<span style="color:var(--text)">${escHtmlApp(kws)}</span></span>` : '<span style="color:var(--dim)">无关键词</span>'}
         ${t.note ? `<span>📝 ${escHtmlApp(t.note)}</span>` : ''}
       </div>
-      ${t.aiPrompt ? `<div class="template-ai-prompt"><b>AI 提示词</b><span>${escHtmlApp(t.aiPrompt)}</span></div>` : ''}
       <div id="sess-tmpl-edit-${t.id}" style="display:none;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
         ${sessTmplEditFormHtml(t)}
       </div>
@@ -1041,15 +1854,6 @@ function sessTmplEditFormHtml(t) {
     <div class="form-group">
       <label>模板名称</label>
       <input type="text" id="sess-tmpl-edit-name-${t.id}" value="${escHtmlApp(t.name)}">
-    </div>
-    <div class="form-group">
-      <label>关键词（逗号分隔）</label>
-      <input type="text" id="sess-tmpl-edit-kw-${t.id}" value="${escHtmlApp((t.keywords || []).join(','))}">
-    </div>
-    <div class="form-group">
-      <label>模板专属 AI 提示词</label>
-      <textarea id="sess-tmpl-edit-ai-prompt-${t.id}" rows="4"
-        placeholder="说明适用范围、可套用表达、排除情况和注意事项">${escHtmlApp(t.aiPrompt || '')}</textarea>
     </div>
     <div class="form-group">
       <label>备注模板</label>
@@ -1069,17 +1873,16 @@ function sessTmplCancelEdit(id) {
 }
 
 async function sessTmplSaveEdit(id) {
+  const previous = getSessionTemplates().find(template => template.id === id);
   const name = document.getElementById(`sess-tmpl-edit-name-${id}`).value.trim();
   if (!name) { alert('请填写模板名称'); return; }
-  const kwRaw = document.getElementById(`sess-tmpl-edit-kw-${id}`).value;
-  const keywords = kwRaw.split(/[,，]/).map(k => k.trim()).filter(Boolean);
   const tmpl = {
-    id, name, keywords,
-    aiPrompt: document.getElementById(`sess-tmpl-edit-ai-prompt-${id}`).value.trim(),
+    id, name,
     note: document.getElementById(`sess-tmpl-edit-note-${id}`).value.trim(),
   };
   await saveSessionTemplate(tmpl);
   renderTemplates();
+  if (tmpl.note || previous?.note) showPersistentSaveNotice('时段模板备注已保存');
 }
 
 async function sessTmplDelete(id) {
@@ -1097,8 +1900,6 @@ function renderDayTypeTemplatesSection() {
       <div class="card" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:6px">🗓 日期类型模板库</div>
         <p style="font-size:12px;color:var(--muted);line-height:1.7;margin:0">
-          AI 在每日最终复查时阅读整日原文，选择至多一个日期类型。<br>
-          · 专属 AI 提示词优先于关键词；不明确符合任何模板时允许不分类。<br>
           · 模板决定是否标记特殊天、是否不参与评分，结果先进入待审核草稿。
         </p>
       </div>
@@ -1113,18 +1914,9 @@ function renderDayTypeTemplatesSection() {
             <label>类型名称</label>
             <input type="text" id="day_type_tmpl_name" placeholder="例：旅行日、生病休息日、考试日">
           </div>
-          <div class="form-group">
-            <label>AI 匹配关键词（逗号分隔）</label>
-            <input type="text" id="day_type_tmpl_keywords" placeholder="例：旅行,出门,酒店,景点">
-          </div>
-          <div class="form-group">
-            <label>模板专属 AI 提示词</label>
-            <textarea id="day_type_tmpl_ai_prompt" rows="4"
-              placeholder="说明怎样判断整天属于这个类型、可包含哪些场景、哪些情况不要归入，以及需要注意的上下文。"></textarea>
-          </div>
           <div class="day-type-template-flags">
-            <label class="ai-checkbox"><input type="checkbox" id="day_type_tmpl_special"> 标记为特殊天</label>
-            <label class="ai-checkbox"><input type="checkbox" id="day_type_tmpl_exclude"> 不参与评分</label>
+            <label><input type="checkbox" id="day_type_tmpl_special"> 标记为特殊天</label>
+            <label><input type="checkbox" id="day_type_tmpl_exclude"> 不参与评分</label>
           </div>
           <div style="display:flex;gap:8px;margin-top:12px">
             <button class="btn btn-success" onclick="dayTypeTmplSaveNew()">✓ 保存日期类型</button>
@@ -1154,14 +1946,8 @@ function dayTypeTmplToggleForm() {
 
 function readDayTypeTemplateForm(prefix) {
   const name = document.getElementById(`${prefix}name`)?.value.trim() || '';
-  const keywords = (document.getElementById(`${prefix}keywords`)?.value || '')
-    .split(/[,，]/)
-    .map(item => item.trim())
-    .filter(Boolean);
   return {
     name,
-    keywords,
-    aiPrompt: document.getElementById(`${prefix}ai_prompt`)?.value.trim() || '',
     specialDay: Boolean(document.getElementById(`${prefix}special`)?.checked),
     excludeFromRating: Boolean(document.getElementById(`${prefix}exclude`)?.checked),
   };
@@ -1183,7 +1969,6 @@ async function dayTypeTmplSaveNew() {
 }
 
 function dayTypeTmplCardHtml(t) {
-  const keywords = (t.keywords || []).join('、');
   return `
     <div id="day-type-tmpl-card-${t.id}" style="border:1px solid var(--border);border-radius:8px;padding:12px;background:rgba(255,255,255,.015)">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
@@ -1197,10 +1982,6 @@ function dayTypeTmplCardHtml(t) {
           <button class="btn btn-danger btn-sm" onclick="dayTypeTmplDelete('${t.id}')">删除</button>
         </div>
       </div>
-      <div style="margin-top:6px;font-size:11px;color:var(--muted)">
-        ${keywords ? `🔑 关键词：<span style="color:var(--text)">${escHtmlApp(keywords)}</span>` : '<span style="color:var(--dim)">无关键词</span>'}
-      </div>
-      ${t.aiPrompt ? `<div class="template-ai-prompt"><b>AI 提示词</b><span>${escHtmlApp(t.aiPrompt)}</span></div>` : ''}
       <div id="day-type-tmpl-edit-${t.id}" style="display:none;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
         ${dayTypeTmplEditFormHtml(t)}
       </div>
@@ -1213,17 +1994,9 @@ function dayTypeTmplEditFormHtml(t) {
       <label>类型名称</label>
       <input type="text" id="day-type-tmpl-edit-${t.id}-name" value="${escHtmlApp(t.name || '')}">
     </div>
-    <div class="form-group">
-      <label>关键词（逗号分隔）</label>
-      <input type="text" id="day-type-tmpl-edit-${t.id}-keywords" value="${escHtmlApp((t.keywords || []).join(','))}">
-    </div>
-    <div class="form-group">
-      <label>模板专属 AI 提示词</label>
-      <textarea id="day-type-tmpl-edit-${t.id}-ai_prompt" rows="4">${escHtmlApp(t.aiPrompt || '')}</textarea>
-    </div>
     <div class="day-type-template-flags">
-      <label class="ai-checkbox"><input type="checkbox" id="day-type-tmpl-edit-${t.id}-special" ${t.specialDay ? 'checked' : ''}> 标记为特殊天</label>
-      <label class="ai-checkbox"><input type="checkbox" id="day-type-tmpl-edit-${t.id}-exclude" ${t.excludeFromRating ? 'checked' : ''}> 不参与评分</label>
+      <label><input type="checkbox" id="day-type-tmpl-edit-${t.id}-special" ${t.specialDay ? 'checked' : ''}> 标记为特殊天</label>
+      <label><input type="checkbox" id="day-type-tmpl-edit-${t.id}-exclude" ${t.excludeFromRating ? 'checked' : ''}> 不参与评分</label>
     </div>
     <div style="display:flex;gap:8px;margin-top:10px">
       <button class="btn btn-success btn-sm" onclick="dayTypeTmplSaveEdit('${t.id}')">✓ 保存修改</button>
@@ -1261,44 +2034,63 @@ async function dayTypeTmplDelete(id) {
 
 function tmplCardHtml(t) {
   const actColor = getActColor(t.activityType || '');
-  const kws = (t.keywords || []).join('、');
+  const libraryProgress = namedItemLibraryProgress(t.id);
+  const activeItemCount = (t.namedItems || []).filter(item => !item.archived).length;
   return `
     <div id="tmpl-card-${t.id}" style="border:1px solid var(--border);border-radius:8px;padding:12px;background:rgba(255,255,255,.015)">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px">
         <div>
-          <span style="font-weight:600;font-size:14px">${t.name ? escHtmlApp(t.name) : '<span style="color:var(--muted);font-style:italic">未命名模板</span>'}</span>
+          <span style="font-weight:600;font-size:14px">${escHtmlApp(t.activityType || '未分类模板')}</span>
           <span class="badge" style="margin-left:8px;background:${actColor.color}22;color:${actColor.color};border:1px solid ${actColor.color}44">
             ${escHtmlApp(t.activityType || '—')}
           </span>
         </div>
         <div style="display:flex;gap:6px">
+          ${(t.namedItemEnabled ?? t.ordinalEnabled) ? `<button class="btn btn-ghost btn-sm" onclick="tmplManageNamedItems('${t.id}')">📚 章节库</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="tmplStartEdit('${t.id}')">✏️ 编辑</button>
+          <button class="btn btn-ghost btn-sm" onclick="tmplClearHistoricalDimension('${t.id}','ordinal')" title="永久删除该模板全部历史序数数据">清除序数</button>
+          <button class="btn btn-ghost btn-sm" onclick="tmplClearHistoricalDimension('${t.id}','quantity')" title="永久删除该模板全部历史数量数据">清除数量</button>
           <button class="btn btn-danger btn-sm" onclick="tmplDelete('${t.id}')">删除</button>
         </div>
       </div>
       <div style="margin-top:6px;font-size:11px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap">
-        ${kws ? `<span>🔑 关键词：<span style="color:var(--text)">${escHtmlApp(kws)}</span></span>` : '<span style="color:var(--dim)">无关键词</span>'}
         ${t.defaultMinutes ? `<span>⏱ 默认 ${t.defaultMinutes} 分钟</span>` : ''}
-        ${t.quantityUnit ? `<span>📏 单位：${escHtmlApp(t.quantityUnit)}</span>` : ''}
-        ${t.note ? `<span>📝 备注：${escHtmlApp(t.note)}</span>` : ''}
+        ${(t.namedItemEnabled ?? t.ordinalEnabled) ? `<span>📚 命名章节：${activeItemCount} 项 · 完成 ${libraryProgress.completedActive}/${activeItemCount}${t.quantityEnabled ? ` · 已录入 ${forecastDisplayMetric(libraryProgress.totalQuantity)} ${escHtmlApp(t.quantityUnit || '数量')}` : ''}</span>` : '<span>📚 命名章节已关闭</span>'}
+        ${t.quantityEnabled ? `<span>📏 数量：${escHtmlApp(t.quantityUnit)}</span>` : `<span>📏 数量已关闭${t.quantityUnit ? `（${escHtmlApp(t.quantityUnit)}数据隐藏）` : ''}</span>`}
+        ${!(t.namedItemEnabled ?? t.ordinalEnabled) && !t.quantityEnabled ? '<span>📅 不参与预测</span>' : ''}
       </div>
-      ${t.aiPrompt ? `<div class="template-ai-prompt"><b>AI 提示词</b><span>${escHtmlApp(t.aiPrompt)}</span></div>` : ''}
+      <details style="margin-top:9px;border:1px solid var(--border);border-radius:7px;background:rgba(255,255,255,.01)">
+        <summary style="cursor:pointer;padding:8px 10px;font-size:11px;color:var(--muted)">
+          📝 模板备注${t.note ? ` · ${escHtmlApp(String(t.note).slice(0, 45))}${String(t.note).length > 45 ? '…' : ''}` : ' · 未填写'}
+        </summary>
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end;padding:0 10px 10px">
+          <label style="margin:0"><span class="form-hint">备注内容</span>
+            <textarea id="tmpl-inline-note-${t.id}" rows="3" maxlength="500" placeholder="填写这个模板的用途、范围或其他说明"
+              onkeydown="if(event.ctrlKey&&event.key==='Enter'){event.preventDefault();tmplSaveInlineNote('${t.id}')}">${escHtmlApp(t.note || '')}</textarea>
+          </label>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="tmplSaveInlineNote('${t.id}')">保存备注</button>
+        </div>
+      </details>
       <!-- 编辑内嵌区 -->
       <div id="tmpl-edit-${t.id}" style="display:none;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
         ${tmplEditFormHtml(t)}
       </div>
-    </div>`;
+  </div>`;
+}
+
+async function tmplSaveInlineNote(id) {
+  const template = getTaskTemplateById(id);
+  const input = document.getElementById(`tmpl-inline-note-${id}`);
+  if (!template || !input) return;
+  template.note = input.value.trim();
+  await saveAllStorage();
+  renderTemplates();
+  showPersistentSaveNotice('模板备注已保存');
 }
 
 function tmplEditFormHtml(t) {
   const [l1, l2, l3] = parseActPath(t.activityType || '');
   return `
-    <div class="form-grid" style="grid-template-columns:1fr 1fr">
-      <div class="form-group" style="grid-column:span 2">
-        <label>模板名称</label>
-        <input type="text" id="tmpl-edit-name-${t.id}" value="${escHtmlApp(t.name)}">
-      </div>
-    </div>
     <div class="form-group">
       <label>绑定活动类别（可自由组合）</label>
       <div style="display:flex;gap:6px;flex-wrap:wrap">
@@ -1318,23 +2110,19 @@ function tmplEditFormHtml(t) {
       <div style="margin-top:2px;font-size:11px;font-family:var(--mono)" id="tmpl-edit-cat-msg-${t.id}"></div>
       <div class="form-hint" style="margin-top:2px">＋ 保存到库 · 🗑 从库删除（不影响已有模板/记录）</div>
     </div>
-    <div class="form-group">
-      <label>关键词（逗号分隔）</label>
-      <input type="text" id="tmpl-edit-kw-${t.id}" value="${escHtmlApp((t.keywords || []).join(','))}">
-    </div>
-    <div class="form-group">
-      <label>模板专属 AI 提示词</label>
-      <textarea id="tmpl-edit-ai-prompt-${t.id}" rows="4"
-        placeholder="说明适用范围、可套用表达、排除情况和注意事项">${escHtmlApp(t.aiPrompt || '')}</textarea>
-    </div>
     <div class="form-grid" style="grid-template-columns:repeat(3,1fr)">
       <div class="form-group"><label>默认时长(分钟)</label>
         <input type="number" id="tmpl-edit-min-${t.id}" value="${t.defaultMinutes || ''}"></div>
-      <div class="form-group"><label>数量单位</label>
+      <div class="form-group template-unit-config"><label>
+        <input type="checkbox" id="tmpl-edit-quantity-enabled-${t.id}" ${t.quantityEnabled ? 'checked' : ''}> 开启数量单位</label>
         ${unitSelectorHtml('tmpl-edit-unit-' + t.id, t.quantityUnit || '', 'tmpl-edit-unit-msg-' + t.id)}
-        <div style="font-size:11px;font-family:var(--mono)" id="tmpl-edit-unit-msg-${t.id}"></div></div>
+        <div style="font-size:11px;font-family:var(--mono)" id="tmpl-edit-unit-msg-${t.id}"></div>
+        <div class="form-hint">关闭时保留单位文字，但不参与录入和预测。</div></div>
       <div class="form-group"><label>备注模板</label>
         <input type="text" id="tmpl-edit-note-${t.id}" value="${escHtmlApp(t.note || '')}"></div>
+      <div class="form-group template-unit-config"><label>
+        <input type="checkbox" id="tmpl-edit-ordinal-enabled-${t.id}" ${(t.namedItemEnabled ?? t.ordinalEnabled) ? 'checked' : ''}> 开启命名章节记录</label>
+        <div class="form-hint">章节名称在共享章节库中维护，不再使用“第N单位”。</div></div>
     </div>
     <div style="display:flex;gap:8px">
       <button class="btn btn-success btn-sm" onclick="tmplSaveEdit('${t.id}')">✓ 保存修改</button>
@@ -1392,26 +2180,37 @@ function _refreshSelect(id, items) {
 
 
 async function tmplSaveNew() {
-  let name = document.getElementById('tmpl_name').value.trim();
   const l1 = document.getElementById('tmpl_l1').value;
   const l2 = document.getElementById('tmpl_l2').value;
   const l3 = document.getElementById('tmpl_l3').value;
   const activityType = buildActPath(l1, l2, l3);
-  const kwRaw = document.getElementById('tmpl_keywords').value;
-  const keywords = kwRaw.split(/[,，]/).map(k => k.trim()).filter(Boolean);
-  // 名称可选：留空即可，不自动生成
+  if (!activityType) {
+    alert('任务模板不再使用名称，请至少填写一个活动类别。');
+    return;
+  }
+  if (getTaskTemplates().some(template => template.activityType === activityType)) {
+    alert('该完整活动类别已经存在一个模板，请直接编辑现有模板。');
+    return;
+  }
+  const namedItemEnabled = document.getElementById('tmpl_ordinal_enabled').checked;
   const tmpl = {
-    name,
     activityType,
-    keywords,
-    aiPrompt: document.getElementById('tmpl_ai_prompt').value.trim(),
     defaultMinutes: parseInt(document.getElementById('tmpl_minutes').value) || null,
     quantityUnit: document.getElementById('tmpl_unit').value.trim(),
+    namedItemEnabled,
+    namedItems: [],
+    ordinalEnabled: namedItemEnabled,
+    ordinalUnit: namedItemEnabled ? '项' : '',
+    quantityEnabled: document.getElementById('tmpl_quantity_enabled').checked,
     note: document.getElementById('tmpl_note').value.trim(),
   };
+  if (tmpl.quantityEnabled && !tmpl.quantityUnit) {
+    alert('开启数量单位后必须填写数量单位。');
+    return;
+  }
   await addTaskTemplate(tmpl);
   const msg = document.getElementById('tmpl-save-msg');
-  if (msg) { msg.textContent = `✅ 已保存「${name}」`; setTimeout(() => msg.textContent = '', 2500); }
+  if (msg) { msg.textContent = `✅ 已保存模板「${activityType || '未分类'}」`; setTimeout(() => msg.textContent = '', 2500); }
   renderTemplates();
   // auto-expand form stays closed after save
 }
@@ -1419,8 +2218,41 @@ async function tmplSaveNew() {
 async function tmplDelete(id) {
   const tmpl = getTaskTemplates().find(t => t.id === id);
   if (!tmpl) return;
-  if (!confirm(`删除模板「${tmpl.name}」？`)) return;
+  if (!confirm(`删除模板「${forecastTemplateLabel(tmpl)}」？`)) return;
   await deleteTaskTemplate(id);
+  renderTemplates();
+}
+
+async function tmplClearHistoricalDimension(id, dimension) {
+  const template = getTaskTemplateById(id);
+  if (!template) return;
+  const entries = getTasksForTemplate(id).filter(({ task }) => {
+    if (dimension === 'ordinal') {
+      return taskOrdinalNumbers(task).length > 0 || taskCompletedOrdinals(task).length > 0;
+    }
+    return task.quantity != null || Boolean(task.quantityUnit);
+  });
+  const label = dimension === 'ordinal' ? '序数及完成状态' : '数量及数量单位';
+  if (!entries.length) {
+    alert(`模板「${forecastTemplateLabel(template)}」没有可清除的历史${label}数据。`);
+    return;
+  }
+  if (!confirm(`将永久清除模板「${forecastTemplateLabel(template)}」关联的 ${entries.length} 条任务中的${label}。\n关闭开关只是隐藏；此操作是真正删除。是否继续？`)) return;
+  if (!confirm(`再次确认：永久删除这些${label}数据后，即使重新开启模板开关也无法恢复。`)) return;
+  entries.forEach(({ task }) => {
+    if (dimension === 'ordinal') {
+      delete task.ordinalNumbers;
+      delete task.completedOrdinals;
+      delete task.chapterNumbers;
+      delete task.completedChapters;
+      delete task.chapterNumber;
+      delete task.chapterCompleted;
+    } else {
+      delete task.quantity;
+      delete task.quantityUnit;
+    }
+  });
+  await saveAllStorage();
   renderTemplates();
 }
 
@@ -1431,28 +2263,269 @@ function tmplCancelEdit(id) {
   document.getElementById(`tmpl-edit-${id}`).style.display = 'none';
 }
 
-async function tmplSaveEdit(id) {
-  const name = document.getElementById(`tmpl-edit-name-${id}`).value.trim();
-  const l1 = document.getElementById(`tmpl-edit-l1-${id}`).value;
-  const l2 = document.getElementById(`tmpl-edit-l2-${id}`).value;
-  const l3 = document.getElementById(`tmpl-edit-l3-${id}`).value;
-  const kwRaw = document.getElementById(`tmpl-edit-kw-${id}`).value;
-  const keywords = kwRaw.split(/[,，]/).map(k => k.trim()).filter(Boolean);
-  const tmpl = {
-    id,
-    name,
-    activityType: buildActPath(l1, l2, l3),
-    keywords,
-    aiPrompt: document.getElementById(`tmpl-edit-ai-prompt-${id}`).value.trim(),
-    defaultMinutes: parseInt(document.getElementById(`tmpl-edit-min-${id}`).value) || null,
-    quantityUnit: document.getElementById(`tmpl-edit-unit-${id}`).value.trim(),
-    note: document.getElementById(`tmpl-edit-note-${id}`).value.trim(),
-  };
-  await saveTaskTemplate(tmpl);
+function tmplManageNamedItems(id) {
+  const template = getTaskTemplateById(id);
+  const host = document.getElementById('template-named-items-manager');
+  if (!template || !host) return;
+  const forecastTab = document.getElementById('tab-forecast');
+  if (forecastTab) forecastTab.innerHTML = '';
+  host.innerHTML = `<div class="card" style="margin-bottom:16px;border-color:rgba(79,195,247,.35)">
+    <div class="card-header">
+      <div>
+        <div class="card-title">📚 共享章节库 · ${escHtmlApp(forecastTemplateLabel(template))}</div>
+        <div class="card-sub">这里保存的章节会同步用于完成预测和任务录入。</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="tmplCloseNamedItemsManager()">关闭</button>
+    </div>
+    ${forecastNamedItemsEditorHtml(template.namedItems || [], template.id)}
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-success" onclick="tmplSaveNamedItems('${id}')">✓ 保存共享章节库</button>
+      <button class="btn btn-ghost" onclick="tmplCloseNamedItemsManager()">取消</button>
+    </div>
+    ${tmplNamedItemsTransferPanelHtml(template)}
+  </div>`;
+  host.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function tmplNamedItemsTransferPanelHtml(sourceTemplate) {
+  const targets = getTaskTemplates().filter(template => template.id !== sourceTemplate.id);
+  const activeCount = (sourceTemplate.namedItems || []).filter(item => !item.archived).length;
+  return `<details style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+    <summary style="cursor:pointer;font-weight:600">📤 复制／覆盖章节库到其他模板</summary>
+    <div style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,.015)">
+      <div class="form-hint" style="margin-bottom:10px">
+        源模板：${escHtmlApp(forecastTemplateLabel(sourceTemplate))} · ${activeCount} 个活动章节。只复制活动章节，不复制归档项目和完成进度。
+      </div>
+      <div class="form-group">
+        <label>操作方式</label>
+        <div style="display:flex;gap:16px;flex-wrap:wrap">
+          <label><input type="radio" name="tmpl_named_items_transfer_mode" value="merge" checked> 合并复制</label>
+          <label><input type="radio" name="tmpl_named_items_transfer_mode" value="overwrite"> 覆盖活动章节</label>
+        </div>
+        <div class="form-hint">合并会保留目标顺序并追加缺少项；覆盖会让目标活动清单采用源模板顺序。</div>
+      </div>
+      <div class="form-group">
+        <label>目标模板（可多选）</label>
+        ${targets.length
+          ? `<div style="display:grid;gap:7px;max-height:220px;overflow-y:auto;padding:8px;border:1px solid var(--border);border-radius:7px">
+              ${targets.map(target => `<label style="display:flex;gap:8px;align-items:center">
+                <input type="checkbox" class="tmpl-named-items-transfer-target" value="${escHtmlApp(target.id)}">
+                <span>${escHtmlApp(forecastTemplateLabel(target))}</span>
+                <span class="c-muted" style="font-size:11px">（${(target.namedItems || []).filter(item => !item.archived).length} 个活动章节）</span>
+              </label>`).join('')}
+            </div>`
+          : '<div class="form-hint">没有可选择的其他任务模板。</div>'}
+      </div>
+      <button type="button" class="btn btn-primary btn-sm" onclick="tmplTransferNamedItems('${sourceTemplate.id}')" ${targets.length ? '' : 'disabled'}>
+        执行复制／覆盖
+      </button>
+    </div>
+  </details>`;
+}
+
+function tmplCloseNamedItemsManager() {
+  const host = document.getElementById('template-named-items-manager');
+  if (host) host.innerHTML = '';
+}
+
+function tmplCanonicalNamedItems(items) {
+  const normalized = (Array.isArray(items) ? items : []).map((item, index) => ({
+    id: String(item?.id || ''),
+    name: String(item?.name || '').trim(),
+    order: Number.isFinite(Number(item?.order)) ? Number(item.order) : index,
+    archived: Boolean(item?.archived),
+  }));
+  const active = normalized.filter(item => !item.archived).sort((a, b) => a.order - b.order);
+  const archived = normalized.filter(item => item.archived).sort((a, b) => a.order - b.order);
+  return [...active, ...archived].map(item => ({
+    id: item.id,
+    name: item.name,
+    archived: item.archived,
+  }));
+}
+
+function tmplNamedItemsEditorHasUnsavedChanges(template) {
+  if (forecastNamedItemRows().some(row => row.dataset.draft === 'true')) return true;
+  const current = forecastCollectNamedItems().map(item => ({
+    id: item.id,
+    name: item.name,
+    archived: item.archived,
+  }));
+  return JSON.stringify(current) !== JSON.stringify(tmplCanonicalNamedItems(template?.namedItems));
+}
+
+function tmplNamedItemIsReferenced(templateId, itemId) {
+  return getTasksForTemplate(templateId).some(({ task }) =>
+    Array.isArray(task.namedItemAllocations) &&
+    task.namedItemAllocations.some(allocation => allocation?.itemId === itemId)
+  );
+}
+
+function tmplNormalizeTransferredNamedItems(active, archived) {
+  return [...active, ...archived].map((item, index) => ({
+    ...item,
+    name: String(item.name || '').trim(),
+    order: index,
+    archived: index >= active.length,
+  }));
+}
+
+function tmplMergeNamedItemsIntoTarget(sourceActive, target) {
+  const targetItems = tmplCanonicalNamedItems(target.namedItems).map(item => ({ ...item }));
+  const active = targetItems.filter(item => !item.archived);
+  const archived = targetItems.filter(item => item.archived);
+  const activeNames = new Set(active.map(item => item.name.toLocaleLowerCase()));
+
+  sourceActive.forEach(sourceItem => {
+    const key = sourceItem.name.toLocaleLowerCase();
+    if (activeNames.has(key)) return;
+    const archivedIndex = archived.findIndex(item => item.name.toLocaleLowerCase() === key);
+    if (archivedIndex >= 0) {
+      const restored = archived.splice(archivedIndex, 1)[0];
+      active.push({ ...restored, archived: false });
+    } else {
+      active.push({ id: uid(), name: sourceItem.name, archived: false });
+    }
+    activeNames.add(key);
+  });
+
+  return tmplNormalizeTransferredNamedItems(active, archived);
+}
+
+function tmplOverwriteNamedItemsInTarget(sourceActive, target) {
+  const targetItems = tmplCanonicalNamedItems(target.namedItems).map(item => ({ ...item }));
+  const targetByName = new Map();
+  targetItems.filter(item => !item.archived).forEach(item => targetByName.set(item.name.toLocaleLowerCase(), item));
+  targetItems.filter(item => item.archived).forEach(item => {
+    const key = item.name.toLocaleLowerCase();
+    if (!targetByName.has(key)) targetByName.set(key, item);
+  });
+
+  const usedIds = new Set();
+  const active = sourceActive.map(sourceItem => {
+    const matched = targetByName.get(sourceItem.name.toLocaleLowerCase());
+    if (matched) {
+      usedIds.add(matched.id);
+      return { ...matched, name: sourceItem.name, archived: false };
+    }
+    return { id: uid(), name: sourceItem.name, archived: false };
+  });
+
+  const archived = [];
+  targetItems.forEach(item => {
+    if (usedIds.has(item.id)) return;
+    if (item.archived || tmplNamedItemIsReferenced(target.id, item.id)) {
+      archived.push({ ...item, archived: true });
+    }
+  });
+  return tmplNormalizeTransferredNamedItems(active, archived);
+}
+
+async function tmplTransferNamedItems(sourceId) {
+  const source = getTaskTemplateById(sourceId);
+  if (!source) return;
+  if (tmplNamedItemsEditorHasUnsavedChanges(source)) {
+    alert('共享章节库存在未保存的新增、改名、排序或归档修改。请先保存章节库，再执行复制或覆盖。');
+    return;
+  }
+  const sourceActive = tmplCanonicalNamedItems(source.namedItems).filter(item => !item.archived);
+  if (!sourceActive.length) {
+    alert('源模板没有可复制的活动章节。');
+    return;
+  }
+  const selectedIds = [...document.querySelectorAll('.tmpl-named-items-transfer-target:checked')]
+    .map(input => input.value);
+  const targets = selectedIds.map(getTaskTemplateById).filter(Boolean);
+  if (!targets.length) {
+    alert('请至少选择一个目标模板。');
+    return;
+  }
+  const mode = document.querySelector('input[name="tmpl_named_items_transfer_mode"]:checked')?.value || 'merge';
+  const modeLabel = mode === 'overwrite' ? '覆盖活动章节' : '合并复制';
+  const targetLabels = targets.map(forecastTemplateLabel);
+  const confirmText = `${modeLabel}：将源模板的 ${sourceActive.length} 个活动章节处理到以下 ${targets.length} 个模板：\n` +
+    targetLabels.map(label => `• ${label}`).join('\n') +
+    `\n\n源模板保持不变；归档章节和完成进度不会复制。是否继续？`;
+  if (!confirm(confirmText)) return;
+
+  targets.forEach(target => {
+    target.namedItems = mode === 'overwrite'
+      ? tmplOverwriteNamedItemsInTarget(sourceActive, target)
+      : tmplMergeNamedItemsIntoTarget(sourceActive, target);
+    target.namedItemEnabled = true;
+    target.ordinalEnabled = true;
+  });
+  await saveAllStorage();
+  alert(`已将章节库${modeLabel}到 ${targets.length} 个目标模板。`);
+  renderTemplates();
+  if (tmpl.note) showPersistentSaveNotice('任务模板备注已保存');
+}
+
+async function tmplSaveNamedItems(id) {
+  const template = getTaskTemplateById(id);
+  if (!template) return;
+  const namedItems = forecastCollectNamedItems();
+  if (namedItems.some(item => !item.name)) {
+    alert('章节名称不能为空。');
+    return;
+  }
+  const normalizedNames = namedItems.map(item => item.name.toLocaleLowerCase());
+  if (new Set(normalizedNames).size !== normalizedNames.length) {
+    alert('同一个模板内不能存在完全同名的章节。');
+    return;
+  }
+  template.namedItems = namedItems;
+  template.namedItemEnabled = true;
+  template.ordinalEnabled = true;
+  await saveAllStorage();
   renderTemplates();
 }
 
-/** Escape HTML for use in app.js (avoids dependency on ai_module escHtml) */
+async function tmplSaveEdit(id) {
+  const previous = getTaskTemplateById(id);
+  const l1 = document.getElementById(`tmpl-edit-l1-${id}`).value;
+  const l2 = document.getElementById(`tmpl-edit-l2-${id}`).value;
+  const l3 = document.getElementById(`tmpl-edit-l3-${id}`).value;
+  const activityType = buildActPath(l1, l2, l3);
+  if (!activityType) {
+    alert('任务模板不再使用名称，请至少填写一个活动类别。');
+    return;
+  }
+  if (getTaskTemplates().some(template => template.id !== id && template.activityType === activityType)) {
+    alert('该完整活动类别已经存在一个模板，请使用不同的类别组合。');
+    return;
+  }
+  const namedItemEnabled = document.getElementById(`tmpl-edit-ordinal-enabled-${id}`).checked;
+  const tmpl = {
+    id,
+    activityType,
+    defaultMinutes: parseInt(document.getElementById(`tmpl-edit-min-${id}`).value) || null,
+    quantityUnit: document.getElementById(`tmpl-edit-unit-${id}`).value.trim(),
+    namedItemEnabled,
+    namedItems: Array.isArray(previous?.namedItems) ? previous.namedItems : [],
+    ordinalEnabled: namedItemEnabled,
+    ordinalUnit: previous?.ordinalUnit || (namedItemEnabled ? '项' : ''),
+    quantityEnabled: document.getElementById(`tmpl-edit-quantity-enabled-${id}`).checked,
+    note: document.getElementById(`tmpl-edit-note-${id}`).value.trim(),
+  };
+  if (tmpl.quantityEnabled && !tmpl.quantityUnit) {
+    alert('开启数量单位后必须填写数量单位。');
+    return;
+  }
+  const changed = [];
+  if (previous && Boolean(previous.namedItemEnabled ?? previous.ordinalEnabled) !== tmpl.namedItemEnabled) changed.push(`命名章节记录${tmpl.namedItemEnabled ? '开启' : '关闭'}`);
+  if (previous && previous.quantityEnabled !== tmpl.quantityEnabled) changed.push(`数量记录${tmpl.quantityEnabled ? '开启' : '关闭'}`);
+  if (previous && previous.quantityUnit !== tmpl.quantityUnit) changed.push(`数量单位改为“${tmpl.quantityUnit || '空'}”`);
+  if (changed.length) {
+    const affected = getTasksForTemplate(id).length;
+    if (!confirm(`保存后将全局${changed.join('、')}，联动 ${affected} 条历史任务的显示、统计和预测。\n关闭只隐藏数据，不会删除。是否继续？`)) return;
+  }
+  await saveTaskTemplate(tmpl);
+  renderTemplates();
+  if (tmpl.note || previous?.note) showPersistentSaveNotice('任务模板备注已保存');
+}
+
+/** Escape HTML for use in app.js. */
 function escHtmlApp(str) {
   if (typeof str !== 'string') str = String(str ?? '');
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1545,6 +2618,10 @@ function catSelFilter(inputId, level) {
   }
   dd.innerHTML = html;
   dd.style.display = 'block';
+  if (/^task_l[123]$/.test(inputId)) {
+    taskTemplateMonitor();
+    updateTaskCategorySequenceUi();
+  }
 }
 
 /** 选中某项 */
@@ -1553,6 +2630,20 @@ function catSelPick(inputId, value) {
   if (input) input.value = value;
   const dd = document.getElementById(inputId + '_dd');
   if (dd) dd.style.display = 'none';
+  if (inputId === 'task_unit') {
+    const label = document.getElementById('task_qty_label');
+    const wrongLabel = document.getElementById('task_wrong_label');
+    if (label) label.textContent = value ? `数量（${value}，可选）` : '数量（可选）';
+    if (wrongLabel) wrongLabel.textContent = value ? `错误数量（${value}，可选）` : '错误数量（可选）';
+    autoCalcRate();
+  }
+  if (inputId === 'task_template_ordinal_unit' || inputId === 'task_new_ordinal_unit') {
+    taskUpdateOrdinalUnitPreview(value);
+  }
+  if (/^task_l[123]$/.test(inputId)) {
+    updateTaskCategorySequenceUi();
+    setTimeout(taskTemplateMonitor, 0);
+  }
 }
 
 /** 保存分类 */
@@ -1565,6 +2656,7 @@ async function catSelSave(level, inputId, msgId) {
   await addCatItem(level, name);
   _showCatMsg(msgId, `✅ 已保存「${name}」`, 'var(--pol)');
   _refreshAllDataLists();
+  if (/^task_l[123]$/.test(inputId)) taskTemplateMonitor();
 }
 
 /** 删除分类 */
@@ -1585,6 +2677,24 @@ async function catSelDelete(level, inputId, msgId) {
 function catSelValue(inputId) {
   const el = document.getElementById(inputId);
   return (el?.value || '').trim();
+}
+
+/** 任务类别必须从一级开始连续填写；未满足前置层级时禁用后续输入。 */
+function updateTaskCategorySequenceUi() {
+  const level1 = catSelValue('task_l1');
+  const level2 = catSelValue('task_l2');
+  const setEnabled = (inputId, enabled, title) => {
+    const wrap = document.getElementById(`${inputId}_wrap`);
+    if (!wrap) return;
+    wrap.querySelectorAll('input, button').forEach(element => {
+      element.disabled = !enabled;
+    });
+    wrap.style.opacity = enabled ? '' : '.5';
+    wrap.title = enabled ? '' : title;
+  };
+  setEnabled('task_l1', true, '');
+  setEnabled('task_l2', Boolean(level1), '请先填写一级类别');
+  setEnabled('task_l3', Boolean(level1 && level2), '请先依次填写一级和二级类别');
 }
 
 // Color palette for activity types (cycles by L1)
@@ -1662,8 +2772,8 @@ function computeDay(dateStr) {
   // 可支配时长 = 清醒时长 − 完全不可用时间。
   // 特殊学习时段只扣除其中未学习的部分，保留实际学习片段。
   const disposableMin = awakeMin != null ? Math.max(0, awakeMin - unavailableMin) : null;
-  const utilPct = (disposableMin != null && disposableMin > 0 && actualMin)
-    ? Math.round(actualMin / disposableMin * 100)
+  const utilPct = (awakeMin != null && awakeMin > 0)
+    ? Math.round(unavailableMin / awakeMin * 100)
     : null;
   const clockVsNominal = nominalMin > 0 ? Math.round((studyClockMin - nominalMin) / nominalMin * 100) : null;
   const actualVsNominal = nominalMin > 0 ? Math.round((actualMin - nominalMin) / nominalMin * 100) : null;
@@ -1766,8 +2876,8 @@ function renderHeader() {
     { label: `总·实际专注${tipIcon('actual')}`, value: fmtHrs(t.actualMin), unit: '', sub: '所有记录日', color: 'var(--pol)' },
     { label: `总·时钟${tipIcon('clock')}`, value: fmtHrs(t.clockMin), unit: '', sub: `有效${fmtHrs(t.effectiveClockMin)} · 休息${fmtHrs(t.restMin)}`, color: 'var(--clock)' },
     {
-      label: `今日利用率${tipIcon('util')}`, value: todayStats.utilPct != null ? todayStats.utilPct + '%' : '-', unit: '', sub: `实际/可支配时长${todayStats.disposableMin != null ? ' (' + fmtMin(todayStats.disposableMin) + ')' : ''}`,
-      color: todayStats.utilPct >= 50 ? 'var(--green)' : 'var(--red)'
+      label: `今日不可用占比${tipIcon('util')}`, value: todayStats.utilPct != null ? todayStats.utilPct + '%' : '-', unit: '', sub: `不可用${fmtMin(todayStats.unavailableMin)} / 清醒${fmtMin(todayStats.awakeMin)}`,
+      color: todayStats.utilPct == null ? 'var(--muted)' : todayStats.utilPct <= 30 ? 'var(--green)' : todayStats.utilPct <= 50 ? 'var(--wake)' : 'var(--red)'
     },
   ];
 
@@ -1784,10 +2894,13 @@ function renderHeader() {
 // TAB SWITCHING
 // ============================================================
 function showTab(id) {
+  if (state.tab === 'entry' && id !== 'entry' && document.getElementById('taskForm')) {
+    saveDraft(state.selectedDate, collectEntryDraft());
+  }
   destroyAll();
   state.tab = id;
   document.querySelectorAll('.tab').forEach((t, i) => {
-    const ids = ['entry', 'calendar', 'day', 'week', 'month', 'stacked', 'sessAnalysis', 'taskAnalysis', 'sleep', 'export', 'templates'];
+    const ids = ['entry', 'calendar', 'day', 'week', 'month', 'stacked', 'sessAnalysis', 'taskAnalysis', 'sleep', 'export', 'templates', 'forecast', 'workbookReview', 'settings'];
     t.classList.toggle('active', ids[i] === id);
   });
   document.querySelectorAll('.tab-content').forEach(c => {
@@ -1798,20 +2911,61 @@ function showTab(id) {
     week: renderWeekOverview, month: renderMonthOverview, stacked: renderStackedArea,
     sessAnalysis: renderSessAnalysis, taskAnalysis: renderTaskAnalysis,
     sleep: renderSleep,
-    export: renderExport, templates: renderTemplates
+    export: renderExport, templates: renderTemplates,
+    forecast: renderForecast,
+    workbookReview: renderWorkbookReview, settings: renderSettings
   };
   if (renders[id]) renders[id]();
   renderHeader();
+  if (id === 'entry') restoreDraft(state.selectedDate);
+  restorePendingSnapshotUi();
 }
 
 // ============================================================
 // ENTRY TAB
 // ============================================================
+function dayMigrationPanelHtml(dateStr, day, sessions, tasks) {
+  const scalarItems = [
+    day.wakeTime ? `<label><input type="checkbox" class="day-move-item" data-kind="wakeTime"> ☀️ 起床时间：${escHtmlApp(day.wakeTime)}</label>` : '',
+    day.dayNote ? `<label><input type="checkbox" class="day-move-item" data-kind="dayNote"> 📝 今日备注：${escHtmlApp(String(day.dayNote).slice(0, 60))}</label>` : '',
+    day.sleepTime ? `<label><input type="checkbox" class="day-move-item" data-kind="sleepTime"> 🌙 睡觉时间：${escHtmlApp(day.sleepTime)}</label>` : '',
+  ].filter(Boolean);
+  const sessionItems = sessions.map((session, index) => `<label>
+    <input type="checkbox" class="day-move-item" data-kind="session" data-id="${escHtmlApp(session.id)}">
+    ⏱ 时段${index + 1}：${session.name ? `${escHtmlApp(session.name)} · ` : ''}${escHtmlApp(session.startTime || '?')}–${escHtmlApp(session.endTime || '?')}
+  </label>`);
+  const taskItems = tasks.map((task, index) => `<label>
+    <input type="checkbox" class="day-move-item" data-kind="task" data-id="${escHtmlApp(task.id)}">
+    📌 任务${index + 1}：${escHtmlApp(task.name || '未命名任务')}${task.activityType ? ` · ${escHtmlApp(task.activityType)}` : ''}
+  </label>`);
+  const total = scalarItems.length + sessionItems.length + taskItems.length;
+  return `<div class="form-panel" id="dayMovePanel">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <b>迁移本日数据</b>
+      <button type="button" class="btn btn-ghost btn-sm" id="day_move_select_all" onclick="toggleDayMoveSelection()">全选</button>
+      <span class="form-hint">共 ${total} 项可选；再次点击“全选”会变成“全取消”。</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px">
+      ${scalarItems.length ? `<div style="display:flex;flex-direction:column;gap:6px"><b style="font-size:12px">单值数据</b>${scalarItems.join('')}</div>` : ''}
+      ${sessionItems.length ? `<div style="display:flex;flex-direction:column;gap:6px"><b style="font-size:12px">专注时段</b>${sessionItems.join('')}</div>` : ''}
+      ${taskItems.length ? `<div style="display:flex;flex-direction:column;gap:6px"><b style="font-size:12px">任务记录</b>${taskItems.join('')}</div>` : ''}
+      ${!total ? '<div class="form-hint">当天没有可迁移的数据。</div>' : ''}
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
+      <span style="font-size:12px;color:var(--muted)">目标日期：</span>
+      ${editableDateInputHtml('day_move_target', addDays(dateStr, 1))}
+      <button class="btn btn-primary btn-sm" onclick="moveSelectedDayData('${dateStr}','append')" ${total ? '' : 'disabled'}>迁移所选并追加</button>
+      <button class="btn btn-danger btn-sm" onclick="moveSelectedDayData('${dateStr}','overwrite')" ${total ? '' : 'disabled'}>迁移所选并覆盖同类</button>
+    </div>
+    <div class="form-hint" style="margin-top:6px">追加：所选时段和任务追加到目标日；覆盖同类：只要选择了时段或任务，就替换目标日对应列表。起床、备注、睡觉选中后始终覆盖目标日对应值。</div>
+  </div>`;
+}
+
 function renderEntry() {
   const dateStr = state.selectedDate;
   const day = getDay(dateStr);
   const stats = computeDay(dateStr);
-  const sessions = day.sessions || [];
+  const sessions = sortSessionsByStart(day.sessions || []);
   const tasks = day.tasks || [];
 
   document.getElementById('tab-entry').innerHTML = `
@@ -1819,9 +2973,12 @@ function renderEntry() {
       <button class="btn btn-ghost btn-sm" onclick="changeDate(-1)">← 前一天</button>
       <span class="date-display">${formatDisplay(dateStr)}</span>
       <button class="btn btn-ghost btn-sm" onclick="changeDate(1)">后一天 →</button>
-      <input type="date" value="${dateStr}" onchange="jumpDate(this.value)" style="margin-left:8px">
+      <div style="margin-left:8px">${editableDateInputHtml('entry_date', dateStr, "jumpDate(document.getElementById('entry_date').value)")}</div>
       <button class="btn btn-ghost btn-sm" onclick="jumpDate('${getTodayStr()}')">今天</button>
+      <button class="btn btn-primary btn-sm" onclick="toggleForm('dayMovePanel')">⇄ 迁移本日数据</button>
     </div>
+
+    ${dayMigrationPanelHtml(dateStr, day, sessions, tasks)}
 
     <div class="three-time">
       <div class="time-block clock"><div class="label">⏱ 时钟时长${tipIcon('clock')}</div><div class="value">${fmtMin(stats.clockMin, true)}</div><div class="sub">有效${tipIcon('effectiveClock')} ${fmtMin(stats.effectiveClockMin)} · 休息 ${fmtMin(stats.restMin)}</div></div>
@@ -1835,6 +2992,7 @@ function renderEntry() {
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         ${timeInputHtml('wakeInput', day.wakeTime || '')}
         <button class="btn btn-success btn-sm" onclick="saveSleep('${dateStr}')">保存</button>
+        ${day.wakeTime ? `<button class="btn btn-danger btn-sm" onclick="clearSavedSleepTime('${dateStr}','wake')">删除起床时间</button>` : ''}
         ${day.wakeTime ? `<span class="fw-mono" style="font-size:12px;color:var(--wake)">${day.wakeTime}</span>` : ''}
       </div>
     </div>
@@ -1861,11 +3019,6 @@ function renderEntry() {
         </label>
         <span style="font-size:11px;color:var(--dim)">特殊日仍可记录学习内容；是否参与评分单独控制</span>
       </div>
-      <div id="specialDayReasonWrap" style="margin-top:${day.specialDay ? '10' : '0'}px;display:${day.specialDay ? 'block' : 'none'}">
-        <input type="text" id="specialDayReason" value="${escHtmlApp(day.specialDayReason || '')}" placeholder="原因（可选，如：出门办事、旅行、生病…）"
-          style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:12px">
-      </div>
-      <script>document.getElementById('specialDayCheck')?.addEventListener('change',function(){var w=document.getElementById('specialDayReasonWrap');w.style.display=this.checked?'block':'none';w.style.marginTop=this.checked?'10px':'0';})<\/script>
     </div>
 
     <!-- 📝 DAY NOTE -->
@@ -1924,7 +3077,7 @@ function renderEntry() {
           <div class="form-group"><label>结束时间</label>${timeInputHtml('sess_end', '')}</div>
           <div class="form-group" id="sessNominalGroup"><label>名义时长(分钟)${tipIcon('nominal')}</label><input type="number" id="sess_nominal" min="1"><div class="form-hint">计划专注多少分钟</div></div>
           <div class="form-group" id="sessActualGroup"><label>实际专注(分钟)${tipIcon('actual')}</label><input type="number" id="sess_actual" min="1"><div class="form-hint">真正专注的分钟数</div></div>
-          <div class="form-group" id="sessRestGroup"><label>休息时间(分钟)${tipIcon('rest')}</label><input type="number" id="sess_rest" min="0"><div class="form-hint">该时段内的计划休息时长</div></div>
+          <div class="form-group" id="sessRestGroup"><label>休息时间(分钟)${tipIcon('rest')}</label><input type="number" id="sess_rest" min="0"><div class="form-hint">名义时长 + 休息时间不能超过时钟时长</div></div>
           <div class="form-group" style="grid-column:span 2"><label>备注</label><input type="text" id="sess_note" placeholder="可选备注"></div>
         </div>
         <div style="display:flex;gap:8px">
@@ -1961,10 +3114,12 @@ function renderEntry() {
     </div>
 
     <!-- 📝 TASKS TABLE -->
-    <div class="card entry-table-card">
+    <div class="card entry-table-card" id="entry-task-records">
       <div class="card-header">
         <div><div class="card-title">📝 任务记录${state._editingTaskId ? ' <span style="color:var(--wake);font-size:12px">✏️ 编辑中</span>' : ''}</div><div class="card-sub">每项具体学习内容 · 效率自动计算</div></div>
-        <button class="btn btn-primary btn-sm" onclick="state._editingTaskId=null;toggleForm('taskForm')">+ 添加任务</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" onclick="state._editingTaskId=null;toggleForm('taskForm')">+ 添加任务</button>
+        </div>
       </div>
       <div class="form-panel" id="taskForm">
         <div class="task-form-grid">
@@ -1982,18 +3137,23 @@ function renderEntry() {
               <div style="display:flex;gap:8px;align-items:center">
                 <select id="task_tmpl" onchange="applyTemplate(this.value)" style="flex:1">
                   <option value="">-- 不套用 --</option>
-                  ${tmpls.map(t => `<option value="${t.id}">${escHtmlApp(t.name)}${t.activityType ? ' (' + escHtmlApp(t.activityType) + ')' : ''}</option>`).join('')}
+                  ${tmpls.map(t => `<option value="${t.id}">${escHtmlApp(t.activityType || '未分类模板')}</option>`).join('')}
                 </select>
                 <a href="#" onclick="showTab('templates');return false" class="btn btn-ghost btn-sm" style="white-space:nowrap">管理模板库</a>
               </div>
+              <div id="task_template_match_msg" class="form-hint"></div>
             </div>`;
     })()}
 
+          <div id="task_forecast_fields" class="form-group full-row">
+            ${taskDimensionPanelHtml('', {})}
+          </div>
+
           <div class="form-group full-row">
-            <label>活动类别（三级）</label>
+            <label>活动类别（一级必填，按顺序填写）*</label>
             <div class="cat-three-cols">
               <div class="cat-col">
-                <span class="cat-col-label">一级类别</span>
+                <span class="cat-col-label">一级类别 *</span>
                 ${catSelectorHtml(1, 'task_l1', '', 'entry_cat_msg')}
               </div>
               <div class="cat-col">
@@ -2006,17 +3166,17 @@ function renderEntry() {
               </div>
             </div>
             <div style="margin-top:6px;font-size:11px;font-family:var(--mono)" id="entry_cat_msg"></div>
-            <div class="form-hint" style="margin-top:2px">＋ 保存到库 · 🗑 从库删除（不影响已有记录）· 输入可搜索过滤</div>
+            <div class="form-hint" style="margin-top:2px">一级类别必填；填写二级后才能填写三级。＋ 保存到库 · 🗑 从库删除（不影响已有记录）</div>
           </div>
 
           <div class="form-group"><label>时长(分钟)</label><input type="number" id="task_min" min="1" oninput="autoCalcRate()"></div>
-          <div class="form-group"><label>数量(可选)</label><input type="number" id="task_qty" oninput="autoCalcRate()"></div>
-          <div class="form-group"><label>数量单位</label>${unitSelectorHtml('task_unit', '', 'entry_unit_msg')}<div style="font-size:11px;font-family:var(--mono)" id="entry_unit_msg"></div></div>
-          <div class="form-group"><label>效率(自动计算)</label><input type="text" id="task_rate" readonly style="background:var(--card);color:var(--muted)"><div class="form-hint">数量÷时长 自动算</div></div>
-          <div class="form-group"><label>正确率%(可选)</label><input type="number" id="task_acc" min="0" max="100"></div>
+          <div class="form-group" id="task_qty_group" style="display:none"><label id="task_qty_label">数量（可选）</label><input type="number" id="task_qty" min="0" step="1" oninput="autoCalcRate()"></div>
+          <div class="form-group" id="task_unit_group" style="display:none"><label id="task_unit_label">新模板数量单位</label>${unitSelectorHtml('task_unit', '', 'entry_unit_msg')}<div style="font-size:11px;font-family:var(--mono)" id="entry_unit_msg"></div></div>
+          <div class="form-group" id="task_rate_group" style="display:none"><label>效率(自动计算)</label><input type="text" id="task_rate" readonly style="background:var(--card);color:var(--muted)"><div class="form-hint">数量÷时长 自动算</div></div>
+          <div class="form-group" id="task_wrong_group" style="display:none"><label id="task_wrong_label">错误数量（可选）</label><input type="number" id="task_wrong" min="0" step="1" oninput="autoCalcRate()"><div class="form-hint">填写错误数量，不能超过本次总数量</div></div>
+          <div class="form-group" id="task_accuracy_group" style="display:none"><label>正确率（自动计算）</label><input type="text" id="task_acc" readonly style="background:var(--card);color:var(--muted)"><div class="form-hint">（总数量－错题数）÷总数量</div></div>
           <div class="form-group full-row"><label>备注</label><input type="text" id="task_note" placeholder="可选备注"></div>
         </div>
-        <datalist id="unitList"><option value="个"><option value="个单词"><option value="道题"><option value="页"><option value="行"></datalist>
         <div style="display:flex;gap:8px">
           <button class="btn btn-success" id="taskFormSaveBtn" onclick="saveTask('${dateStr}')">${state._editingTaskId ? '✓ 更新任务' : '✓ 保存任务'}</button>
           <button class="btn btn-ghost btn-sm" onclick="cancelTaskForm()">${state._editingTaskId ? '取消编辑' : '取消'}</button>
@@ -2025,19 +3185,21 @@ function renderEntry() {
       ${tasks.length === 0
       ? '<div class="empty-state"><p>暂无任务记录</p></div>'
       : `${taskFilterHtml('entry', tasks)}
-        <div class="table-wrap"><table>
+        <div class="table-wrap"><table id="entryTaskTable" class="resizable-task-table">
           <thead><tr><th>#</th><th>任务名称</th><th>活动类型</th><th>时长</th><th>数量</th><th>效率</th><th>正确率</th><th>备注</th><th>操作</th></tr></thead>
           <tbody>${filterTasksByView(tasks, 'entry').map((t, i) => {
-        const rate = t.quantity && t.minutes ? (Number(t.quantity) / Number(t.minutes)).toFixed(2) : null;
+        const visibleQty = visibleTaskQuantity(t);
+        const visibleUnit = visibleTaskQuantityUnit(t);
+        const rate = visibleQty && t.minutes ? (visibleQty / Number(t.minutes)).toFixed(2) : null;
         const actColor = getActColor(t.activityType);
         const isEditingTask = state._editingTaskId === t.id;
-        return `<tr${isEditingTask ? ' style="background:rgba(255,213,79,.1);outline:1px solid rgba(255,213,79,.3)"' : ''}>
+        return `<tr data-task-id="${t.id}"${isEditingTask ? ' style="background:rgba(255,213,79,.1);outline:1px solid rgba(255,213,79,.3)"' : ''}>
           <td class="fw-mono c-muted">${i + 1}</td>
-          <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.name}">${t.name}</td>
+          <td class="task-name-cell" title="${escHtmlApp(t.name)}">${escHtmlApp(t.name)}${taskOrdinalBadgeHtml(t)}</td>
           <td><span class="badge" style="background:${actColor.color}22;color:${actColor.color};border:1px solid ${actColor.color}44">${t.activityType || '-'}</span></td>
           <td class="fw-mono">${fmtMin(Number(t.minutes) || 0, true)}</td>
-          <td class="fw-mono">${t.quantity ? t.quantity + (t.quantityUnit ? ' ' + t.quantityUnit : '') : '-'}</td>
-          <td class="fw-mono">${rate ? rate + (t.quantityUnit ? ' ' + t.quantityUnit + '/min' : '/min') : '-'}</td>
+          <td class="fw-mono task-quantity-cell">${visibleQty ? visibleQty + (visibleUnit ? ' ' + visibleUnit : '') : '-'}</td>
+          <td class="fw-mono task-rate-cell">${rate ? rate + (visibleUnit ? ' ' + visibleUnit + '/min' : '/min') : '-'}</td>
           <td class="fw-mono ${t.accuracy >= 80 ? 'c-green' : t.accuracy >= 60 ? 'c-wake' : t.accuracy ? 'c-red' : ''}">${t.accuracy != null && t.accuracy !== '' ? t.accuracy + '%' : '-'}</td>
           <td class="c-muted" style="font-size:11px">${t.note || ''}</td>
           <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="editTask('${dateStr}','${t.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="deleteTask('${dateStr}','${t.id}')">删除</button></td>
@@ -2053,28 +3215,44 @@ function renderEntry() {
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         ${timeInputHtml('sleepInput', day.sleepTime || '')}
         <button class="btn btn-success btn-sm" onclick="saveSleep('${dateStr}')">保存</button>
+        ${day.sleepTime ? `<button class="btn btn-danger btn-sm" onclick="clearSavedSleepTime('${dateStr}','sleep')">删除睡觉时间</button>` : ''}
         ${day.sleepTime ? `<span class="fw-mono" style="font-size:12px;color:var(--sleep)">${day.sleepTime}</span>` : ''}
         <span class="form-hint" style="margin:0">填次日凌晨时间如 00:30</span>
       </div>
       ${day.wakeTime && day.sleepTime ? `
         <div style="margin-top:10px;font-family:var(--mono);font-size:11px;color:var(--muted)">
           清醒时长${tipIcon('awake')}: <span style="color:var(--text)">${fmtMin(stats.awakeMin)}</span>${stats.unavailableMin ? ` · 不可用: <span style="color:var(--muted)">${fmtMin(stats.unavailableMin)}</span>` : ''}${stats.specialStudyActualMin ? ` · 特殊学习: <span style="color:var(--clock)">${fmtMin(stats.specialStudyActualMin)}</span>` : ''} · 可支配: <span style="color:var(--text)">${fmtMin(stats.disposableMin)}</span> ·
-          利用率${tipIcon('util')}: <span style="color:${stats.utilPct >= 50 ? 'var(--green)' : 'var(--red)'}">${stats.utilPct != null ? stats.utilPct + '%' : '-'}</span>
+          不可用时间占比${tipIcon('util')}: <span style="color:${stats.utilPct == null ? 'var(--muted)' : stats.utilPct <= 30 ? 'var(--green)' : stats.utilPct <= 50 ? 'var(--wake)' : 'var(--red)'}">${stats.utilPct != null ? stats.utilPct + '%' : '-'}</span>
         </div>` : ''}
     </div>
   `;
+  requestAnimationFrame(() => {
+    updateTaskCategorySequenceUi();
+    initEntryTaskColumnResize();
+  });
 }
 
 function autoCalcRate() {
   const qty = parseFloat(document.getElementById('task_qty')?.value);
   const mins = parseFloat(document.getElementById('task_min')?.value);
+  const wrongRaw = document.getElementById('task_wrong')?.value ?? '';
+  const wrong = Number(wrongRaw);
   const unit = document.getElementById('task_unit')?.value || '';
   const rateEl = document.getElementById('task_rate');
+  const accuracyEl = document.getElementById('task_acc');
   if (rateEl) {
     if (qty && mins && mins > 0) {
       rateEl.value = (qty / mins).toFixed(2) + (unit ? ' ' + unit + '/min' : '/min');
     } else {
       rateEl.value = '';
+    }
+  }
+  if (accuracyEl) {
+    if (qty > 0 && wrongRaw !== '' && Number.isInteger(wrong) && wrong >= 0 && wrong <= qty) {
+      const accuracy = (qty - wrong) / qty * 100;
+      accuracyEl.value = `${Number(accuracy.toFixed(2))}%`;
+    } else {
+      accuracyEl.value = '';
     }
   }
 }
@@ -2083,8 +3261,22 @@ function toggleForm(id) {
   const el = document.getElementById(id);
   if (el) el.classList.toggle('open');
 }
-function changeDate(n) { state._editingSessionId = null; state._editingTaskId = null; state.selectedDate = addDays(state.selectedDate, n); showTab('entry'); }
-function jumpDate(d) { if (d) { state._editingSessionId = null; state._editingTaskId = null; state.selectedDate = d; showTab('entry'); } }
+function changeDate(n) {
+  if (document.getElementById('taskForm')) saveDraft(state.selectedDate, collectEntryDraft());
+  state._editingSessionId = null;
+  state._editingTaskId = null;
+  state.selectedDate = addDays(state.selectedDate, n);
+  showTab('entry');
+}
+function jumpDate(d) {
+  if (d) {
+    if (document.getElementById('taskForm')) saveDraft(state.selectedDate, collectEntryDraft());
+    state._editingSessionId = null;
+    state._editingTaskId = null;
+    state.selectedDate = d;
+    showTab('entry');
+  }
+}
 
 async function saveDayNote(dateStr) {
   const note = document.getElementById('dayNoteInput')?.value || '';
@@ -2093,6 +3285,7 @@ async function saveDayNote(dateStr) {
   cacheToLocal();
   await apiFetch(`/api/data/${dateStr}/dayNote`, { method: 'PUT', body: JSON.stringify({ dayNote: note }) });
   renderEntry(); restoreDraft(dateStr);
+  showPersistentSaveNotice(note.trim() ? '今日备注已保存' : '今日备注已清空并保存');
 }
 
 function applyDayTypeTemplateToEntry(name) {
@@ -2102,11 +3295,6 @@ function applyDayTypeTemplateToEntry(name) {
   const exclude = document.getElementById('excludeFromRatingCheck');
   if (special) special.checked = Boolean(tmpl.specialDay);
   if (exclude) exclude.checked = Boolean(tmpl.excludeFromRating);
-  const reasonWrap = document.getElementById('specialDayReasonWrap');
-  if (reasonWrap) {
-    reasonWrap.style.display = tmpl.specialDay ? 'block' : 'none';
-    reasonWrap.style.marginTop = tmpl.specialDay ? '10px' : '0';
-  }
 }
 
 async function saveSleep(dateStr) {
@@ -2114,18 +3302,47 @@ async function saveSleep(dateStr) {
   const sleepTime = readTimeInput('sleepInput');
   const dayType = document.getElementById('dayTypeInput')?.value?.trim() || '';
   const specialDay = document.getElementById('specialDayCheck')?.checked || false;
-  const specialDayReason = document.getElementById('specialDayReason')?.value?.trim() || '';
   const excludeFromRating = document.getElementById('excludeFromRatingCheck')?.checked || false;
   const day = getDay(dateStr);
   day.wakeTime = wakeTime;
   day.sleepTime = sleepTime;
   day.dayType = dayType;
   day.specialDay = specialDay;
-  day.specialDayReason = specialDayReason;
   day.excludeFromRating = excludeFromRating;
+  updateSleepDraft(dateStr, wakeTime, sleepTime);
   cacheToLocal();
-  await apiFetch(`/api/data/${dateStr}/sleep`, { method: 'PUT', body: JSON.stringify({ wakeTime, sleepTime, dayType, specialDay, specialDayReason, excludeFromRating }) });
+  await apiFetch(`/api/data/${dateStr}/sleep`, { method: 'PUT', body: JSON.stringify({ wakeTime, sleepTime, dayType, specialDay, excludeFromRating }) });
   renderEntry(); renderHeader(); restoreDraft(dateStr);
+}
+
+function updateSleepDraft(dateStr, wakeTime, sleepTime) {
+  const draft = loadDraft(dateStr) || {};
+  const wakeParts = String(wakeTime || '').split(':');
+  const sleepParts = String(sleepTime || '').split(':');
+  draft.wakeH = wakeTime ? wakeParts[0] || '' : '';
+  draft.wakeM = wakeTime ? wakeParts[1] || '' : '';
+  draft.sleepH = sleepTime ? sleepParts[0] || '' : '';
+  draft.sleepM = sleepTime ? sleepParts[1] || '' : '';
+  draft._savedAt = new Date().toISOString();
+  saveDraft(dateStr, draft);
+}
+
+async function clearSavedSleepTime(dateStr, type) {
+  const day = getDay(dateStr);
+  const isWake = type === 'wake';
+  const label = isWake ? '起床时间' : '睡觉时间';
+  if (!confirm(`确定删除 ${dateStr} 的${label}？当天其他记录不会受影响。`)) return;
+  if (isWake) day.wakeTime = '';
+  else day.sleepTime = '';
+  updateSleepDraft(dateStr, day.wakeTime || '', day.sleepTime || '');
+  cacheToLocal();
+  await apiFetch(`/api/data/${dateStr}/sleep`, {
+    method: 'PUT',
+    body: JSON.stringify({ wakeTime: day.wakeTime || '', sleepTime: day.sleepTime || '' }),
+  });
+  renderEntry();
+  renderHeader();
+  if (Number(SETTINGS.snapshotInterval) > 0) saveServerSnapshot();
 }
 
 async function saveSession(dateStr) {
@@ -2135,16 +3352,68 @@ async function saveSession(dateStr) {
   const sessName = (document.getElementById('sess_name')?.value || '').trim();
   const start = readTimeInput('sess_start');
   const end = readTimeInput('sess_end');
-  const nominal = parseInt(document.getElementById('sess_nominal').value) || 0;
-  const actual = parseInt(document.getElementById('sess_actual').value) || 0;
-  const rest = parseInt(document.getElementById('sess_rest').value) || 0;
+  const nominal = Number(document.getElementById('sess_nominal').value || 0);
+  const actual = Number(document.getElementById('sess_actual').value || 0);
+  const rest = Number(document.getElementById('sess_rest').value || 0);
   const note = document.getElementById('sess_note')?.value || '';
   if ((isSpecial || isSpecialStudy) && !sessName) { alert('请填写时段名称'); return; }
   if (!start || !end) { alert('请填写开始和结束时间'); return; }
   if (isSpecialStudy && actual <= 0) { alert('特殊学习时段请填写其中实际学习的分钟数'); return; }
+  const clockMinutes = sessionClock({ startTime: start, endTime: end });
+  if (clockMinutes <= 0) {
+    alert('时段数据不合法：开始时间和结束时间不能相同。');
+    return;
+  }
+  if (!isSpecial && !isSpecialStudy) {
+    if (!Number.isInteger(nominal) || !Number.isInteger(actual) || !Number.isInteger(rest) ||
+      nominal <= 0 || actual <= 0 || rest < 0) {
+      alert('普通时段的名义时长和实际专注必须是正整数，休息时间必须是非负整数。');
+      return;
+    }
+    if (clockMinutes < nominal) {
+      alert(`时段数据不合法：时钟时长 ${clockMinutes} 分钟必须大于或等于名义时长 ${nominal} 分钟。`);
+      return;
+    }
+    if (nominal < actual) {
+      alert(`时段数据不合法：名义时长 ${nominal} 分钟必须大于或等于实际专注 ${actual} 分钟。`);
+      return;
+    }
+    if (nominal + rest > clockMinutes) {
+      alert(`时段数据不合法：时钟时长为 ${clockMinutes} 分钟，但名义时长 ${nominal} 分钟 + 休息 ${rest} 分钟 = ${nominal + rest} 分钟。\n名义时长与休息时间之和不能超过时钟时长。`);
+      return;
+    }
+  }
+  if (isSpecialStudy && actual > clockMinutes) {
+    alert(`时段数据不合法：时钟时长为 ${clockMinutes} 分钟，但实际学习填写了 ${actual} 分钟。\n实际学习不能超过时钟时长。`);
+    return;
+  }
 
   const editId = state._editingSessionId;
   const day = getDay(dateStr);
+  const previousNote = editId ? String(day.sessions.find(session => session.id === editId)?.note || '') : '';
+  const candidateSession = {
+    id: editId || uid(),
+    startTime: start,
+    endTime: end,
+    note,
+    type: isSpecial || isSpecialStudy ? sessionType : 'normal',
+    name: isSpecial || isSpecialStudy ? sessName : '',
+    nominalMinutes: isSpecial || isSpecialStudy ? 0 : nominal,
+    actualMinutes: isSpecialStudy ? actual : isSpecial ? 0 : actual,
+    restMinutes: isSpecial || isSpecialStudy ? 0 : rest,
+  };
+  const candidateSessions = editId
+    ? day.sessions.map(session => session.id === editId ? candidateSession : session)
+    : [...day.sessions, candidateSession];
+  const conflictingSession = day.sessions.find(session =>
+    session.id !== editId && sessionsOverlap(candidateSession, session)
+  );
+  if (conflictingSession) {
+    const conflictLabel = sessionTypeMeta(conflictingSession).label;
+    alert(`不能保存：${start}–${end} 与已有${conflictLabel}时段 ${conflictingSession.startTime}–${conflictingSession.endTime} 重叠。\n时段可以首尾相接，但不能交叉或相互包含。`);
+    return;
+  }
+  if (!canApplyNormalSessionCapacityChange(day, candidateSessions)) return;
 
   if (editId) {
     // ── 编辑模式：原地更新 ──
@@ -2188,7 +3457,12 @@ async function saveSession(dateStr) {
     cacheToLocal(); clearDraft(dateStr);
     await apiFetch(`/api/data/${dateStr}/sessions`, { method: 'POST', body: JSON.stringify(session) });
   }
+  state._sessType = 'normal';
   showTab('entry');
+  if (note.trim() || previousNote.trim()) {
+    showPersistentSaveNotice(note.trim() ? '时段备注已保存' : '时段备注已清空并保存');
+  }
+  if (Number(SETTINGS.snapshotInterval) > 0) saveServerSnapshot();
 }
 
 function editSession(dateStr, sessionId) {
@@ -2238,6 +3512,7 @@ function editSession(dateStr, sessionId) {
 
 function cancelSessionForm() {
   state._editingSessionId = null;
+  state._sessType = 'normal';
   const form = document.getElementById('sessionForm');
   if (form) form.classList.remove('open');
   renderEntry();
@@ -2245,25 +3520,207 @@ function cancelSessionForm() {
 
 async function deleteSession(dateStr, id) {
   const day = getDay(dateStr);
-  day.sessions = day.sessions.filter(s => s.id !== id);
+  const candidateSessions = day.sessions.filter(s => s.id !== id);
+  if (!canApplyNormalSessionCapacityChange(day, candidateSessions)) return;
+  day.sessions = candidateSessions;
   cacheToLocal();
   await apiFetch(`/api/data/${dateStr}/sessions/${id}`, { method: 'DELETE' });
   renderEntry(); renderHeader();
 }
 
-async function saveTask(dateStr) {
-  const name = document.getElementById('task_name').value.trim();
-  const mins = parseInt(document.getElementById('task_min').value) || 0;
-  if (!name) { alert('请填写任务名称'); return; }
-  if (!mins) { alert('请填写时长'); return; }
-  const qty = document.getElementById('task_qty').value;
-  const acc = document.getElementById('task_acc').value;
-  const activityType = buildActPath(catSelValue('task_l1'), catSelValue('task_l2'), catSelValue('task_l3'));
-  const quantityUnit = document.getElementById('task_unit').value;
-  const note = document.getElementById('task_note').value;
+function normalSessionActualTotal(sessions = []) {
+  return sessions.reduce((sum, session) => {
+    const isNormal = !session.type || session.type === 'normal';
+    return isNormal ? sum + Math.max(0, Number(session.actualMinutes) || 0) : sum;
+  }, 0);
+}
 
+function taskMinutesTotal(tasks = [], excludedTaskId = null) {
+  return tasks.reduce((sum, task) => {
+    if (excludedTaskId && task.id === excludedTaskId) return sum;
+    return sum + Math.max(0, Number(task.minutes) || 0);
+  }, 0);
+}
+
+function canApplyNormalSessionCapacityChange(day, candidateSessions) {
+  const taskTotal = taskMinutesTotal(day.tasks);
+  const currentCapacity = normalSessionActualTotal(day.sessions);
+  const nextCapacity = normalSessionActualTotal(candidateSessions);
+  if (nextCapacity < taskTotal && nextCapacity < currentCapacity) {
+    alert(`不能保存：当天任务总时长为 ${taskTotal} 分钟，修改后普通时段的实际专注总时长只有 ${nextCapacity} 分钟。\n普通时段容量不能低于任务总时长。`);
+    return false;
+  }
+  return true;
+}
+
+async function saveTask(dateStr) {
+  taskRecalculateNamedItemTotals();
+  const name = document.getElementById('task_name').value.trim();
+  const mins = Number(document.getElementById('task_min').value || 0);
+  if (!name) { alert('请填写任务名称'); return; }
+  if (!Number.isInteger(mins) || mins <= 0) { alert('任务时长必须是大于 0 的整数分钟。'); return; }
+  const qty = document.getElementById('task_qty')?.value || '';
+  const wrongRaw = document.getElementById('task_wrong')?.value ?? '';
+  const level1 = catSelValue('task_l1');
+  const level2 = catSelValue('task_l2');
+  const level3 = catSelValue('task_l3');
+  if (!level1) {
+    alert('活动类别为必填项，请先填写一级类别。');
+    return;
+  }
+  if (level3 && !level2) {
+    alert('活动类别必须按顺序填写：填写三级类别前必须先填写二级类别。');
+    return;
+  }
+  const activityType = buildActPath(level1, level2, level3);
+  const note = document.getElementById('task_note').value;
+  let templateId = document.getElementById('task_tmpl')?.value || '';
+  const selectedTemplateId = templateId;
+  let template = getTaskTemplateById(templateId);
+  let pendingTemplate = null;
+  let inheritedTemplateConfig = null;
+
+  if (template && template.activityType !== activityType) {
+    inheritedTemplateConfig = template;
+    template = null;
+    templateId = '';
+  }
+
+  if (!template && activityType) {
+    const matches = getTaskTemplates().filter(item => item.activityType === activityType);
+    if (matches.length > 1) {
+      alert('该完整活动类别对应多个模板，请先在“套用模板”中明确选择一个模板。');
+      return;
+    }
+    if (matches.length === 1) {
+      template = matches[0];
+      templateId = template.id;
+    } else {
+      const ordinalEnabled = inheritedTemplateConfig
+        ? Boolean(inheritedTemplateConfig.namedItemEnabled ?? inheritedTemplateConfig.ordinalEnabled)
+        : Boolean(document.getElementById('task_new_ordinal_enabled')?.checked);
+      const quantityEnabled = inheritedTemplateConfig
+        ? Boolean(inheritedTemplateConfig.quantityEnabled)
+        : Boolean(document.getElementById('task_new_quantity_enabled')?.checked);
+      const ordinalUnit = inheritedTemplateConfig?.ordinalUnit || (ordinalEnabled ? '项' : '');
+      const quantityUnit = inheritedTemplateConfig?.quantityUnit ||
+        document.getElementById('task_unit')?.value.trim() || '';
+      if (quantityEnabled && !quantityUnit) {
+        alert('新模板开启了数量记录，请先选择数量单位。');
+        return;
+      }
+      template = {
+        id: uid(),
+        activityType,
+        defaultMinutes: mins,
+        namedItemEnabled: ordinalEnabled,
+        namedItems: [],
+        ordinalEnabled,
+        ordinalUnit,
+        quantityEnabled,
+        quantityUnit,
+        note: '',
+      };
+      pendingTemplate = template;
+      templateId = template.id;
+    }
+  }
+
+  if (template && selectedTemplateId === template.id && !inheritedTemplateConfig) {
+    const enteredOrdinalUnit = document.getElementById('task_template_ordinal_unit')?.value.trim() || template.ordinalUnit || '';
+    const enteredQuantityUnit = document.getElementById('task_unit')?.value.trim() || template.quantityUnit || '';
+    const committed = await commitTaskTemplateUnitChanges(template, enteredOrdinalUnit, enteredQuantityUnit);
+    if (!committed) return;
+  }
+
+  const ordinalEnabled = template
+    ? Boolean(template.namedItemEnabled ?? template.ordinalEnabled)
+    : inheritedTemplateConfig
+      ? Boolean(inheritedTemplateConfig.namedItemEnabled ?? inheritedTemplateConfig.ordinalEnabled)
+    : Boolean(document.getElementById('task_new_ordinal_enabled')?.checked);
+  const quantityEnabled = template
+    ? Boolean(template.quantityEnabled)
+    : inheritedTemplateConfig
+      ? Boolean(inheritedTemplateConfig.quantityEnabled)
+    : Boolean(document.getElementById('task_new_quantity_enabled')?.checked);
+  const ordinalUnit = template?.ordinalUnit || inheritedTemplateConfig?.ordinalUnit ||
+    document.getElementById('task_new_ordinal_unit')?.value.trim() || '';
+  const quantityUnit = template?.quantityUnit || inheritedTemplateConfig?.quantityUnit ||
+    document.getElementById('task_unit')?.value.trim() || '';
+  if (!template && (ordinalEnabled || quantityEnabled)) {
+    alert('使用命名章节或数量记录时必须填写活动类别，以便建立并绑定模板。');
+    return;
+  }
+  const forecastGoal = getForecastGoalByTemplate(templateId);
+  let ordinalNumbers = [];
+  let completedOrdinals = [];
+  const namedItemAllocations = ordinalEnabled ? taskCollectNamedItemAllocations(true) : [];
+  if (ordinalEnabled && namedItemAllocations === null) return;
+  if (ordinalEnabled && !namedItemAllocations.length) {
+    alert('请至少添加一个命名章节。');
+    return;
+  }
+  if (ordinalEnabled && namedItemAllocations.length > 1 &&
+    namedItemAllocations.some(item => !item.completed)) {
+    alert('一条任务选择多个章节时，所有章节都必须标记为“本次完成”。如有未完成章节，请拆分为单章节任务分别记录。');
+    return;
+  }
+  if (ordinalEnabled && !taskValidateNamedItemTimeline(templateId, namedItemAllocations, dateStr)) {
+    return;
+  }
+
+  if (quantityEnabled && qty !== '') {
+    const quantityNumber = Number(qty);
+    if (!Number.isInteger(quantityNumber) || quantityNumber < 0) {
+      alert(`数量必须是非负整数${quantityUnit ? `（单位：${quantityUnit}）` : ''}。`);
+      return;
+    }
+  }
+  if (quantityEnabled && (forecastGoal?.mode === 'quantity' || forecastGoal?.mode === 'chapterQuantity')) {
+    const quantityNumber = Number(qty);
+    if (!Number.isInteger(quantityNumber) || quantityNumber <= 0) {
+      alert(`该预测目标要求本次任务填写大于 0 的整数数量（单位：${quantityUnit}）。`);
+      return;
+    }
+    if (quantityUnit !== forecastGoal.quantityUnit) {
+      alert(`数量单位必须与预测目标一致：${forecastGoal.quantityUnit}`);
+      return;
+    }
+  }
+  let wrongCount = null;
+  let calculatedAccuracy = null;
+  if (quantityEnabled && wrongRaw !== '') {
+    const quantityNumber = Number(qty);
+    const wrongNumber = Number(wrongRaw);
+    if (!Number.isInteger(quantityNumber) || quantityNumber <= 0) {
+      alert('填写错题数前，必须先填写大于 0 的整数总数量。');
+      return;
+    }
+    if (!Number.isInteger(wrongNumber) || wrongNumber < 0 || wrongNumber > quantityNumber) {
+      alert(`错题数必须是 0 到 ${quantityNumber} 之间的整数。`);
+      return;
+    }
+    wrongCount = wrongNumber;
+    calculatedAccuracy = Number((((quantityNumber - wrongNumber) / quantityNumber) * 100).toFixed(2));
+  }
   const editId = state._editingTaskId;
   const day = getDay(dateStr);
+  const previousNote = editId ? String(day.tasks.find(task => task.id === editId)?.note || '') : '';
+  const otherTaskMinutes = taskMinutesTotal(day.tasks, editId);
+  const taskTotalAfterSave = otherTaskMinutes + mins;
+  const normalCapacity = normalSessionActualTotal(day.sessions);
+  if (taskTotalAfterSave > normalCapacity) {
+    alert(`不能保存：保存后当天任务总时长为 ${taskTotalAfterSave} 分钟，但普通时段的实际专注总时长只有 ${normalCapacity} 分钟。\n请先增加或调整普通专注时段。`);
+    return;
+  }
+
+  const namedItemsChanged = ordinalEnabled ? taskCommitDraftNamedItems(template, namedItemAllocations) : false;
+  if (pendingTemplate) {
+    getTaskTemplates().push(pendingTemplate);
+    await saveAllStorage();
+  } else if (namedItemsChanged) {
+    await saveAllStorage();
+  }
 
   if (editId) {
     // ── 编辑模式：原地更新 ──
@@ -2273,10 +3730,29 @@ async function saveTask(dateStr) {
     task.name = name;
     task.activityType = activityType;
     task.minutes = mins;
-    task.quantity = qty ? Number(qty) : null;
-    task.quantityUnit = quantityUnit;
-    task.accuracy = acc !== '' ? Number(acc) : null;
+    if (quantityEnabled) {
+      task.quantity = qty !== '' ? Number(qty) : null;
+      task.quantityUnit = quantityUnit;
+      task.wrongCount = wrongCount;
+      task.accuracy = calculatedAccuracy;
+    }
     task.note = note;
+    task.templateId = templateId || null;
+    if (ordinalEnabled) {
+      task.namedItemAllocations = namedItemAllocations.map(item => ({
+        itemId: item.itemId,
+        itemName: item.itemName,
+        minutes: item.minutes,
+        quantity: quantityEnabled ? item.quantity : null,
+        completed: item.completed,
+      }));
+      delete task.ordinalNumbers;
+      delete task.completedOrdinals;
+      delete task.chapterNumbers;
+      delete task.completedChapters;
+      delete task.chapterNumber;
+      delete task.chapterCompleted;
+    }
     state._editingTaskId = null;
     cacheToLocal(); clearDraft(dateStr);
     await apiFetch(`/api/data/${dateStr}`, { method: 'PUT', body: JSON.stringify(day) });
@@ -2284,14 +3760,28 @@ async function saveTask(dateStr) {
     // ── 新增模式 ──
     const task = {
       id: uid(), name, activityType, minutes: mins,
-      quantity: qty ? Number(qty) : null, quantityUnit,
-      accuracy: acc !== '' ? Number(acc) : null, note,
+      quantity: quantityEnabled && qty !== '' ? Number(qty) : null,
+      quantityUnit: quantityEnabled ? quantityUnit : '',
+      wrongCount: quantityEnabled ? wrongCount : null,
+      accuracy: quantityEnabled ? calculatedAccuracy : null, note,
+      templateId: templateId || null,
+      namedItemAllocations: ordinalEnabled ? namedItemAllocations.map(item => ({
+        itemId: item.itemId,
+        itemName: item.itemName,
+        minutes: item.minutes,
+        quantity: quantityEnabled ? item.quantity : null,
+        completed: item.completed,
+      })) : [],
     };
     day.tasks.push(task);
     cacheToLocal(); clearDraft(dateStr);
     await apiFetch(`/api/data/${dateStr}/tasks`, { method: 'POST', body: JSON.stringify(task) });
   }
   showTab('entry');
+  if (note.trim() || previousNote.trim()) {
+    showPersistentSaveNotice(note.trim() ? '任务备注已保存' : '任务备注已清空并保存');
+  }
+  if (Number(SETTINGS.snapshotInterval) > 0) saveServerSnapshot();
 }
 
 function editTask(dateStr, taskId) {
@@ -2308,6 +3798,12 @@ function editTask(dateStr, taskId) {
   setTimeout(() => {
     const nameEl = document.getElementById('task_name');
     if (nameEl) nameEl.value = t.name || '';
+    const templateId = resolveTaskTemplateId(t);
+    const template = getTaskTemplateById(templateId);
+    const templateEl = document.getElementById('task_tmpl');
+    if (templateEl) templateEl.value = templateId || '';
+    renderForecastTaskFields(templateId, t);
+    configureTaskUnitFields(templateId);
     // 解析三级类别并填入
     const [l1, l2, l3] = parseActPath(t.activityType);
     const l1El = document.getElementById('task_l1');
@@ -2321,12 +3817,21 @@ function editTask(dateStr, taskId) {
     const qtyEl = document.getElementById('task_qty');
     if (qtyEl) qtyEl.value = t.quantity != null ? t.quantity : '';
     const unitEl = document.getElementById('task_unit');
-    if (unitEl) unitEl.value = t.quantityUnit || '';
+    if (unitEl) unitEl.value = template?.quantityUnit || t.quantityUnit || '';
+    let wrongValue = t.wrongCount;
+    if (wrongValue == null && t.quantity != null && t.accuracy != null) {
+      const estimatedWrong = Number(t.quantity) * (100 - Number(t.accuracy)) / 100;
+      const roundedWrong = Math.round(estimatedWrong);
+      if (Math.abs(estimatedWrong - roundedWrong) < 1e-8) wrongValue = roundedWrong;
+    }
+    const wrongEl = document.getElementById('task_wrong');
+    if (wrongEl) wrongEl.value = wrongValue != null ? wrongValue : '';
     const accEl = document.getElementById('task_acc');
-    if (accEl) accEl.value = t.accuracy != null ? t.accuracy : '';
     const noteEl = document.getElementById('task_note');
     if (noteEl) noteEl.value = t.note || '';
     autoCalcRate();
+    if (accEl && wrongValue == null && t.accuracy != null) accEl.value = `${t.accuracy}%`;
+    updateTaskCategorySequenceUi();
   }, 60);
 }
 
@@ -2343,6 +3848,69 @@ async function deleteTask(dateStr, id) {
   cacheToLocal();
   await apiFetch(`/api/data/${dateStr}/tasks/${id}`, { method: 'DELETE' });
   renderEntry(); renderHeader();
+}
+
+function toggleDayMoveSelection() {
+  const items = [...document.querySelectorAll('.day-move-item')];
+  const shouldSelect = items.some(item => !item.checked);
+  items.forEach(item => { item.checked = shouldSelect; });
+  const button = document.getElementById('day_move_select_all');
+  if (button) button.textContent = shouldSelect ? '全取消' : '全选';
+}
+
+async function moveSelectedDayData(sourceDate, mode) {
+  const targetDate = document.getElementById('day_move_target')?.value || '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
+    alert('请选择有效的目标日期。');
+    return;
+  }
+  if (targetDate === sourceDate) {
+    alert('目标日期不能与来源日期相同。');
+    return;
+  }
+  const selected = [...document.querySelectorAll('.day-move-item:checked')];
+  if (!selected.length) {
+    alert('请至少选择一项需要迁移的数据。');
+    return;
+  }
+  const selection = {
+    wakeTime: selected.some(item => item.dataset.kind === 'wakeTime'),
+    dayNote: selected.some(item => item.dataset.kind === 'dayNote'),
+    sleepTime: selected.some(item => item.dataset.kind === 'sleepTime'),
+    sessionIds: selected.filter(item => item.dataset.kind === 'session').map(item => item.dataset.id),
+    taskIds: selected.filter(item => item.dataset.kind === 'task').map(item => item.dataset.id),
+  };
+  const targetSessionCount = state.data[targetDate]?.sessions?.length || 0;
+  const targetTaskCount = state.data[targetDate]?.tasks?.length || 0;
+  const action = mode === 'overwrite' ? '覆盖同类' : '追加';
+  const warning = mode === 'overwrite'
+    ? `若选择了专注时段，将替换目标日 ${targetSessionCount} 条时段；若选择了任务，将替换目标日 ${targetTaskCount} 条任务。`
+    : `所选专注时段和任务会追加到目标日现有 ${targetSessionCount} 条时段、${targetTaskCount} 条任务之后。`;
+  if (!confirm(`把 ${sourceDate} 选中的 ${selected.length} 项迁移到 ${targetDate}（${action}）？\n${warning}\n起床时间、今日备注和睡觉时间选中后会覆盖目标日对应值；来源日只删除已选内容。`)) return;
+  try {
+    const result = await apiFetch('/api/day/move', {
+      method: 'POST',
+      body: JSON.stringify({ sourceDate, targetDate, mode, selection }),
+    });
+    state.data[sourceDate] = result.sourceDay;
+    state.data[targetDate] = result.targetDay;
+    if (selection.sessionIds.includes(state._editingSessionId)) state._editingSessionId = null;
+    if (selection.taskIds.includes(state._editingTaskId)) state._editingTaskId = null;
+    const draft = loadDraft(sourceDate) || {};
+    if (selection.wakeTime) { draft.wakeH = ''; draft.wakeM = ''; }
+    if (selection.dayNote) draft.dayNote = '';
+    if (selection.sleepTime) { draft.sleepH = ''; draft.sleepM = ''; }
+    draft._savedAt = new Date().toISOString();
+    saveDraft(sourceDate, draft);
+    state.selectedDate = targetDate;
+    cacheToLocal();
+    alert(`已迁移 ${result.moved} 项数据到 ${targetDate}，其中专注时段 ${result.movedSessions} 条、任务 ${result.movedTasks} 条。`);
+    showTab('entry');
+    if (Number(SETTINGS.snapshotInterval) > 0) saveServerSnapshot();
+  } catch (error) {
+    console.error('迁移日数据失败', error);
+    alert('迁移失败，来源和目标数据未在前端改动。请反馈后端日志中的关键错误。');
+  }
 }
 
 async function dayDeleteTask(dateStr, taskId) {
@@ -2436,12 +4004,20 @@ function renderCalendar() {
     const pct = Math.round(s.actualMin / maxActual * 100);
     const hourColor = s.actualMin >= 360 ? 'var(--pol)' : s.actualMin >= 240 ? 'var(--hp)' : s.actualMin >= 120 ? 'var(--wake)' : s.actualMin > 0 ? 'var(--red)' : 'var(--dim)';
     const actKeys = Object.keys(s.actMin || {}).filter(k => s.actMin[k] > 0);
+    const unclassifiedTasks = (state.data[dateStr]?.tasks || []).filter(isTaskUnclassified);
+    const unclassifiedTitle = unclassifiedTasks.map(task => task.name || '未命名任务').join('、');
     const dots = actKeys
       .map(k => { const c = getActColor(k); return `<div class="cal-dot" style="background:${c.color}" title="${k}: ${fmtMin(s.actMin[k])}"></div>`; })
       .join('');
     return `<div class="cal-day ${isToday ? 'today' : ''} ${isSel ? 'selected' : ''} ${!inMonth ? 'other-month' : ''} ${hasData ? 'has-data' : ''}"
+          style="${unclassifiedTasks.length ? 'box-shadow:inset 0 0 0 2px rgba(255,82,82,.82);background:rgba(255,82,82,.06)' : ''}"
           onclick="calSelectDay('${dateStr}')">
           <div class="cal-day-num">${strToDate(dateStr).getDate()}</div>
+          ${unclassifiedTasks.length ? `<button type="button" title="未分类任务：${escHtmlApp(unclassifiedTitle)}"
+            onclick="event.stopPropagation();calOpenUnclassified('${dateStr}')"
+            style="display:block;width:100%;margin:4px 0;padding:3px 5px;border:1px solid rgba(255,82,82,.8);border-radius:5px;background:rgba(255,82,82,.18);color:#ff8a80;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+            ⚠ 未分类 ${unclassifiedTasks.length}
+          </button>` : ''}
           ${hasData ? `
             <div class="cal-day-hours" style="color:${hourColor}">${fmtHrs(s.actualMin)}</div>
             <div class="cal-day-bar"><div style="width:${pct}%;height:100%;border-radius:2px;background:${hourColor}"></div></div>
@@ -2452,9 +4028,19 @@ function renderCalendar() {
     </div>
     <div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
       ${getActivityTypes().map(a => { const c = getActColor(a); return `<span style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted)"><span class="cal-dot" style="background:${c.color}"></span>${a}</span>`; }).join('')}
+      <span style="display:flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80"><span style="width:10px;height:10px;border:2px solid rgba(255,82,82,.82);border-radius:3px"></span>存在未分类任务</span>
       <span style="font-size:11px;color:var(--muted);margin-left:8px">点击日期→录入/日览</span>
     </div>
   `;
+}
+
+function calOpenUnclassified(dateStr) {
+  state.selectedDate = dateStr;
+  state._taskFilter.entry = '未分类';
+  showTab('entry');
+  setTimeout(() => {
+    document.getElementById('entry-task-records')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 0);
 }
 
 function calNav(n) {
@@ -2516,7 +4102,7 @@ function renderDayOverview() {
       <div class="mini-card"><div class="lbl">分心时间${tipIcon('distract')}</div><div class="val" style="color:var(--red)">${fmtMin(s.distractMin, true)}</div><div class="sub">时钟−实际−休息</div></div>
       <div class="mini-card"><div class="lbl">清醒时长${tipIcon('awake')}</div><div class="val" style="color:var(--wake)">${fmtMin(s.awakeMin)}</div><div class="sub">${day.wakeTime || '?'} → ${day.sleepTime || '?'}</div></div>
       <div class="mini-card"><div class="lbl">可支配时长</div><div class="val" style="color:var(--clock)">${s.disposableMin != null ? fmtMin(s.disposableMin) : '-'}</div><div class="sub">清醒${s.unavailableMin ? ' − 不可用' + fmtMin(s.unavailableMin) : ' (无不可用时段)'}</div></div>
-      <div class="mini-card"><div class="lbl">时间利用率${tipIcon('util')}</div><div class="val" style="color:${s.utilPct >= 50 ? 'var(--green)' : s.utilPct >= 30 ? 'var(--wake)' : 'var(--red)'}">${s.utilPct != null ? s.utilPct + '%' : '-'}</div><div class="sub">实际专注/可支配</div></div>
+      <div class="mini-card"><div class="lbl">不可用时间占比${tipIcon('util')}</div><div class="val" style="color:${s.utilPct == null ? 'var(--muted)' : s.utilPct <= 30 ? 'var(--green)' : s.utilPct <= 50 ? 'var(--wake)' : 'var(--red)'}">${s.utilPct != null ? s.utilPct + '%' : '-'}</div><div class="sub">不可用时长/清醒时长</div></div>
       <div class="mini-card"><div class="lbl">时段数量</div><div class="val" style="color:var(--hp)">${s.sessions.length}</div><div class="sub">专注时段</div></div>
       <div class="mini-card"><div class="lbl">任务数量</div><div class="val" style="color:var(--pol)">${s.tasks.length}</div><div class="sub">已记录任务</div></div>
     </div>
@@ -2550,7 +4136,7 @@ function renderDayOverview() {
               <th>专注率</th><th>操作</th>
             </tr></thead>
             <tbody>
-              ${s.sessions.map((sess, i) => {
+              ${sortSessionsByStart(s.sessions).map((sess, i) => {
     const cl = sessionClock(sess);
     const isSpec = isUnavailableSession(sess);
     const isSpecialStudy = isSpecialStudySession(sess);
@@ -2589,13 +4175,15 @@ function renderDayOverview() {
             <tbody>
               ${filterTasksByView(s.tasks, 'day').map(t => {
     const actColor = getActColor(t.activityType);
-    const rate = t.quantity && t.minutes ? (Number(t.quantity) / Number(t.minutes)).toFixed(2) : null;
+    const visibleQty = visibleTaskQuantity(t);
+    const visibleUnit = visibleTaskQuantityUnit(t);
+    const rate = visibleQty && t.minutes ? (visibleQty / Number(t.minutes)).toFixed(2) : null;
     return `<tr>
                   <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtmlApp(t.name)}</td>
                   <td><span class="badge" style="background:${actColor.color}22;color:${actColor.color};border:1px solid ${actColor.color}44">${t.activityType || '-'}</span></td>
                   <td class="fw-mono">${fmtMin(Number(t.minutes) || 0, true)}</td>
-                  <td class="fw-mono">${t.quantity ? (t.quantity + (t.quantityUnit ? ' ' + t.quantityUnit : '')) : '-'}</td>
-                  <td class="fw-mono">${rate ? (rate + (t.quantityUnit ? ' ' + t.quantityUnit + '/min' : '/min')) : '-'}</td>
+                  <td class="fw-mono">${visibleQty ? (visibleQty + (visibleUnit ? ' ' + visibleUnit : '')) : '-'}</td>
+                  <td class="fw-mono">${rate ? (rate + (visibleUnit ? ' ' + visibleUnit + '/min' : '/min')) : '-'}</td>
                   <td class="fw-mono ${t.accuracy >= 80 ? 'c-green' : t.accuracy >= 60 ? 'c-wake' : t.accuracy ? 'c-red' : ''}">${t.accuracy != null && t.accuracy !== '' ? t.accuracy + '%' : '-'}</td>
                   <td class="c-muted" style="font-size:11px">${t.note || ''}</td>
                   <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="monthEditTask('${dateStr}','${t.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="dayDeleteTask('${dateStr}','${t.id}')">删除</button></td>
@@ -2663,7 +4251,7 @@ function renderWeekOverview() {
   const allWeekSessions = [];
   days.forEach(dateStr => {
     const day = getDay(dateStr);
-    (day.sessions || []).forEach(s => { allWeekSessions.push({ ...s, _date: dateStr }); });
+    sortSessionsByStart(day.sessions || []).forEach(s => { allWeekSessions.push({ ...s, _date: dateStr }); });
   });
   const weekSessTotalClock = allWeekSessions.reduce((s, sess) => s + sessionClock(sess), 0);
   const weekSessTotalActual = allWeekSessions.filter(s => s.type !== 'special').reduce((s, sess) => s + (Number(sess.actualMinutes) || 0), 0);
@@ -2718,13 +4306,13 @@ function renderWeekOverview() {
       </div>
       <div class="chart-card full">
         <div class="chart-title">每日汇总表</div>
-        <div class="chart-sub">时钟 + 有效时钟 + 休息 + 名义 + 实际 + 偏差 + 效率 + 利用率</div>
+        <div class="chart-sub">时钟 + 有效时钟 + 休息 + 名义 + 实际 + 偏差 + 效率 + 不可用时间占比</div>
         <div class="table-wrap">
           <table>
             <thead><tr>
               <th>日期</th><th>起床</th><th>睡觉</th>
               <th class="c-clock">时钟${tipIcon('clock')}</th><th class="c-clock">有效${tipIcon('effectiveClock')}</th><th>休息${tipIcon('rest')}</th><th class="c-nominal">名义${tipIcon('nominal')}</th><th class="c-actual">实际${tipIcon('actual')}</th>
-              <th>偏差率${tipIcon('deviation')}</th><th>效率${tipIcon('efficiency')}</th><th>利用率${tipIcon('util')}</th>
+              <th>偏差率${tipIcon('deviation')}</th><th>效率${tipIcon('efficiency')}</th><th>不可用占比${tipIcon('util')}</th>
             </tr></thead>
             <tbody>
               ${dayStats.map(d => {
@@ -2740,7 +4328,7 @@ function renderWeekOverview() {
                   <td class="fw-mono c-actual">${fmtMin(d.actualMin, true)}</td>
                   <td class="fw-mono ${devClass(d.actualVsNominal)}">${devStr(d.actualVsNominal)}</td>
                   <td class="fw-mono ${d.focusEfficiency >= 80 ? 'c-green' : d.focusEfficiency >= 60 ? 'c-wake' : 'c-red'}">${d.focusEfficiency != null ? d.focusEfficiency + '%' : '-'}</td>
-                  <td class="fw-mono ${d.utilPct >= 50 ? 'c-green' : d.utilPct >= 30 ? 'c-wake' : 'c-red'}">${d.utilPct != null ? d.utilPct + '%' : '-'}</td>
+                  <td class="fw-mono ${d.utilPct == null ? 'c-muted' : d.utilPct <= 30 ? 'c-green' : d.utilPct <= 50 ? 'c-wake' : 'c-red'}">${d.utilPct != null ? d.utilPct + '%' : '-'}</td>
                 </tr>`;
   }).join('')}
             </tbody>
@@ -2790,15 +4378,17 @@ function renderWeekOverview() {
               <th>日期</th><th>任务名称</th><th>活动类型</th><th>时长</th><th>数量</th><th>效率</th><th>正确率</th><th>备注</th><th>操作</th>
             </tr></thead>
             <tbody>${filterTasksByView(allWeekTasks, 'week').map(t => {
-        const rate = t.quantity && t.minutes ? (Number(t.quantity) / Number(t.minutes)).toFixed(2) : null;
+        const visibleQty = visibleTaskQuantity(t);
+        const visibleUnit = visibleTaskQuantityUnit(t);
+        const rate = visibleQty && t.minutes ? (visibleQty / Number(t.minutes)).toFixed(2) : null;
         const actColor = getActColor(t.activityType);
         return `<tr>
               <td class="fw-mono" style="white-space:nowrap;cursor:pointer;color:var(--hp)" onclick="state.selectedDate='${t._date}';showTab('day')">${formatShort(t._date)}</td>
               <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtmlApp(t.name)}">${escHtmlApp(t.name)}</td>
               <td><span class="badge" style="background:${actColor.color}22;color:${actColor.color};border:1px solid ${actColor.color}44">${t.activityType || '-'}</span></td>
               <td class="fw-mono">${fmtMin(Number(t.minutes) || 0, true)}</td>
-              <td class="fw-mono">${t.quantity ? t.quantity + (t.quantityUnit ? ' ' + t.quantityUnit : '') : '-'}</td>
-              <td class="fw-mono">${rate ? rate + (t.quantityUnit ? ' ' + t.quantityUnit + '/min' : '/min') : '-'}</td>
+              <td class="fw-mono">${visibleQty ? visibleQty + (visibleUnit ? ' ' + visibleUnit : '') : '-'}</td>
+              <td class="fw-mono">${rate ? rate + (visibleUnit ? ' ' + visibleUnit + '/min' : '/min') : '-'}</td>
               <td class="fw-mono ${t.accuracy >= 80 ? 'c-green' : t.accuracy >= 60 ? 'c-wake' : t.accuracy ? 'c-red' : ''}">${t.accuracy != null && t.accuracy !== '' ? t.accuracy + '%' : '-'}</td>
               <td class="c-muted" style="font-size:11px">${t.note || ''}</td>
               <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="monthEditTask('${t._date}','${t.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="weekDeleteTask('${t._date}','${t.id}')">删除</button></td>
@@ -2918,6 +4508,13 @@ function renderMonthOverview() {
   });
   const { days: dayStats, totals } = computeRange(dates);
   const activeDays = dayStats.filter(d => d.clockMin > 0 || d.taskMin > 0);
+  const monthDayStatuses = dayStats.map(d => {
+    const day = getDay(d.dateStr);
+    if (day.specialDay && day.excludeFromRating) return 'special-excluded';
+    if (day.excludeFromRating) return 'excluded';
+    if (day.specialDay) return 'special';
+    return 'normal';
+  });
 
   // 月度统计指标
   const moStatsClock = calcStats(dayStats.map(d => d.clockMin));
@@ -2944,7 +4541,7 @@ function renderMonthOverview() {
   const allMonthSessions = [];
   dates.forEach(dateStr => {
     const day = getDay(dateStr);
-    (day.sessions || []).forEach(s => { allMonthSessions.push({ ...s, _date: dateStr }); });
+    sortSessionsByStart(day.sessions || []).forEach(s => { allMonthSessions.push({ ...s, _date: dateStr }); });
   });
   const monthSessTotalClock = allMonthSessions.reduce((s, sess) => s + sessionClock(sess), 0);
   const monthSessTotalActual = allMonthSessions.filter(s => s.type !== 'special').reduce((s, sess) => s + (Number(sess.actualMinutes) || 0), 0);
@@ -2969,7 +4566,7 @@ function renderMonthOverview() {
     <div class="chart-grid">
       <div class="chart-card full">
         <div class="chart-title">每日三维时间趋势</div>
-        <div class="chart-sub">填充折线图 · 时钟（虚线）/ 有效时钟 / 名义（蓝）/ 实际（绿）</div>
+        <div class="chart-sub">填充折线图 · 时钟（虚线）/ 有效时钟 / 名义（蓝）/ 实际（绿）· ◆特殊天 · ▲不评分 · ★特殊天且不评分</div>
         <canvas id="monthThreeChart" height="80"></canvas>
       </div>
       <div class="chart-card">
@@ -2979,7 +4576,7 @@ function renderMonthOverview() {
       </div>
       <div class="chart-card">
         <div class="chart-title">每日实际专注分布</div>
-        <div class="chart-sub">实际专注时长柱状图</div>
+        <div class="chart-sub">实际专注时长柱状图 · ◆特殊天 · ▲不评分 · ★特殊天且不评分</div>
         <canvas id="monthActualChart" height="200"></canvas>
       </div>
       <div class="chart-card full">
@@ -2990,7 +4587,7 @@ function renderMonthOverview() {
             <thead><tr>
               <th>日期</th><th>起床</th><th>睡觉</th>
               <th class="c-clock">时钟${tipIcon('clock')}</th><th class="c-clock">有效${tipIcon('effectiveClock')}</th><th>休息${tipIcon('rest')}</th><th class="c-nominal">名义${tipIcon('nominal')}</th><th class="c-actual">实际${tipIcon('actual')}</th>
-              <th>偏差率${tipIcon('deviation')}</th><th>效率${tipIcon('efficiency')}</th><th>利用率${tipIcon('util')}</th><th>评价</th>
+              <th>偏差率${tipIcon('deviation')}</th><th>效率${tipIcon('efficiency')}</th><th>不可用占比${tipIcon('util')}</th><th>评价</th>
             </tr></thead>
             <tbody>
               ${dayStats.filter(d => d.clockMin > 0 || d.taskMin > 0 || state.data[d.dateStr]?.wakeTime).map(d => {
@@ -2999,7 +4596,7 @@ function renderMonthOverview() {
     if (d.actualMin >= 480) sc++;
     if (d.actualVsNominal != null && d.actualVsNominal >= -10) sc++;
     if (dayObj.wakeTime && parseMin(dayObj.wakeTime) <= 8 * 60) sc++;
-    if (d.utilPct != null && d.utilPct >= 50) sc++;
+    if (d.utilPct != null && d.utilPct <= SETTINGS.ratingUtilPct) sc++;
     const rating = dayObj.excludeFromRating ? '<span class="c-muted">不评分</span>' : sc >= 3 ? '⭐' : sc >= 2 ? '👌' : sc >= 1 ? '⚠️' : '';
     return `<tr style="cursor:pointer" onclick="state.selectedDate='${d.dateStr}';showTab('day')">
                   <td class="fw-mono">${formatShort(d.dateStr)}</td>
@@ -3012,7 +4609,7 @@ function renderMonthOverview() {
                   <td class="fw-mono c-actual">${fmtMin(d.actualMin, true)}</td>
                   <td class="fw-mono ${devClass(d.actualVsNominal)}">${devStr(d.actualVsNominal)}</td>
                   <td class="fw-mono ${d.focusEfficiency >= 80 ? 'c-green' : d.focusEfficiency >= 60 ? 'c-wake' : 'c-red'}">${d.focusEfficiency != null ? d.focusEfficiency + '%' : '-'}</td>
-                  <td class="fw-mono ${d.utilPct >= 50 ? 'c-green' : d.utilPct >= 30 ? 'c-wake' : 'c-red'}">${d.utilPct != null ? d.utilPct + '%' : '-'}</td>
+                  <td class="fw-mono ${d.utilPct == null ? 'c-muted' : d.utilPct <= 30 ? 'c-green' : d.utilPct <= 50 ? 'c-wake' : 'c-red'}">${d.utilPct != null ? d.utilPct + '%' : '-'}</td>
                   <td>${rating}</td>
                 </tr>`;
   }).join('')}
@@ -3063,15 +4660,17 @@ function renderMonthOverview() {
               <th>日期</th><th>任务名称</th><th>活动类型</th><th>时长</th><th>数量</th><th>效率</th><th>正确率</th><th>备注</th><th>操作</th>
             </tr></thead>
             <tbody>${filterTasksByView(allMonthTasks, 'month').map(t => {
-        const rate = t.quantity && t.minutes ? (Number(t.quantity) / Number(t.minutes)).toFixed(2) : null;
+        const visibleQty = visibleTaskQuantity(t);
+        const visibleUnit = visibleTaskQuantityUnit(t);
+        const rate = visibleQty && t.minutes ? (visibleQty / Number(t.minutes)).toFixed(2) : null;
         const actColor = getActColor(t.activityType);
         return `<tr>
               <td class="fw-mono" style="white-space:nowrap;cursor:pointer;color:var(--hp)" onclick="state.selectedDate='${t._date}';showTab('day')">${formatShort(t._date)}</td>
               <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtmlApp(t.name)}">${escHtmlApp(t.name)}</td>
               <td><span class="badge" style="background:${actColor.color}22;color:${actColor.color};border:1px solid ${actColor.color}44">${t.activityType || '-'}</span></td>
               <td class="fw-mono">${fmtMin(Number(t.minutes) || 0, true)}</td>
-              <td class="fw-mono">${t.quantity ? t.quantity + (t.quantityUnit ? ' ' + t.quantityUnit : '') : '-'}</td>
-              <td class="fw-mono">${rate ? rate + (t.quantityUnit ? ' ' + t.quantityUnit + '/min' : '/min') : '-'}</td>
+              <td class="fw-mono">${visibleQty ? visibleQty + (visibleUnit ? ' ' + visibleUnit : '') : '-'}</td>
+              <td class="fw-mono">${rate ? rate + (visibleUnit ? ' ' + visibleUnit + '/min' : '/min') : '-'}</td>
               <td class="fw-mono ${t.accuracy >= 80 ? 'c-green' : t.accuracy >= 60 ? 'c-wake' : t.accuracy ? 'c-red' : ''}">${t.accuracy != null && t.accuracy !== '' ? t.accuracy + '%' : '-'}</td>
               <td class="c-muted" style="font-size:11px">${t.note || ''}</td>
               <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="monthEditTask('${t._date}','${t.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="monthDeleteTask('${t._date}','${t.id}')">删除</button></td>
@@ -3127,13 +4726,54 @@ function renderMonthOverview() {
   `;
 
   const labels = dayStats.map(d => formatShort(d.dateStr));
+  const monthStatusMeta = {
+    normal: { symbol: '', label: '', color: '', background: '' },
+    special: { symbol: '◆', label: '特殊天', color: '#b388ff', background: 'rgba(179,136,255,.5)', rank: 1 },
+    excluded: { symbol: '▲', label: '不参与评分', color: '#ffb74d', background: 'rgba(255,183,77,.5)', rank: 2 },
+    'special-excluded': { symbol: '★', label: '特殊天且不参与评分', color: '#ef9a9a', background: 'rgba(239,154,154,.55)', rank: 3 },
+  };
+  const monthMetaAt = index => monthStatusMeta[monthDayStatuses[index]] || monthStatusMeta.normal;
+  const monthSegmentMeta = context => {
+    const first = monthMetaAt(context.p0DataIndex);
+    const second = monthMetaAt(context.p1DataIndex);
+    return (first.rank || 0) >= (second.rank || 0) ? first : second;
+  };
+  const monthTrendAccent = baseColor => ({
+    pointRadius: monthDayStatuses.map(status => status === 'normal' ? 2 : 4),
+    pointStyle: monthDayStatuses.map(status =>
+      status === 'special-excluded' ? 'star' : status === 'excluded' ? 'triangle' : status === 'special' ? 'rectRot' : 'circle'),
+    pointBackgroundColor: monthDayStatuses.map((status, index) => monthMetaAt(index).color || baseColor),
+    pointBorderColor: monthDayStatuses.map((status, index) => monthMetaAt(index).color || baseColor),
+    segment: {
+      borderColor: context => monthSegmentMeta(context).color || baseColor,
+    },
+  });
+  const monthXAxisTicks = () => ({
+    color: context => monthMetaAt(context.index).color || '#6b7a9e',
+    callback: (value, index) => {
+      const meta = monthMetaAt(index);
+      return `${meta.symbol ? `${meta.symbol} ` : ''}${labels[index]}`;
+    },
+    maxRotation: 45,
+  });
   mkChart('monthThreeChart', {
     type: 'line', data: {
       labels, datasets: [
-        { label: '时钟', data: dayStats.map(d => +(d.clockMin / 60).toFixed(2)), borderColor: '#80deea', backgroundColor: 'rgba(128,222,234,.12)', borderWidth: 1, borderDash: [4, 4], pointRadius: 1, tension: .3, fill: 'origin' },
-        { label: '有效时钟', data: dayStats.map(d => +(d.effectiveClockMin / 60).toFixed(2)), borderColor: '#80deea', backgroundColor: 'rgba(128,222,234,.18)', borderWidth: 1.5, pointRadius: 2, tension: .3, fill: 'origin' },
-        { label: '名义', data: dayStats.map(d => +(d.nominalMin / 60).toFixed(2)), borderColor: '#4fc3f7', backgroundColor: 'rgba(79,195,247,.18)', borderWidth: 1.5, pointRadius: 2, tension: .3, fill: 'origin' },
-        { label: '实际', data: dayStats.map(d => +(d.actualMin / 60).toFixed(2)), borderColor: '#69f0ae', backgroundColor: 'rgba(105,240,174,.22)', borderWidth: 2, pointRadius: 2, tension: .3, fill: 'origin' },
+        {
+          label: '时钟',
+          data: dayStats.map(d => +(d.clockMin / 60).toFixed(2)),
+          borderColor: '#80deea',
+          backgroundColor: 'rgba(128,222,234,.12)',
+          borderWidth: 1.5,
+          borderDash: [4, 4],
+          ...monthTrendAccent('#80deea'),
+          tension: .3,
+          fill: 'origin',
+          spanGaps: false
+        },
+        { label: '有效时钟', data: dayStats.map(d => +(d.effectiveClockMin / 60).toFixed(2)), borderColor: '#80deea', backgroundColor: 'rgba(128,222,234,.18)', borderWidth: 1.5, ...monthTrendAccent('#80deea'), tension: .3, fill: 'origin', spanGaps: false },
+        { label: '名义', data: dayStats.map(d => +(d.nominalMin / 60).toFixed(2)), borderColor: '#4fc3f7', backgroundColor: 'rgba(79,195,247,.18)', borderWidth: 1.5, ...monthTrendAccent('#4fc3f7'), tension: .3, fill: 'origin', spanGaps: false },
+        { label: '实际', data: dayStats.map(d => +(d.actualMin / 60).toFixed(2)), borderColor: '#69f0ae', backgroundColor: 'rgba(105,240,174,.22)', borderWidth: 2, ...monthTrendAccent('#69f0ae'), tension: .3, fill: 'origin', spanGaps: false },
       ]
     },
     options: {
@@ -3141,9 +4781,29 @@ function renderMonthOverview() {
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { labels: { color: '#6b7a9e' } }, filler: { propagate: false },
-        tooltip: { callbacks: { label: ctx => { const v = ctx.parsed.y; if (!v) return null; return `${ctx.dataset.label}: ${fmtMin(Math.round(v * 60))}`; } } }
+        tooltip: {
+          callbacks: {
+            title: items => {
+              if (!items.length) return '';
+              const index = items[0].dataIndex;
+              const meta = monthMetaAt(index);
+              return meta.label ? `${labels[index]} · ${meta.symbol} ${meta.label}` : labels[index];
+            },
+            label: ctx => {
+              const v = ctx.parsed.y;
+              if (v == null) return null;
+              return `${ctx.dataset.label}: ${fmtMin(Math.round(v * 60), true)}`;
+            }
+          }
+        }
       },
-      scales: { x: { ticks: { color: '#6b7a9e', maxRotation: 45 }, grid: gridCfg }, y: { ticks: { color: '#6b7a9e', callback: v => v + 'h' }, grid: gridCfg, title: { display: true, text: '小时', color: '#6b7a9e' }, min: 0 } }
+      scales: {
+        x: {
+          ticks: monthXAxisTicks(),
+          grid: gridCfg
+        },
+        y: { ticks: { color: '#6b7a9e', callback: v => v + 'h' }, grid: gridCfg, title: { display: true, text: '小时', color: '#6b7a9e' }, min: 0 }
+      }
     }
   });
 
@@ -3160,8 +4820,8 @@ function renderMonthOverview() {
       labels, datasets: [
         {
           label: '实际专注(h)', data: dayStats.map(d => +(d.actualMin / 60).toFixed(2)),
-          backgroundColor: dayStats.map(d => d.actualMin >= 480 ? 'rgba(105,240,174,.5)' : d.actualMin >= 300 ? 'rgba(79,195,247,.4)' : d.actualMin > 0 ? 'rgba(255,183,77,.4)' : 'rgba(120,144,156,.2)'),
-          borderColor: dayStats.map(d => d.actualMin >= 480 ? '#69f0ae' : d.actualMin >= 300 ? '#4fc3f7' : d.actualMin > 0 ? '#ffb74d' : '#78909c'),
+          backgroundColor: dayStats.map((d, index) => monthMetaAt(index).background || (d.actualMin >= 480 ? 'rgba(105,240,174,.5)' : d.actualMin >= 300 ? 'rgba(79,195,247,.4)' : d.actualMin > 0 ? 'rgba(255,183,77,.4)' : 'rgba(120,144,156,.2)')),
+          borderColor: dayStats.map((d, index) => monthMetaAt(index).color || (d.actualMin >= 480 ? '#69f0ae' : d.actualMin >= 300 ? '#4fc3f7' : d.actualMin > 0 ? '#ffb74d' : '#78909c')),
           borderWidth: 1, borderRadius: 3
         },
         { type: 'line', label: '目标8h', data: dayStats.map(() => 8), borderColor: 'rgba(105,240,174,.3)', borderDash: [4, 4], borderWidth: 1, pointRadius: 0 }
@@ -3169,7 +4829,7 @@ function renderMonthOverview() {
     },
     options: {
       responsive: true, plugins: { legend: { labels: { color: '#6b7a9e' } } },
-      scales: { x: { ticks: { color: '#6b7a9e', maxRotation: 45 }, grid: gridCfg }, y: { ticks: { color: '#6b7a9e', callback: v => v + 'h' }, grid: gridCfg, min: 0 } }
+      scales: { x: { ticks: monthXAxisTicks(), grid: gridCfg }, y: { ticks: { color: '#6b7a9e', callback: v => v + 'h' }, grid: gridCfg, min: 0 } }
     }
   });
 }
@@ -3203,7 +4863,8 @@ async function monthDeleteTask(dateStr, taskId) {
 // SLEEP TAB
 // ============================================================
 function renderSleep() {
-  const dates = getAllDates().filter(d => state.data[d]?.wakeTime);
+  // 作息页保留所有单边记录：只填起床或只填睡觉的日期也必须展示。
+  const dates = getAllDates().filter(d => state.data[d]?.wakeTime || state.data[d]?.sleepTime);
   const sleepDays = dates.map(dateStr => {
     const day = state.data[dateStr];
     const wakeMin = parseMin(day.wakeTime);
@@ -3227,20 +4888,53 @@ function renderSleep() {
     return { dateStr, wakeTime: day.wakeTime, sleepTime: day.sleepTime, wakeMin, sleepMin, awakeMin, sleepDur, actualMin: stats.actualMin, utilPct: stats.utilPct };
   });
 
+  // 一个图表点代表“一晚”：前一日记录的睡觉时间 + 次日记录的起床时间。
+  // 以起床日期作为横轴日期，避免把同一天早晨起床和当天深夜睡觉误画成一个睡眠周期。
+  const cycleByWakeDate = new Map();
+  function ensureSleepCycle(wakeDate) {
+    if (!cycleByWakeDate.has(wakeDate)) {
+      cycleByWakeDate.set(wakeDate, {
+        wakeDate,
+        sleepDate: addDays(wakeDate, -1),
+        wakeTime: '',
+        sleepTime: '',
+        wakeMin: null,
+        sleepMin: null,
+      });
+    }
+    return cycleByWakeDate.get(wakeDate);
+  }
+  dates.forEach(dateStr => {
+    const day = state.data[dateStr] || {};
+    if (day.wakeTime) {
+      const cycle = ensureSleepCycle(dateStr);
+      cycle.wakeTime = day.wakeTime;
+      cycle.wakeMin = parseMin(day.wakeTime);
+    }
+    if (day.sleepTime) {
+      const cycle = ensureSleepCycle(addDays(dateStr, 1));
+      cycle.sleepTime = day.sleepTime;
+      cycle.sleepMin = parseMin(day.sleepTime);
+      cycle.sleepDate = dateStr;
+    }
+  });
+  const sleepCycles = Array.from(cycleByWakeDate.values())
+    .sort((a, b) => a.wakeDate.localeCompare(b.wakeDate));
+
   document.getElementById('tab-sleep').innerHTML = `
     <div class="mini-grid" style="margin-bottom:16px">
       <div class="mini-card"><div class="lbl">记录天数</div><div class="val c-hp">${sleepDays.length}</div></div>
       <div class="mini-card"><div class="lbl">平均起床</div><div class="val c-wake">${sleepDays.length ? avgTime(sleepDays.map(d => d.wakeMin).filter(x => x != null)) : '-'}</div></div>
-      <div class="mini-card"><div class="lbl">平均睡觉</div><div class="val c-sleep">${sleepDays.length ? avgTime(sleepDays.map(d => d.sleepMin).filter(x => x != null)) : '-'}</div></div>
+      <div class="mini-card"><div class="lbl">平均睡觉</div><div class="val c-sleep">${sleepDays.length ? avgTime(sleepDays.map(d => d.sleepMin).filter(x => x != null), 18 * 60) : '-'}</div></div>
       <div class="mini-card"><div class="lbl">平均清醒</div><div class="val" style="color:var(--muted)">${sleepDays.filter(d => d.awakeMin != null).length ? fmtMin(Math.round(sleepDays.filter(d => d.awakeMin != null).reduce((s, d) => s + d.awakeMin, 0) / sleepDays.filter(d => d.awakeMin != null).length)) : '-'}</div></div>
-      <div class="mini-card"><div class="lbl">平均利用率</div><div class="val c-pol">${sleepDays.filter(d => d.utilPct != null).length ? Math.round(sleepDays.filter(d => d.utilPct != null).reduce((s, d) => s + d.utilPct, 0) / sleepDays.filter(d => d.utilPct != null).length) + '%' : '-'}</div></div>
+      <div class="mini-card"><div class="lbl">平均不可用占比</div><div class="val c-pol">${sleepDays.filter(d => d.utilPct != null).length ? Math.round(sleepDays.filter(d => d.utilPct != null).reduce((s, d) => s + d.utilPct, 0) / sleepDays.filter(d => d.utilPct != null).length) + '%' : '-'}</div></div>
     </div>
 
     <div class="chart-grid">
       <div class="chart-card full">
-        <div class="chart-title">起床 & 睡觉时间趋势</div>
-        <div class="chart-sub">黄线=起床 · 紫线=睡觉 · 虚线=目标(7:00起/0:00睡)</div>
-        <canvas id="sleepTimelineChart" height="90"></canvas>
+        <div class="chart-title">每晚睡眠与次日起床趋势</div>
+        <div class="chart-sub">横轴按起床日期归属 · 紫线=前一晚睡觉 · 黄线=次日起床 · 半透明柱=完整睡眠区间 · 单边记录仍会显示</div>
+        <canvas id="sleepTimelineChart" height="120"></canvas>
       </div>
       <div class="chart-card">
         <div class="chart-title">起床时间分布</div>
@@ -3249,17 +4943,17 @@ function renderSleep() {
       </div>
       <div class="chart-card">
         <div class="chart-title">清醒时长 vs 学习时长</div>
-        <div class="chart-sub">灰柱=清醒 · 蓝柱=实际专注 · 橙线=利用率%</div>
+        <div class="chart-sub">灰柱=清醒 · 蓝柱=实际专注 · 橙线=不可用时间占比%</div>
         <canvas id="awakeStudyChart" height="200"></canvas>
       </div>
       <div class="chart-card full">
         <div class="chart-title">作息数据明细</div>
-        <div class="chart-sub">包含起床/睡觉/清醒/学习/利用率</div>
+        <div class="chart-sub">包含起床/睡觉/清醒/学习/不可用时间占比</div>
         <div class="table-wrap">
           <table>
             <thead><tr>
               <th>日期</th><th class="c-wake">起床</th><th class="c-sleep">睡觉</th>
-              <th>清醒时长${tipIcon('awake')}</th><th class="c-actual">学习时长${tipIcon('actual')}</th><th>利用率${tipIcon('util')}</th><th>评价</th>
+              <th>清醒时长${tipIcon('awake')}</th><th class="c-actual">学习时长${tipIcon('actual')}</th><th>不可用占比${tipIcon('util')}</th><th>评价</th>
             </tr></thead>
             <tbody>
               ${sleepDays.map(d => {
@@ -3271,7 +4965,7 @@ function renderSleep() {
                   <td class="fw-mono ${sleepClass}">${d.sleepTime || '-'}</td>
                   <td class="fw-mono">${fmtMin(d.awakeMin)}</td>
                   <td class="fw-mono c-actual">${fmtMin(d.actualMin, true)}</td>
-                  <td class="fw-mono ${d.utilPct >= 50 ? 'c-green' : d.utilPct >= 30 ? 'c-wake' : d.utilPct ? 'c-red' : 'c-muted'}">${d.utilPct != null ? d.utilPct + '%' : '-'}</td>
+                  <td class="fw-mono ${d.utilPct == null ? 'c-muted' : d.utilPct <= 30 ? 'c-green' : d.utilPct <= 50 ? 'c-wake' : 'c-red'}">${d.utilPct != null ? d.utilPct + '%' : '-'}</td>
                   <td>${d.wakeMin != null && d.wakeMin <= 7 * 60 ? '🌅' : d.wakeMin != null && d.wakeMin <= 8 * 60 ? '☀️' : d.wakeMin != null ? '😴' : '-'}</td>
                 </tr>`;
   }).join('')}
@@ -3285,45 +4979,35 @@ function renderSleep() {
   if (sleepDays.length === 0) return;
 
   const labels = sleepDays.map(d => formatShort(d.dateStr));
-  // ── 作息时间趋势图：X轴=日期序号，Y轴=时间（支持超24小时避免跳跃） ──
+  // ── 夜间作息趋势图：前一晚睡觉在下，次日起床在上 ──
   (function () {
-    const wakeData = [];
-    const sleepData = [];
-    const wakeColors = [];
-    const sleepColors = [];
-    const goalWakeData = [];
-    const goalSleepData = [];
-
-    sleepDays.forEach((d, i) => {
-      const label = formatShort(d.dateStr);
-
-      // 起床时间点：Y = 小时数
-      if (d.wakeMin != null) {
-        const wH = d.wakeMin / 60;
-        wakeData.push({ x: i, y: wH, label });
-        wakeColors.push(d.wakeMin <= 7 * 60 ? '#69f0ae' : d.wakeMin <= 8 * 60 ? '#ffd54f' : '#f44336');
-      }
-
-      // 睡觉时间点：凌晨0-6点视为当天晚上(+24h)，避免跳跃
-      // 同时修正12:00-12:59的输入（实为凌晨00:00-00:59）
-      if (d.sleepMin != null) {
-        let sH = d.sleepMin / 60;
-        if (sH >= 12 && sH < 13) sH -= 12; // 12:30 → 0.5 (凌晨00:30)
-        if (sH < 6) sH += 24; // 00:30 → 24.5
-        sleepData.push({ x: i, y: sH, label });
-        const absH = sH >= 24 ? sH - 24 : sH;
-        sleepColors.push(absH <= 0.01 ? '#69f0ae' : absH <= 0.5 ? '#ffd54f' : '#f44336');
-      }
-
-      // 目标线数据点
-      goalWakeData.push({ x: i, y: 7 });
-      goalSleepData.push({ x: i, y: 24 });
+    // 睡觉时间属于前一晚：18:00 后保持原值，凌晨时间顺延到 24:00 以后。
+    const sleepHour = min => {
+      const hour = min / 60;
+      return hour < 18 ? hour + 24 : hour;
+    };
+    // 起床发生在次日，因此统一顺延 24 小时。
+    const wakeHour = min => min / 60 + 24;
+    const sleepData = sleepCycles.map(c => c.sleepMin == null ? null : sleepHour(c.sleepMin));
+    const wakeData = sleepCycles.map(c => c.wakeMin == null ? null : wakeHour(c.wakeMin));
+    const intervalData = sleepCycles.map((c, i) => {
+      if (sleepData[i] == null || wakeData[i] == null || wakeData[i] < sleepData[i]) return null;
+      return [sleepData[i], wakeData[i]];
     });
+    const wakeColors = sleepCycles.map(c => c.wakeMin == null ? 'transparent' : c.wakeMin <= 7 * 60 ? '#69f0ae' : c.wakeMin <= 8 * 60 ? '#ffd54f' : '#f44336');
+    const sleepColors = sleepCycles.map(c => {
+      if (c.sleepMin == null) return 'transparent';
+      const hour = sleepHour(c.sleepMin);
+      return hour <= 24.01 ? '#69f0ae' : hour <= 24.5 ? '#ffd54f' : '#f44336';
+    });
+    const goalWakeData = sleepCycles.map(() => 31);
+    const goalSleepData = sleepCycles.map(() => 24);
+    const cycleLabels = sleepCycles.map(c => formatShort(c.wakeDate));
 
-    // Y轴范围：紧贴数据，留 0.5h 余量
-    const allY = [...wakeData.map(p => p.y), ...sleepData.map(p => p.y)];
-    const yMin = allY.length ? Math.floor(Math.min(...allY) * 2) / 2 - 0.5 : 5;
-    const yMax = allY.length ? Math.ceil(Math.max(...allY) * 2) / 2 + 0.5 : 26;
+    // 默认展示 21:00 至次日 09:00；异常早睡或晚起数据会自动扩展范围，不会被裁掉。
+    const allY = [...sleepData, ...wakeData].filter(v => v != null);
+    const yMin = Math.floor((Math.min(21, ...allY) - 0.5) * 2) / 2;
+    const yMax = Math.ceil((Math.max(33, ...allY) + 0.5) * 2) / 2;
 
     /** 将小时数转为 HH:MM 字符串（支持 >24h 自动 mod 24） */
     function hToTime(h) {
@@ -3333,68 +5017,79 @@ function renderSleep() {
     }
 
     mkChart('sleepTimelineChart', {
-      type: 'scatter',
+      type: 'line',
       data: {
+        labels: cycleLabels,
         datasets: [
           {
+            type: 'bar',
+            label: '睡眠区间',
+            data: intervalData,
+            backgroundColor: 'rgba(179,136,255,.12)',
+            borderColor: 'rgba(179,136,255,.28)',
+            borderWidth: 1,
+            borderSkipped: false,
+            borderRadius: 5,
+            barThickness: 12,
+            order: 4
+          },
+          {
             label: '起床', data: wakeData,
-            showLine: true, borderColor: '#ffd54f', backgroundColor: 'rgba(255,213,79,.08)',
+            borderColor: '#ffd54f', backgroundColor: 'rgba(255,213,79,.08)',
             borderWidth: 2.5, pointRadius: 6, pointBackgroundColor: wakeColors,
-            tension: .3, fill: false
+            tension: .3, fill: false, spanGaps: false, order: 1
           },
           {
             label: '睡觉', data: sleepData,
-            showLine: true, borderColor: '#b388ff', backgroundColor: 'rgba(179,136,255,.08)',
+            borderColor: '#b388ff', backgroundColor: 'rgba(179,136,255,.08)',
             borderWidth: 2.5, pointRadius: 6, pointBackgroundColor: sleepColors,
-            tension: .3, fill: false
+            tension: .3, fill: false, spanGaps: false, order: 1
           },
           {
             label: '目标起床7:00', data: goalWakeData,
-            showLine: true, borderColor: 'rgba(105,240,174,.3)', borderDash: [5, 4],
-            borderWidth: 1, pointRadius: 0, fill: false
+            borderColor: 'rgba(105,240,174,.3)', borderDash: [5, 4],
+            borderWidth: 1, pointRadius: 0, fill: false, order: 2
           },
           {
             label: '目标睡觉0:00', data: goalSleepData,
-            showLine: true, borderColor: 'rgba(179,136,255,.3)', borderDash: [5, 4],
-            borderWidth: 1, pointRadius: 0, fill: false
+            borderColor: 'rgba(179,136,255,.3)', borderDash: [5, 4],
+            borderWidth: 1, pointRadius: 0, fill: false, order: 2
           },
         ]
       },
       options: {
         responsive: true,
+        interaction: { mode: 'index', intersect: false },
         plugins: {
           legend: { labels: { color: '#6b7a9e' } },
           tooltip: {
             callbacks: {
               title: (items) => {
                 if (!items.length) return '';
-                const idx = items[0].dataIndex;
-                const ds = items[0].dataset;
-                const srcArr = ds.label === '起床' ? wakeData : sleepData;
-                return srcArr[idx] ? srcArr[idx].label : '';
+                const cycle = sleepCycles[items[0].dataIndex];
+                return cycle ? `${formatShort(cycle.sleepDate)} 夜 → ${formatShort(cycle.wakeDate)} 晨` : '';
               },
-              label: (item) => `${item.dataset.label}: ${hToTime(item.raw.y)}`
+              label: (item) => {
+                if (item.raw == null) return null;
+                if (item.dataset.label === '睡眠区间' && Array.isArray(item.raw)) {
+                  const duration = Math.round((item.raw[1] - item.raw[0]) * 60);
+                  return `睡眠区间: ${hToTime(item.raw[0])} → ${hToTime(item.raw[1])}（${fmtMin(duration)}）`;
+                }
+                return `${item.dataset.label}: ${hToTime(Number(item.raw))}`;
+              }
             }
           }
         },
         scales: {
           x: {
-            type: 'linear',
             ticks: {
               color: '#6b7a9e',
               maxRotation: 45,
-              stepSize: 1,
-              callback: function (v) {
-                const idx = Math.round(v);
-                if (idx >= 0 && idx < sleepDays.length && Math.abs(v - idx) < 0.01) {
-                  return formatShort(sleepDays[idx].dateStr);
-                }
-                return '';
-              }
+              autoSkip: true,
+              maxTicksLimit: 15
             },
             grid: gridCfg,
-            min: -0.5,
-            max: sleepDays.length - 0.5
+            title: { display: true, text: '起床日期', color: '#6b7a9e' }
           },
           y: {
             type: 'linear',
@@ -3437,7 +5132,7 @@ function renderSleep() {
       labels, datasets: [
         { label: '清醒时长(h)', data: sleepDays.map(d => d.awakeMin != null ? +(d.awakeMin / 60).toFixed(1) : 0), backgroundColor: 'rgba(120,144,156,.3)', borderColor: '#78909c', borderWidth: 1 },
         { label: '实际专注(h)', data: sleepDays.map(d => +(d.actualMin / 60).toFixed(1)), backgroundColor: 'rgba(79,195,247,.35)', borderColor: '#4fc3f7', borderWidth: 1 },
-        { type: 'line', label: '利用率%', data: sleepDays.map(d => d.utilPct || 0), borderColor: '#ffb74d', borderWidth: 2, pointRadius: 4, pointBackgroundColor: sleepDays.map(d => (d.utilPct || 0) >= 50 ? '#69f0ae' : (d.utilPct || 0) >= 30 ? '#ffd54f' : '#f44336'), tension: .3, yAxisID: 'y1' },
+        { type: 'line', label: '不可用占比%', data: sleepDays.map(d => d.utilPct ?? 0), borderColor: '#ffb74d', borderWidth: 2, pointRadius: 4, pointBackgroundColor: sleepDays.map(d => d.utilPct == null ? '#78909c' : d.utilPct <= 30 ? '#69f0ae' : d.utilPct <= 50 ? '#ffd54f' : '#f44336'), tension: .3, yAxisID: 'y1' },
       ]
     },
     options: {
@@ -3448,7 +5143,11 @@ function renderSleep() {
 }
 function avgTime(minutes) {
   if (!minutes.length) return '-';
-  const avg = Math.round(minutes.reduce((s, v) => s + v, 0) / minutes.length);
+  const wrapStartMin = arguments.length > 1 ? arguments[1] : null;
+  const normalized = wrapStartMin == null
+    ? minutes
+    : minutes.map(value => value < wrapStartMin ? value + 1440 : value);
+  const avg = Math.round(normalized.reduce((s, v) => s + v, 0) / normalized.length) % 1440;
   return `${Math.floor(avg / 60).toString().padStart(2, '0')}:${(avg % 60).toString().padStart(2, '0')}`;
 }
 
@@ -3489,8 +5188,8 @@ function renderExport() {
         <div class="card-title" style="margin-bottom:12px">🖨️ 打印报告</div>
         <p style="font-size:12px;color:var(--muted);margin-bottom:14px">选择日期范围打印</p>
         <div class="form-grid" style="grid-template-columns:1fr 1fr">
-          <div class="form-group"><label>开始日期</label><input type="date" id="printFrom" value="${firstDate}"></div>
-          <div class="form-group"><label>结束日期</label><input type="date" id="printTo" value="${lastDate}"></div>
+          <div class="form-group"><label>开始日期</label>${editableDateInputHtml('printFrom', firstDate)}</div>
+          <div class="form-group"><label>结束日期</label>${editableDateInputHtml('printTo', lastDate)}</div>
         </div>
         <button class="btn btn-primary" style="margin-top:4px" onclick="window.print()">🖨️ 打印/导出PDF</button>
       </div>
@@ -3499,8 +5198,8 @@ function renderExport() {
         <div class="card-title" style="margin-bottom:12px">📄 导出 HTML 报告</div>
         <p style="font-size:12px;color:var(--muted);margin-bottom:14px">生成独立 HTML 文件，内含完整图表，浏览器直接打开即可查看（无需后端）</p>
         <div class="form-grid" style="grid-template-columns:1fr 1fr">
-          <div class="form-group"><label>开始日期</label><input type="date" id="htmlFrom" value="${firstDate}"></div>
-          <div class="form-group"><label>结束日期</label><input type="date" id="htmlTo" value="${lastDate}"></div>
+          <div class="form-group"><label>开始日期</label>${editableDateInputHtml('htmlFrom', firstDate)}</div>
+          <div class="form-group"><label>结束日期</label>${editableDateInputHtml('htmlTo', lastDate)}</div>
         </div>
         <button class="btn btn-success" style="margin-top:4px" onclick="exportHTMLReport()">📄 下载 HTML 报告</button>
       </div>
@@ -3543,6 +5242,14 @@ async function importJSON(input) {
     try {
       const imported = JSON.parse(e.target.result);
       Object.assign(state.data, imported);
+      if (!Object.prototype.hasOwnProperty.call(imported, '__ordinalUnitList__')) {
+        delete state.data.__ordinalUnitList__;
+      }
+      migrateForecastUnitModel();
+      migrateTaskTemplateIds();
+      state.forecastEditingId = null;
+      state.workbookReviewId = null;
+      state.workbookDraft = null;
       cacheToLocal();
       await apiFetch('/api/data', { method: 'POST', body: JSON.stringify(state.data) });
       renderExport(); renderHeader();
@@ -3553,7 +5260,7 @@ async function importJSON(input) {
 }
 
 async function clearRecordData() {
-  if (confirm('确定清空所有已录入数据（时段、任务、作息记录）？\n模板库、活动分类、AI配置等将保留。\n此操作不可恢复！')) {
+  if (confirm('确定清空所有已录入数据（时段、任务、作息记录）？\n模板库、活动分类、完成预测、整册复盘等将保留。\n此操作不可恢复！')) {
     const preserved = {};
     Object.keys(state.data).forEach(k => {
       if (k.startsWith('__')) preserved[k] = state.data[k];
@@ -3561,6 +5268,8 @@ async function clearRecordData() {
     state.data = preserved;
     cacheToLocal();
     await apiFetch('/api/data', { method: 'POST', body: JSON.stringify(state.data) });
+    clearAllLocalDrafts();
+    await clearServerSnapshot(false);
     renderHeader(); renderSettings();
     const msg = document.getElementById('settings-danger-msg');
     if (msg) { msg.textContent = '🗑️ 已录入数据已清空（模板/分类已保留）'; msg.style.color = 'var(--pol)'; setTimeout(() => msg.textContent = '', 4000); }
@@ -3570,8 +5279,13 @@ async function clearRecordData() {
 async function clearAllData() {
   if (confirm('确定清空所有数据（包括模板、分类等）？此操作不可恢复！')) {
     state.data = {};
+    state.forecastEditingId = null;
+    state.workbookReviewId = null;
+    state.workbookDraft = null;
     cacheToLocal();
     await apiFetch('/api/data', { method: 'POST', body: JSON.stringify({}) });
+    clearAllLocalDrafts();
+    await clearServerSnapshot(false);
     renderHeader(); renderExport();
     document.getElementById('exportStatus').textContent = '🗑️ 数据已清空';
   }
@@ -3715,7 +5429,7 @@ th{background:var(--card2);color:var(--muted);font-weight:500;font-size:11px;pos
 <script>
 var DATA=${dataJSON},ACT_COLOR_MAP=${colorMapJSON};
 var GC='rgba(30,36,56,1)',gridCfg={color:GC},cReg={};
-var TIPS={clock:'\u23F1 时钟时长',effectiveClock:'\u23F1 有效时钟=时钟\u2212休息',nominal:'\u{1F4CB} 名义=计划时长',actual:'\u2705 实际=真实专注',efficiency:'\u{1F3AF} 效率=实际/(时钟\u2212休息)',rest:'\u{1F634} 休息',distract:'\u{1F636} 分心=时钟\u2212实际\u2212休息',awake:'\u{1F324} 清醒=睡觉\u2212起床',util:'\u{1F4CA} 利用率=实际/可支配',taskMin:'\u{1F4DD} 任务时长',cv:'\u{1F4CA} CV=\u03C3/\u03BC',stdDev:'\u{1F4CF} \u03C3',stackAwake:'\u{1F324} 清醒',stackTask:'\u{1F4DD} 任务',stackSpecial:'\u{1F538} 特殊',stackRest:'\u{1F634} 休息',stackDistract:'\u{1F636} 分心',stackIdle:'\u2B1C 空闲'};
+var TIPS={clock:'\u23F1 时钟时长',effectiveClock:'\u23F1 有效时钟=时钟\u2212休息',nominal:'\u{1F4CB} 名义=计划时长',actual:'\u2705 实际=真实专注',efficiency:'\u{1F3AF} 效率=实际/(时钟\u2212休息)',rest:'\u{1F634} 休息',distract:'\u{1F636} 分心=时钟\u2212实际\u2212休息',awake:'\u{1F324} 清醒=睡觉\u2212起床',util:'\u{1F4CA} 不可用时间占比=不可用时长/清醒时长，越低表示可支配时间越多',taskMin:'\u{1F4DD} 任务时长',cv:'\u{1F4CA} CV=\u03C3/\u03BC',stdDev:'\u{1F4CF} \u03C3',stackAwake:'\u{1F324} 清醒',stackTask:'\u{1F4DD} 任务',stackSpecial:'\u{1F538} 特殊',stackRest:'\u{1F634} 休息',stackDistract:'\u{1F636} 分心',stackIdle:'\u2B1C 空闲'};
 function tipIcon(k){var t=TIPS[k];if(!t)return '';return '<span class="tip-icon" data-tip="'+t+'" onmouseenter="showTip(event,this)" onmouseleave="hideTip()" onmousemove="moveTip(event)">\u24D8</span>';}
 function showTip(e,el){var t=document.getElementById('_gTip');if(!t){t=document.createElement('div');t.id='_gTip';t.className='global-tip';document.body.appendChild(t);}t.textContent=el.dataset.tip;t.style.display='block';moveTip(e);}
 function moveTip(e){var t=document.getElementById('_gTip');if(!t||t.style.display==='none')return;t.style.left=Math.min(e.clientX+16,window.innerWidth-300)+'px';t.style.top=Math.min(e.clientY+16,window.innerHeight-120)+'px';}
@@ -3735,6 +5449,7 @@ function calcS(vals){var v=vals.filter(function(x){return x>0;}),n=v.length;if(!
 function fmtCV(s){return s.cv||'-';}
 var SP=['#4fc3f7','#69f0ae','#ce93d8','#ffb74d','#ef9a9a','#80deea','#ffd54f','#a5d6a7','#f48fb1','#90caf9','#b39ddb','#ffcc80','#80cbc4'];
 function computeDay(ds){var day=DATA[ds]||{sessions:[],tasks:[]},ss=day.sessions||[],ts=day.tasks||[];var ck=0,study=0,nm=0,ac=0,sp=0,ssc=0,ssa=0,un=0,rs=0,di=0,span=0;ss.forEach(function(s){var sc=sessionClock(s),actual=Number(s.actualMinutes)||0,rest=Number(s.restMinutes)||0;span+=sc;ck+=sc;if(s.type==='special'){sp+=sc;un+=sc;return;}if(s.type==='special-study'){ssc+=sc;ssa+=actual;study+=actual;ac+=actual;un+=Math.max(0,sc-actual);return;}study+=sc;nm+=Number(s.nominalMinutes)||0;ac+=actual;rs+=rest;di+=Math.max(0,sc-actual-rest);});var tk=ts.reduce(function(s,t){return s+(Number(t.minutes)||0);},0);var wm=parseMin(day.wakeTime),sm=parseMin(day.sleepTime),aw=null;if(wm!=null&&sm!=null){var aj=sm;if(aj>=720&&aj<780)aj-=720;aw=aj-wm;if(aw<=0)aw+=1440;}var dp=aw!=null?Math.max(0,aw-un):null;var ut=(dp&&ac)?Math.round(ac/dp*100):null;var ec=Math.max(0,study-rs);var fe=ec>0?Math.round(ac/ec*100):null;var av=nm>0?Math.round((ac-nm)/nm*100):null;var am={};ts.forEach(function(t){var a=t.activityType||'';am[a]=(am[a]||0)+(Number(t.minutes)||0);});var tm={},spm={},frs=0,fdi=0;ts.forEach(function(t){var a=t.activityType||'';tm[a]=(tm[a]||0)+(Number(t.minutes)||0);});ss.forEach(function(s){var sc=sessionClock(s),actual=Number(s.actualMinutes)||0,rest=Number(s.restMinutes)||0;if(s.type==='special'){spm[s.name||'\u7279\u6B8A']=(spm[s.name||'\u7279\u6B8A']||0)+sc;}else if(s.type==='special-study'){var k=(s.name||'\u7279\u6B8A\u5B66\u4E60')+'\uFF08\u4E0D\u53EF\u7528\u90E8\u5206\uFF09';spm[k]=(spm[k]||0)+Math.max(0,sc-actual);}else{frs+=rest;fdi+=Math.max(0,sc-actual-rest);}});var id=aw!=null?Math.max(0,aw-tk-un-frs-fdi):0;return{clockMin:ck,trackedSpanMin:span,studyClockMin:study,effectiveClockMin:ec,nominalMin:nm,actualMin:ac,restMin:rs,distractMin:di,taskMin:tk,awakeMin:aw,specialMin:sp,specialStudyClockMin:ssc,specialStudyActualMin:ssa,unavailableMin:un,disposableMin:dp,utilPct:ut,actualVsNominal:av,focusEfficiency:fe,actMin:am,taskMap:tm,specialMap:spm,focusRestMin:frs,focusDistractMin:fdi,totalTaskMin:tk,totalSpecialMin:un,idleMin:id,wakeTime:day.wakeTime,sleepTime:day.sleepTime,sessions:ss,tasks:ts};}
+var computeDayBase=computeDay;computeDay=function(ds){var result=computeDayBase(ds);result.utilPct=result.awakeMin!=null&&result.awakeMin>0?Math.round(result.unavailableMin/result.awakeMin*100):null;return result;};
 var TAB_IDS=['overview','calendar','sessions','daily','sessAna','taskAna','stacked','sleep'];
 function showTab(id){TAB_IDS.forEach(function(t){var el=document.getElementById('tab-'+t);if(el)el.classList.toggle('active',t===id);});document.querySelectorAll('.tab').forEach(function(t,i){t.classList.toggle('active',TAB_IDS[i]===id);});}
 document.addEventListener('DOMContentLoaded',function(){
@@ -3756,7 +5471,7 @@ document.getElementById('tab-calendar').innerHTML=cH;
 var aS=[];dates.forEach(function(ds){(DATA[ds].sessions||[]).forEach(function(s){aS.push(Object.assign({},s,{_d:ds}));});});var stC=aS.reduce(function(s,x){return s+sessionClock(x);},0),stA=aS.filter(function(x){return x.type!=='special';}).reduce(function(s,x){return s+(Number(x.actualMinutes)||0);},0);
 document.getElementById('tab-sessions').innerHTML='<div class="card"><div class="card-title" style="margin-bottom:8px">\u23F1 \u4E13\u6CE8\u65F6\u6BB5\u660E\u7EC6 <span style="color:var(--muted);font-size:12px">'+aS.length+' \u6BB5 \xB7 \u65F6\u949F '+fmtMin(stC)+' \xB7 \u5B9E\u9645 '+fmtMin(stA)+'</span></div>'+(aS.length===0?'<p style="color:var(--dim)">\u6682\u65E0</p>':'<div class="table-wrap"><table><thead><tr><th>\u65E5\u671F</th><th>\u7C7B\u578B</th><th>\u5F00\u59CB</th><th>\u7ED3\u675F</th><th class="c-clock">\u65F6\u949F</th><th class="c-nominal">\u540D\u4E49</th><th class="c-actual">\u5B9E\u9645</th><th>\u4F11\u606F</th><th>\u6548\u7387</th><th>\u5907\u6CE8</th></tr></thead><tbody>'+aS.map(function(s){var cl=sessionClock(s),sp=s.type==='special',ss=s.type==='special-study',ac=Number(s.actualMinutes)||0,rs=Number(s.restMinutes)||0,ef=(!sp&&(ss?ac:(cl-rs))>0)?Math.round(ac/(ss?ac:(cl-rs))*100):null;var ty=sp?'<span style="font-size:10px;background:rgba(206,147,216,.2);color:#ce93d8;padding:1px 6px;border-radius:3px">'+(s.name||'\u7279\u6B8A')+'</span>':ss?'<span style="font-size:10px;background:rgba(105,240,174,.15);color:#69f0ae;padding:1px 6px;border-radius:3px">\u7279\u6B8A\u5B66\u4E60\xB7'+(s.name||'\u672A\u547D\u540D')+'</span>':'\u666E\u901A';return '<tr'+((sp||ss)?' style="background:rgba(206,147,216,.06)"':'')+'><td class="fw-mono">'+fmtShort(s._d)+'</td><td>'+ty+'</td><td class="fw-mono">'+(s.startTime||'-')+'</td><td class="fw-mono">'+(s.endTime||'-')+'</td><td class="fw-mono c-clock">'+fmtMin(cl,true)+'</td><td class="fw-mono c-nominal">'+((sp||ss)?'-':fmtMin(Number(s.nominalMinutes)||0,true))+'</td><td class="fw-mono c-actual">'+(sp?'-':fmtMin(ac,true))+'</td><td class="fw-mono">'+((sp||ss)?'-':fmtMin(rs,true))+'</td><td class="fw-mono '+(ef>=80?'c-green':ef>=60?'c-wake':ef!=null?'c-red':'')+'">'+(ef!=null?ef+'%':'-')+'</td><td class="c-muted" style="font-size:11px">'+(s.note||'')+'</td></tr>';}).join('')+'</tbody></table></div>')+'</div>';
 var aT=[];dates.forEach(function(ds){(DATA[ds].tasks||[]).forEach(function(t){aT.push(Object.assign({},t,{_d:ds}));});});var tTt=aT.reduce(function(s,t){return s+(Number(t.minutes)||0);},0);
-document.getElementById('tab-daily').innerHTML='<div class="card"><div class="card-title" style="margin-bottom:8px">\u{1F4DD} \u4EFB\u52A1\u8BB0\u5F55 <span style="color:var(--muted);font-size:12px">'+aT.length+' \u6761 \xB7 '+fmtMin(tTt)+'</span></div>'+(aT.length===0?'<p style="color:var(--dim)">\u6682\u65E0</p>':'<div class="table-wrap"><table><thead><tr><th>\u65E5\u671F</th><th>\u540D\u79F0</th><th>\u7C7B\u578B</th><th>\u65F6\u957F</th><th>\u6570\u91CF</th><th>\u6548\u7387</th><th>\u6B63\u786E\u7387</th><th>\u5907\u6CE8</th></tr></thead><tbody>'+aT.map(function(t){var c=getActColor(t.activityType),r=(t.quantity&&t.minutes)?(Number(t.quantity)/Number(t.minutes)).toFixed(2):null;return '<tr><td class="fw-mono">'+fmtShort(t._d)+'</td><td style="max-width:250px;overflow:hidden;text-overflow:ellipsis">'+(t.name||'')+'</td><td><span class="badge" style="background:'+hexRgba(c,.13)+';color:'+c+';border:1px solid '+hexRgba(c,.27)+'">'+(t.activityType||'-')+'</span></td><td class="fw-mono">'+fmtMin(Number(t.minutes)||0,true)+'</td><td class="fw-mono">'+(t.quantity?t.quantity+(t.quantityUnit?' '+t.quantityUnit:''):'-')+'</td><td class="fw-mono">'+(r?r+(t.quantityUnit?' '+t.quantityUnit+'/min':'/min'):'-')+'</td><td class="fw-mono '+(t.accuracy>=80?'c-green':t.accuracy>=60?'c-wake':t.accuracy?'c-red':'')+'">'+(t.accuracy!=null&&t.accuracy!==''?t.accuracy+'%':'-')+'</td><td class="c-muted" style="font-size:11px">'+(t.note||'')+'</td></tr>';}).join('')+'</tbody></table></div>')+'</div>';
+document.getElementById('tab-daily').innerHTML='<div class="card"><div class="card-title" style="margin-bottom:8px">\u{1F4DD} \u4EFB\u52A1\u8BB0\u5F55 <span style="color:var(--muted);font-size:12px">'+aT.length+' \u6761 \xB7 '+fmtMin(tTt)+'</span></div>'+(aT.length===0?'<p style="color:var(--dim)">\u6682\u65E0</p>':'<div class="table-wrap"><table><thead><tr><th>\u65E5\u671F</th><th>\u540D\u79F0</th><th>\u7C7B\u578B</th><th>\u65F6\u957F</th><th>\u6570\u91CF</th><th>\u6548\u7387</th><th>\u6B63\u786E\u7387</th><th>\u5907\u6CE8</th></tr></thead><tbody>'+aT.map(function(t){var c=getActColor(t.activityType),q=visibleTaskQuantity(t),u=visibleTaskQuantityUnit(t),r=(q&&t.minutes)?(q/Number(t.minutes)).toFixed(2):null;return '<tr><td class="fw-mono">'+fmtShort(t._d)+'</td><td style="max-width:250px;overflow:hidden;text-overflow:ellipsis">'+(t.name||'')+'</td><td><span class="badge" style="background:'+hexRgba(c,.13)+';color:'+c+';border:1px solid '+hexRgba(c,.27)+'">'+(t.activityType||'-')+'</span></td><td class="fw-mono">'+fmtMin(Number(t.minutes)||0,true)+'</td><td class="fw-mono">'+(q?q+(u?' '+u:''):'-')+'</td><td class="fw-mono">'+(r?r+(u?' '+u+'/min':'/min'):'-')+'</td><td class="fw-mono '+(t.accuracy>=80?'c-green':t.accuracy>=60?'c-wake':t.accuracy?'c-red':'')+'">'+(t.accuracy!=null&&t.accuracy!==''?t.accuracy+'%':'-')+'</td><td class="c-muted" style="font-size:11px">'+(t.note||'')+'</td></tr>';}).join('')+'</tbody></table></div>')+'</div>';
 
 
 // ═══ TAB: 时段分析 (interactive) ═══
@@ -3791,7 +5506,7 @@ function tkSetECF(v){_tkS.ecf=v;renderTaskAna();}
 function renderTaskAna(){
   var lv=_tkS.level,cf=_tkS.cf,es=_tkS.es,ey=_tkS.ey,ecf=_tkS.ecf;
   var cm={},totC=0,totM=0;
-  dates.forEach(function(ds){(DATA[ds].tasks||[]).forEach(function(t){totC++;var mn=Number(t.minutes)||0;totM+=mn;var cat=truncAct(t.activityType,lv);if(!cm[cat])cm[cat]={};if(!cm[cat][ds])cm[cat][ds]={mn:0,qt:0,ct:0,u:''};cm[cat][ds].mn+=mn;cm[cat][ds].qt+=Number(t.quantity)||0;cm[cat][ds].ct++;if(t.quantityUnit)cm[cat][ds].u=t.quantityUnit;});});
+  dates.forEach(function(ds){(DATA[ds].tasks||[]).forEach(function(t){totC++;var mn=Number(t.minutes)||0,qt=visibleTaskQuantity(t),qu=visibleTaskQuantityUnit(t);totM+=mn;var cat=truncAct(t.activityType,lv);if(!cm[cat])cm[cat]={};if(!cm[cat][ds])cm[cat][ds]={mn:0,qt:0,ct:0,u:''};cm[cat][ds].mn+=mn;cm[cat][ds].qt+=qt;cm[cat][ds].ct++;if(qu)cm[cat][ds].u=qu;});});
   var cats=Object.keys(cm).sort(),dwT2=dates.filter(function(ds){return(DATA[ds].tasks||[]).length>0;}).length;
   var cL2,cDS2;
   if(cf&&cm[cf]){var fd2=dates.filter(function(ds){return cm[cf][ds];});cL2=fd2.map(fmtShort);var hx=lv===1?getActColor(cf):SP[cats.indexOf(cf)%SP.length];cDS2=[{label:cf,data:fd2.map(function(ds){return +(cm[cf][ds].mn/60).toFixed(2);}),borderColor:hx,borderWidth:2,pointRadius:4,tension:.3,fill:false}];
@@ -3799,7 +5514,7 @@ function renderTaskAna(){
   var cs2=cats.map(function(cat){var ct=0,mn=0,qt=0,u='';Object.values(cm[cat]).forEach(function(v){ct+=v.ct;mn+=v.mn;qt+=v.qt;if(v.u)u=v.u;});var st=calcS(dates.map(function(ds){return cm[cat]&&cm[cat][ds]?cm[cat][ds].mn:0;}));return{cat:cat,ct:ct,mn:mn,qt:qt,u:u,avgMn:ct>0?Math.round(mn/ct):0,avgD:dwT2>0?Math.round(mn/dwT2):0,avgE:(qt&&mn)?+(qt/mn).toFixed(2):null,cv:st.cv};});
   var pieD=cats.map(function(c){return cs2.find(function(x){return x.cat===c;}).mn;}),pieC=cats.map(function(c){return hexRgba(lv===1?getActColor(c):SP[cats.indexOf(c)%SP.length],.75);});
   var dcnt=dates.map(function(ds){return(DATA[ds].tasks||[]).length;}),dmin=dates.map(function(ds){return +((DATA[ds].tasks||[]).reduce(function(s,t){return s+(Number(t.minutes)||0);},0)/60).toFixed(2);});
-  var em={};dates.forEach(function(ds){(DATA[ds].tasks||[]).forEach(function(t){var qt=Number(t.quantity)||0,mn=Number(t.minutes)||0;if(!qt||!mn)return;var c3=truncAct(t.activityType,3);if(!em[c3])em[c3]={};if(!em[c3][ds])em[c3][ds]={qt:0,mn:0,u:''};em[c3][ds].qt+=qt;em[c3][ds].mn+=mn;if(t.quantityUnit)em[c3][ds].u=t.quantityUnit;});});
+  var em={};dates.forEach(function(ds){(DATA[ds].tasks||[]).forEach(function(t){var qt=visibleTaskQuantity(t),qu=visibleTaskQuantityUnit(t),mn=Number(t.minutes)||0;if(!qt||!mn)return;var c3=truncAct(t.activityType,3);if(!em[c3])em[c3]={};if(!em[c3][ds])em[c3][ds]={qt:0,mn:0,u:''};em[c3][ds].qt+=qt;em[c3][ds].mn+=mn;if(qu)em[c3][ds].u=qu;});});
   var eC=Object.keys(em).sort(),eCL,eDS;
   if(ecf&&em[ecf]){var efd=dates.filter(function(ds){return em[ecf][ds];});eCL=efd.map(fmtShort);var eh=SP[eC.indexOf(ecf)%SP.length],eu='';Object.values(em[ecf]).forEach(function(v){if(v.u)eu=v.u;});eDS=[{label:ecf+(eu?' ('+eu+'/min)':' (/min)'),data:efd.map(function(ds){return +(em[ecf][ds].qt/em[ecf][ds].mn).toFixed(3);}),borderColor:eh,backgroundColor:eh,borderWidth:2,pointRadius:4,tension:.3,fill:false}];
   }else{eCL=labels;eDS=eC.map(function(cat,ci){var eh=SP[ci%SP.length],eu='';Object.values(em[cat]).forEach(function(v){if(v.u)eu=v.u;});return{label:cat+(eu?' ('+eu+'/min)':' (/min)'),data:dates.map(function(ds){var d=em[cat]?em[cat][ds]:null;if(!d)return null;return +(d.qt/d.mn).toFixed(3);}),borderColor:eh,backgroundColor:eh,borderWidth:2,pointRadius:3,tension:.3,fill:false,spanGaps:true};});}
@@ -3872,13 +5587,12 @@ mkChart('rSL',{type:'line',data:{labels:sL,datasets:[{label:'\u8D77\u5E8A',data:
 function renderSettings() {
   const s = SETTINGS;
   const tc = s.themeColors;
-  const aiCfg = (typeof aiLoadConfig === 'function') ? aiLoadConfig() : { split: {}, parse: {}, useSameConfig: true };
 
   document.getElementById('tab-settings').innerHTML = `
     <div style="max-width:900px">
       <div class="card" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:6px">⚙️ 全局设置</div>
-        <p style="font-size:12px;color:var(--muted);margin:0">所有设置保存在浏览器 localStorage 中，修改后点击底部「保存全部设置」生效。</p>
+        <p style="font-size:12px;color:var(--muted);margin:0">界面偏好保存在当前浏览器；启用后端快照后，当前页面和未提交内容可跨浏览器恢复。</p>
       </div>
 
       <!-- 1. 外观与显示 -->
@@ -3916,35 +5630,32 @@ function renderSettings() {
           <div class="form-group"><label>每日目标学习时长(h)</label><input type="number" id="set_dailyGoalHours" value="${s.dailyGoalHours}" min="1" max="24" step="0.5"></div>
           <div class="form-group"><label>起床目标时间(时)</label><input type="number" id="set_wakeGoalHour" value="${s.wakeGoalHour}" min="0" max="12" step="0.5"></div>
           <div class="form-group"><label>睡觉目标时间(时,0=0:00)</label><input type="number" id="set_sleepGoalHour" value="${s.sleepGoalHour}" min="-2" max="3" step="0.5"></div>
-          <div class="form-group"><label>利用率达标线(%)</label><input type="number" id="set_utilPassPct" value="${s.utilPassPct}" min="0" max="100"></div>
+          <div class="form-group"><label>不可用占比警戒线(%)</label><input type="number" id="set_utilPassPct" value="${s.utilPassPct}" min="0" max="100"></div>
           <div class="form-group"><label>专注效率-优秀(%)</label><input type="number" id="set_focusGoodPct" value="${s.focusGoodPct}" min="0" max="100"></div>
           <div class="form-group"><label>专注效率-及格(%)</label><input type="number" id="set_focusOkPct" value="${s.focusOkPct}" min="0" max="100"></div>
           <div class="form-group"><label>周起始日</label><select id="set_weekStartDay"><option value="1" ${s.weekStartDay === 1 ? 'selected' : ''}>周一</option><option value="0" ${s.weekStartDay === 0 ? 'selected' : ''}>周日</option></select></div>
         </div>
       </div>
 
-      <!-- 3. AI 配置 -->
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-title" style="margin-bottom:12px">🤖 AI 配置</div>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:10px">AI 接口配置与额外解析指令均在「🤖 AI录入」页管理；Step 2 并发数可在这里快速调整。</p>
-        <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-bottom:10px">
-          <div class="form-group">
-            <label>Step 2 同时解析本日项目数</label>
-            <input type="number" id="set_aiParseConcurrency" value="${typeof aiNormalizeParseConcurrency === 'function' ? aiNormalizeParseConcurrency(aiCfg.parseConcurrency) : (parseInt(aiCfg.parseConcurrency) || 1)}" min="1" max="10" step="1">
-          </div>
-        </div>
-        <div class="form-hint" style="margin-bottom:10px">日期始终逐日处理；并发数仅控制当前日期相邻项目，范围 1-10。收到 429 会立即停止。</div>
-        <button class="btn btn-primary btn-sm" onclick="showTab('ai')">前往 AI 录入页配置 →</button>
-      </div>
-
-      <!-- 4. 数据存储 -->
+      <!-- 3. 数据存储 -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:12px">💾 数据存储</div>
         <div class="form-grid" style="grid-template-columns:1fr 1fr">
-          <div class="form-group"><label>自动保存草稿间隔(ms)</label><input type="number" id="set_autosaveInterval" value="${s.autosaveInterval}" min="1000" max="60000" step="1000"></div>
+          <div class="form-group"><label>后端快照保存模式</label>
+            <select id="set_snapshotInterval">
+              <option value="0" ${Number(s.snapshotInterval) === 0 ? 'selected' : ''}>关闭</option>
+              <option value="30000" ${Number(s.snapshotInterval) === 30000 ? 'selected' : ''}>每30秒</option>
+              <option value="60000" ${Number(s.snapshotInterval) === 60000 ? 'selected' : ''}>每1分钟</option>
+            </select>
+          </div>
           <div class="form-group"><label>localStorage 缓存</label><select id="set_useLocalStorageCache"><option value="true" ${s.useLocalStorageCache ? 'selected' : ''}>开启</option><option value="false" ${!s.useLocalStorageCache ? 'selected' : ''}>关闭</option></select></div>
         </div>
-        <div class="form-hint">数据文件路径在 app.py 中配置（DATA_DIR），当前：<code>C:\\Users\\24805\\OneDrive\\学习追踪器数据</code></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+          <button class="btn btn-primary btn-sm" onclick="saveServerSnapshot(true)">立即保存快照</button>
+          <button class="btn btn-ghost btn-sm" onclick="clearServerSnapshot(true)">清除后端快照</button>
+          <span id="snapshot-status" class="form-hint">${state._serverSnapshot?.updatedAt ? `最后快照：${new Date(state._serverSnapshot.updatedAt).toLocaleString()}` : '后端暂无快照'}</span>
+        </div>
+        <div class="form-hint">本地草稿仍每3秒保存作为断网兜底；共享快照独立存放在后端 <code>draft_snapshot.json</code>，不会覆盖学习数据。</div>
       </div>
 
       <!-- 5. 评分与评价规则 -->
@@ -3955,7 +5666,7 @@ function renderSettings() {
           <div class="form-group"><label>条件1: 实际专注≥(分钟)</label><input type="number" id="set_ratingActualMin" value="${s.ratingActualMin}" min="0"></div>
           <div class="form-group"><label>条件2: 偏差率≥(%)</label><input type="number" id="set_ratingDeviationPct" value="${s.ratingDeviationPct}"></div>
           <div class="form-group"><label>条件3: 起床≤(分钟,480=8:00)</label><input type="number" id="set_ratingWakeLimit" value="${s.ratingWakeLimit}" min="0"></div>
-          <div class="form-group"><label>条件4: 利用率≥(%)</label><input type="number" id="set_ratingUtilPct" value="${s.ratingUtilPct}" min="0" max="100"></div>
+          <div class="form-group"><label>条件4: 不可用占比≤(%)</label><input type="number" id="set_ratingUtilPct" value="${s.ratingUtilPct}" min="0" max="100"></div>
           <div class="form-group"><label>⭐ 需满足条件数≥</label><input type="number" id="set_ratingStarThreshold" value="${s.ratingStarThreshold}" min="1" max="4"></div>
           <div class="form-group"><label>👌 需满足条件数≥</label><input type="number" id="set_ratingOkThreshold" value="${s.ratingOkThreshold}" min="1" max="4"></div>
           <div class="form-group"><label>⚠️ 需满足条件数≥</label><input type="number" id="set_ratingWarnThreshold" value="${s.ratingWarnThreshold}" min="1" max="4"></div>
@@ -3989,7 +5700,7 @@ function renderSettings() {
         <div class="card-title" style="margin-bottom:12px;color:var(--code)">⚠️ 危险操作</div>
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
           <button class="btn btn-danger" onclick="clearRecordData()">🗑️ 清空已录入数据</button>
-          <span style="font-size:11px;color:var(--muted)">仅清除日历中的时段/任务/作息记录，保留模板库、分类、AI配置等</span>
+          <span style="font-size:11px;color:var(--muted)">仅清除日历中的时段/任务/作息记录，保留模板库、分类等</span>
         </div>
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:10px">
           <button class="btn btn-danger" onclick="clearAllData()">🗑️ 清空所有数据</button>
@@ -4013,7 +5724,7 @@ function settingsAddActColor() {
   renderSettings();
 }
 
-function settingsSaveAll() {
+async function settingsSaveAll() {
   const s = SETTINGS;
   // 外观
   const tcKeys = ['hp', 'pol', 'word', 'thesis', 'code', 'other', 'sleep', 'wake'];
@@ -4036,7 +5747,8 @@ function settingsSaveAll() {
   s.weekStartDay = parseInt(document.getElementById('set_weekStartDay')?.value) || 1;
 
   // 数据
-  s.autosaveInterval = parseInt(document.getElementById('set_autosaveInterval')?.value) || 3000;
+  s.snapshotInterval = Number(document.getElementById('set_snapshotInterval')?.value);
+  if (![0, 30000, 60000].includes(s.snapshotInterval)) s.snapshotInterval = 30000;
   s.useLocalStorageCache = document.getElementById('set_useLocalStorageCache')?.value === 'true';
 
   // 评分
@@ -4052,25 +5764,15 @@ function settingsSaveAll() {
   s.sleepGoodHour = parseFloat(document.getElementById('set_sleepGoodHour')?.value) || 0;
   s.sleepWarnHour = parseFloat(document.getElementById('set_sleepWarnHour')?.value) || 0.5;
 
-  // AI quick settings
-  if (typeof aiLoadConfig === 'function') {
-    const aiCfg = aiLoadConfig();
-    const aiExtraEl = document.getElementById('set_aiExtraPrompt');
-    if (aiExtraEl) aiCfg.extraParsePrompt = aiExtraEl.value || '';
-    const concurrencyEl = document.getElementById('set_aiParseConcurrency');
-    if (concurrencyEl) {
-      aiCfg.parseConcurrency = typeof aiNormalizeParseConcurrency === 'function'
-        ? aiNormalizeParseConcurrency(concurrencyEl.value)
-        : Math.min(10, Math.max(1, parseInt(concurrencyEl.value, 10) || 1));
-    }
-    aiPersistConfig(aiCfg);
-  }
-
   SETTINGS = s;
   saveSettings(s);
 
   const msg = document.getElementById('settings-msg');
-  if (msg) { msg.textContent = '✅ 设置已保存'; msg.style.color = 'var(--pol)'; setTimeout(() => msg.textContent = '', 3000); }
+  if (msg) {
+    msg.textContent = '✅ 设置已保存';
+    msg.style.color = 'var(--pol)';
+    setTimeout(() => msg.textContent = '', 5000);
+  }
 }
 
 function settingsResetAll() {
@@ -4335,15 +6037,24 @@ function renderTaskAnalysis() {
     (day.tasks || []).forEach(t => {
       totalCount++;
       const min = Number(t.minutes) || 0;
-      const qty = Number(t.quantity) || 0;
+      const qty = visibleTaskQuantity(t);
+      const qtyUnit = visibleTaskQuantityUnit(t);
       totalMin += min; totalQty += qty;
       const cat = truncateActPath(t.activityType, level);
       if (!catMap[cat]) catMap[cat] = {};
-      if (!catMap[cat][ds]) catMap[cat][ds] = { min: 0, qty: 0, count: 0, qtyUnit: '' };
+      if (!catMap[cat][ds]) catMap[cat][ds] = { min: 0, qty: 0, count: 0, qtyUnit: '', wrong: 0, errorQty: 0, errorTaskCount: 0 };
       catMap[cat][ds].min += min;
       catMap[cat][ds].qty += qty;
       catMap[cat][ds].count++;
-      if (t.quantityUnit) catMap[cat][ds].qtyUnit = t.quantityUnit;
+      if (qtyUnit) catMap[cat][ds].qtyUnit = qtyUnit;
+      const wrong = Number(t.wrongCount);
+      const hasExplicitWrong = t.wrongCount != null && t.wrongCount !== '' &&
+        Number.isFinite(wrong) && wrong >= 0 && qty > 0 && wrong <= qty;
+      if (hasExplicitWrong) {
+        catMap[cat][ds].wrong += wrong;
+        catMap[cat][ds].errorQty += qty;
+        catMap[cat][ds].errorTaskCount++;
+      }
     });
   });
 
@@ -4384,20 +6095,162 @@ function renderTaskAnalysis() {
 
   // 每类别汇总
   const catStats = cats.map(cat => {
-    let count = 0, min = 0, qty = 0, qtyUnit = '';
-    Object.values(catMap[cat]).forEach(v => { count += v.count; min += v.min; qty += v.qty; if (v.qtyUnit) qtyUnit = v.qtyUnit; });
+    let count = 0, min = 0, qty = 0, qtyUnit = '', wrong = 0, errorQty = 0, errorTaskCount = 0;
+    Object.values(catMap[cat]).forEach(v => {
+      count += v.count;
+      min += v.min;
+      qty += v.qty;
+      wrong += v.wrong || 0;
+      errorQty += v.errorQty || 0;
+      errorTaskCount += v.errorTaskCount || 0;
+      if (v.qtyUnit) qtyUnit = v.qtyUnit;
+    });
     const avgPerDay = daysWithTasks > 0 ? Math.round(min / daysWithTasks) : 0;
     const avgEff = (qty && min) ? +(qty / min).toFixed(2) : null;
+    const errorRate = errorQty > 0 ? wrong / errorQty * 100 : null;
     const dailyVals = dateStrs.map(ds => catMap[cat][ds]?.min || 0);
     const stats = calcStats(dailyVals);
-    return { cat, count, min, qty, qtyUnit, avgMin: count > 0 ? Math.round(min / count) : 0, avgPerDay, avgEff, cv: stats.cv, stdDev: stats.stdDev };
+    return { cat, count, min, qty, qtyUnit, wrong, errorQty, errorTaskCount, errorRate, avgMin: count > 0 ? Math.round(min / count) : 0, avgPerDay, avgEff, cv: stats.cv, stdDev: stats.stdDev };
   });
-  // 效率趋势折线图 — 固定按三级分类（避免不同单位混淆）
+  // 章节效率：横轴按模板章节顺序；周/月只筛选首次完成日，累计值包含此前跨天投入。
+  const analysisDateSet = new Set(dateStrs);
+  const chapterTemplates = getTaskTemplates()
+    .filter(template => Boolean(template.namedItemEnabled ?? template.ordinalEnabled))
+    .sort((a, b) => forecastTemplateLabel(a).localeCompare(forecastTemplateLabel(b)));
+  const chapterTemplateData = new Map();
+  chapterTemplates.forEach(template => {
+    const orderedItems = [...(template.namedItems || [])]
+      .filter(item => item.id && String(item.name || '').trim())
+      .sort((a, b) => Number(a.order) - Number(b.order))
+      .map((item, index) => ({
+        id: item.id,
+        name: String(item.name || '').trim(),
+        order: index,
+        archived: Boolean(item.archived),
+      }));
+    chapterTemplateData.set(template.id, {
+      template,
+      items: orderedItems,
+      byId: new Map(orderedItems.map(item => [item.id, item])),
+      byName: new Map(orderedItems.map(item => [item.name.toLocaleLowerCase(), item])),
+      progress: new Map(orderedItems.map(item => [item.id, {
+        item,
+        minutes: 0,
+        quantity: 0,
+        completed: false,
+        completionDate: '',
+      }])),
+    });
+  });
+  getForecastTaskEntries()
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .forEach(({ date, task }) => {
+      const templateId = resolveTaskTemplateId(task);
+      const templateData = chapterTemplateData.get(templateId);
+      if (!templateData) return;
+      taskNamedItemAllocations(task).forEach(allocation => {
+        const normalizedName = String(allocation.itemName || '').trim().toLocaleLowerCase();
+        let item = templateData.byId.get(allocation.itemId) || templateData.byName.get(normalizedName);
+        if (!item) {
+          item = {
+            id: allocation.itemId || `historical-${templateId}-${normalizedName}`,
+            name: allocation.itemName || '历史章节',
+            order: templateData.items.length,
+            archived: true,
+          };
+          templateData.items.push(item);
+          templateData.byId.set(item.id, item);
+          if (normalizedName) templateData.byName.set(normalizedName, item);
+          templateData.progress.set(item.id, {
+            item,
+            minutes: 0,
+            quantity: 0,
+            completed: false,
+            completionDate: '',
+          });
+        }
+        const progress = templateData.progress.get(item.id);
+        if (progress.completed) return;
+        progress.minutes += Math.max(0, Number(allocation.minutes) || 0);
+        progress.quantity += Math.max(0, Number(allocation.quantity) || 0);
+        if (allocation.completed) {
+          progress.completed = true;
+          progress.completionDate = date;
+        }
+      });
+    });
+
+  const chapterTemplateStats = chapterTemplates.map(template => {
+    const templateData = chapterTemplateData.get(template.id);
+    const items = [...templateData.progress.values()]
+      .filter(progress => progress.completed && analysisDateSet.has(progress.completionDate))
+      .sort((a, b) => a.item.order - b.item.order);
+    const totalMinutes = items.reduce((sum, item) => sum + item.minutes, 0);
+    const quantityItems = template.quantityEnabled
+      ? items.filter(item => item.minutes > 0 && item.quantity > 0)
+      : [];
+    const quantityMinutes = quantityItems.reduce((sum, item) => sum + item.minutes, 0);
+    const totalQuantity = quantityItems.reduce((sum, item) => sum + item.quantity, 0);
+    const stats = calcStats(items.map(item => item.minutes));
+    return {
+      template,
+      id: template.id,
+      label: forecastTemplateLabel(template),
+      items,
+      totalMinutes,
+      totalQuantity,
+      completedChapters: items.length,
+      avgMinutes: items.length ? totalMinutes / items.length : null,
+      questionSpeed: quantityMinutes > 0 ? totalQuantity / quantityMinutes : null,
+      cv: stats.cv,
+      n: stats.n,
+    };
+  });
+  const chapterModeCats = new Set(chapterTemplates.map(template => truncateActPath(template.activityType, 3)));
+  const firstChapterTemplateWithData = chapterTemplateStats.find(item => item.items.length) || chapterTemplateStats[0] || null;
+  if (!chapterTemplateStats.some(item => item.id === s.chapterEffTemplateId)) {
+    s.chapterEffTemplateId = firstChapterTemplateWithData?.id || '';
+  }
+  const selectedChapterTemplateStats = chapterTemplateStats.find(item => item.id === s.chapterEffTemplateId) ||
+    firstChapterTemplateWithData;
+  const selectedChapterItems = selectedChapterTemplateStats?.items || [];
+  const chapterChartLabels = selectedChapterItems.map(item =>
+    `${item.item.name}${item.item.archived ? '（已归档）' : ''}`
+  );
+  const chapterEffCatStats = [...chapterModeCats].map(cat => {
+    const related = chapterTemplateStats.filter(item => truncateActPath(item.template.activityType, 3) === cat);
+    const items = related.flatMap(item => item.items);
+    const totalMinutes = items.reduce((sum, item) => sum + item.minutes, 0);
+    const quantityItems = related.flatMap(item =>
+      item.template.quantityEnabled ? item.items.filter(chapter => chapter.minutes > 0 && chapter.quantity > 0) : []
+    );
+    const quantityMinutes = quantityItems.reduce((sum, item) => sum + item.minutes, 0);
+    const totalQuantity = quantityItems.reduce((sum, item) => sum + item.quantity, 0);
+    const stats = calcStats(items.map(item => item.minutes));
+    const unit = related.find(item => item.template.quantityEnabled)?.template.quantityUnit || '';
+    return {
+      cat,
+      avgEff: items.length ? totalMinutes / items.length : null,
+      questionSpeed: quantityMinutes > 0 ? totalQuantity / quantityMinutes : null,
+      unit,
+      chapters: items.length,
+      cv: stats.cv,
+      n: stats.n,
+    };
+  });
+
+  // 纯数量效率趋势；开启章节的模板优先使用上面的“分钟/章”口径。
   const effCatMap = {};
   dateStrs.forEach(ds => {
     const day = getDay(ds);
     (day.tasks || []).forEach(t => {
-      const qty = Number(t.quantity) || 0;
+      const template = getTaskTemplateForTask(t);
+      const namedEnabled = template
+        ? Boolean(template.namedItemEnabled ?? template.ordinalEnabled)
+        : taskNamedItemAllocations(t).length > 0;
+      if (namedEnabled) return;
+      const qty = visibleTaskQuantity(t);
+      const qtyUnit = visibleTaskQuantityUnit(t);
       const min = Number(t.minutes) || 0;
       if (!qty || !min) return;
       const cat3 = truncateActPath(t.activityType, 3);
@@ -4405,7 +6258,7 @@ function renderTaskAnalysis() {
       if (!effCatMap[cat3][ds]) effCatMap[cat3][ds] = { qty: 0, min: 0, qtyUnit: '' };
       effCatMap[cat3][ds].qty += qty;
       effCatMap[cat3][ds].min += min;
-      if (t.quantityUnit) effCatMap[cat3][ds].qtyUnit = t.quantityUnit;
+      if (qtyUnit) effCatMap[cat3][ds].qtyUnit = qtyUnit;
     });
   });
   const effCats = Object.keys(effCatMap).sort();
@@ -4519,9 +6372,36 @@ function renderTaskAnalysis() {
         <div class="chart-sub">柱图=条数 · 折线=时长(h)</div>
         <canvas id="taskAnaCountChart" height="200"></canvas>
       </div>
+      ${chapterTemplateStats.length > 0 ? `
+      <div class="chart-card full">
+        <div class="chart-title">按章节分析</div>
+        <div class="chart-sub">周/月范围按首次完成日期筛选；每章数值包含完成前全部跨天投入</div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px">
+          <span style="font-size:11px;color:var(--muted)">章节模板：</span>
+          <select onchange="taskAnaNav('chapterEffTemplateId',this.value)" style="min-width:220px;font-size:12px;padding:4px 8px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px">
+            ${chapterTemplateStats.map(item => `<option value="${escHtmlApp(item.id)}" ${selectedChapterTemplateStats?.id === item.id ? 'selected' : ''}>${escHtmlApp(item.label)}（完成 ${item.completedChapters} 章）</option>`).join('')}
+          </select>
+        </div>
+        ${selectedChapterTemplateStats ? `<div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap;font-size:12px">
+          <span style="color:var(--muted)">平均完成耗时：<b style="color:var(--text)">${selectedChapterTemplateStats.avgMinutes == null ? '-' : `${forecastDisplayMetric(selectedChapterTemplateStats.avgMinutes)} 分钟/章`}</b></span>
+          ${selectedChapterTemplateStats.template.quantityEnabled ? `<span style="color:var(--muted)">平均题目效率：<b style="color:var(--text)">${selectedChapterTemplateStats.questionSpeed == null ? '-' : `${selectedChapterTemplateStats.questionSpeed.toFixed(3)} ${escHtmlApp(selectedChapterTemplateStats.template.quantityUnit || '题')}/分钟`}</b></span>` : ''}
+          <span style="color:var(--muted)">已完成：<b style="color:var(--text)">${selectedChapterTemplateStats.completedChapters} 章</b></span>
+          <span style="color:var(--muted)">耗时CV${tipIcon('cv')}：<b style="color:${selectedChapterTemplateStats.cv != null && selectedChapterTemplateStats.cv < 0.3 ? 'var(--green)' : 'var(--wake)'}">${fmtCV(selectedChapterTemplateStats.cv)}</b></span>
+        </div>` : ''}
+      </div>
+      <div class="chart-card full">
+        <div class="chart-title">每章完成耗时</div>
+        <div class="chart-sub">柱状图 · 横轴=章节 · 纵轴=完成该章累计分钟</div>
+        ${selectedChapterItems.length ? `<div style="overflow-x:auto"><div style="min-width:${Math.max(720, selectedChapterItems.length * 90)}px"><canvas id="taskAnaChapterMinutesChart" height="${s.mode === 'week' ? '100' : '120'}"></canvas></div></div>` : '<div class="empty-state"><p>当前范围没有已完成章节。</p></div>'}
+      </div>
+      ${selectedChapterTemplateStats?.template.quantityEnabled ? `<div class="chart-card full">
+        <div class="chart-title">每章题目效率</div>
+        <div class="chart-sub">折线图 · 横轴=章节 · 纵轴=${escHtmlApp(selectedChapterTemplateStats.template.quantityUnit || '题')}/分钟</div>
+        ${selectedChapterItems.length ? `<div style="overflow-x:auto"><div style="min-width:${Math.max(720, selectedChapterItems.length * 90)}px"><canvas id="taskAnaChapterQuantityEffChart" height="${s.mode === 'week' ? '100' : '120'}"></canvas></div></div>` : '<div class="empty-state"><p>当前范围没有已完成章节。</p></div>'}
+      </div>` : ''}` : ''}
       ${effCats.length > 0 ? `<div class="chart-card full">
-        <div class="chart-title">各类别效率趋势（按三级分类）${effCatFilter ? ' — ' + escHtmlApp(effCatFilter) : ''}</div>
-        <div class="chart-sub">折线图 · 效率 = 数量 ÷ 时长(分钟)${effCatFilter ? ' · 仅显示有数据的天' : ''}</div>
+        <div class="chart-title">纯数量效率趋势（按三级分类）${effCatFilter ? ' — ' + escHtmlApp(effCatFilter) : ''}</div>
+        <div class="chart-sub">仅统计未开启章节的模板 · 效率 = 数量 ÷ 时长(分钟)${effCatFilter ? ' · 仅显示有数据的天' : ''}</div>
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap">
           <span style="font-size:11px;color:var(--muted)">纵轴：</span>
           <div style="display:flex;gap:4px;background:var(--card2);border-radius:8px;padding:2px">
@@ -4552,10 +6432,13 @@ function renderTaskAnalysis() {
         <div class="chart-sub">每种活动类别的统计</div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>类别</th><th>任务数</th><th>总时长</th><th>每条平均</th><th>日均</th>${level === 3 ? '<th>总数量</th><th>平均效率</th><th>效率CV' + tipIcon('cv') + '</th>' : ''}</tr></thead>
+            <thead><tr><th>类别</th><th>任务数</th><th>总时长</th><th>每条平均</th><th>日均</th>${level === 3 ? '<th>总数量</th><th>综合错误率</th><th>平均效率</th><th>效率CV' + tipIcon('cv') + '</th>' : ''}</tr></thead>
             <tbody>${catStats.map(c => {
     const hex = level === 1 ? (getActColor(c.cat).color || '#78909c') : '#78909c';
     const ecs = level === 3 ? effCatStats.find(e => e.cat === c.cat) : null;
+    const chapterEcs = level === 3 ? chapterEffCatStats.find(e => e.cat === c.cat) : null;
+    const usesChapterEfficiency = level === 3 && chapterModeCats.has(c.cat);
+    const displayedEfficiencyStats = usesChapterEfficiency ? chapterEcs : ecs;
     return `<tr>
               <td><span class="badge" style="background:${hexRgba(hex, 0.13)};color:${hex};border:1px solid ${hexRgba(hex, 0.3)}">${escHtmlApp(c.cat)}</span></td>
               <td class="fw-mono">${c.count}</td>
@@ -4563,11 +6446,16 @@ function renderTaskAnalysis() {
               <td class="fw-mono">${fmtMin(c.avgMin)}</td>
               <td class="fw-mono" style="color:var(--muted)">${fmtMin(c.avgPerDay)}</td>
               ${level === 3 ? `<td class="fw-mono">${c.qty ? c.qty + (c.qtyUnit ? ' ' + c.qtyUnit : '') : '-'}</td>
-              <td class="fw-mono">${c.avgEff != null ? c.avgEff + (c.qtyUnit ? ' ' + c.qtyUnit + '/min' : '/min') : '-'}</td>
-              <td class="fw-mono" style="color:${ecs && ecs.cv != null && ecs.cv < 0.3 ? 'var(--green)' : ecs && ecs.cv != null && ecs.cv < 0.5 ? 'var(--wake)' : ecs && ecs.cv != null ? 'var(--red)' : 'var(--muted)'}">${ecs ? fmtCV(ecs.cv) : '-'}</td>` : ''}
+              <td class="fw-mono ${c.errorRate == null ? 'c-muted' : c.errorRate <= 10 ? 'c-green' : c.errorRate <= 30 ? 'c-wake' : 'c-red'}" title="${c.errorRate == null ? '没有明确填写错题数的任务' : `错 ${forecastDisplayMetric(c.wrong)} / ${forecastDisplayMetric(c.errorQty)} · ${c.errorTaskCount} 条有效任务`}">${c.errorRate == null ? '-' : `${c.errorRate.toFixed(2)}%`}</td>
+              <td class="fw-mono">${usesChapterEfficiency
+                ? chapterEcs?.avgEff != null
+                  ? `${forecastDisplayMetric(chapterEcs.avgEff)} 分钟/章${chapterEcs.questionSpeed != null ? `<br><span class="c-muted">${chapterEcs.questionSpeed.toFixed(3)} ${escHtmlApp(chapterEcs.unit || '题')}/分钟</span>` : ''}`
+                  : '-'
+                : c.avgEff != null ? c.avgEff + (c.qtyUnit ? ' ' + c.qtyUnit + '/min' : '/min') : '-'}</td>
+              <td class="fw-mono" style="color:${displayedEfficiencyStats && displayedEfficiencyStats.cv != null && displayedEfficiencyStats.cv < 0.3 ? 'var(--green)' : displayedEfficiencyStats && displayedEfficiencyStats.cv != null && displayedEfficiencyStats.cv < 0.5 ? 'var(--wake)' : displayedEfficiencyStats && displayedEfficiencyStats.cv != null ? 'var(--red)' : 'var(--muted)'}">${displayedEfficiencyStats ? fmtCV(displayedEfficiencyStats.cv) : '-'}</td>` : ''}
             </tr>`;
   }).join('')}</tbody>
-            <tfoot><tr><td>合计</td><td class="fw-mono">${totalCount}</td><td class="fw-mono c-actual">${fmtMin(totalMin, true)}</td><td class="fw-mono">${totalCount > 0 ? fmtMin(Math.round(totalMin / totalCount)) : '-'}</td><td class="fw-mono" style="color:var(--muted)">${fmtMin(avgMinPerDay)}</td>${level === 3 ? '<td colspan="3"></td>' : ''}</tr></tfoot>
+            <tfoot><tr><td>合计</td><td class="fw-mono">${totalCount}</td><td class="fw-mono c-actual">${fmtMin(totalMin, true)}</td><td class="fw-mono">${totalCount > 0 ? fmtMin(Math.round(totalMin / totalCount)) : '-'}</td><td class="fw-mono" style="color:var(--muted)">${fmtMin(avgMinPerDay)}</td>${level === 3 ? '<td colspan="4"></td>' : ''}</tr></tfoot>
           </table>
         </div>
       </div>
@@ -4623,6 +6511,113 @@ function renderTaskAnalysis() {
     }
   });
 
+  // 按章节完成耗时柱状图
+  if (selectedChapterItems.length > 0) {
+    mkChart('taskAnaChapterMinutesChart', {
+      type: 'bar',
+      data: {
+        labels: chapterChartLabels,
+        datasets: [{
+          label: '完成耗时（分钟）',
+          data: selectedChapterItems.map(item => +item.minutes.toFixed(1)),
+          backgroundColor: selectedChapterItems.map(item => item.item.archived ? 'rgba(158,158,158,.45)' : 'rgba(79,195,247,.45)'),
+          borderColor: selectedChapterItems.map(item => item.item.archived ? '#9e9e9e' : '#4fc3f7'),
+          borderWidth: 1,
+          borderRadius: 4,
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => {
+                const item = selectedChapterItems[ctx.dataIndex];
+                return `累计耗时：${forecastDisplayMetric(item.minutes)} 分钟`;
+              },
+              afterLabel: ctx => {
+                const item = selectedChapterItems[ctx.dataIndex];
+                const lines = [`首次完成：${item.completionDate}`];
+                if (item.quantity > 0) {
+                  lines.push(`累计数量：${forecastDisplayMetric(item.quantity)} ${selectedChapterTemplateStats?.template.quantityUnit || '题'}`);
+                }
+                return lines;
+              },
+            }
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#6b7a9e', maxRotation: 45, minRotation: 0, autoSkip: false }, grid: gridCfg },
+          y: {
+            ticks: { color: '#6b7a9e', callback: value => `${value}分` },
+            grid: gridCfg,
+            min: 0,
+            title: { display: true, text: '完成耗时（分钟）', color: '#6b7a9e' }
+          }
+        }
+      }
+    });
+  }
+
+  // 章节＋数量模板：按章节题目效率折线图
+  if (selectedChapterItems.length > 0 && selectedChapterTemplateStats?.template.quantityEnabled) {
+    mkChart('taskAnaChapterQuantityEffChart', {
+      type: 'line',
+      data: {
+        labels: chapterChartLabels,
+        datasets: [{
+          label: `${selectedChapterTemplateStats.template.quantityUnit || '题'}/分钟`,
+          data: selectedChapterItems.map(item =>
+            item.minutes > 0 && item.quantity > 0 ? +(item.quantity / item.minutes).toFixed(3) : null
+          ),
+          borderColor: '#69f0ae',
+          backgroundColor: '#69f0ae',
+          borderWidth: 2,
+          pointRadius: 4,
+          pointBackgroundColor: '#69f0ae',
+          tension: 0.25,
+          fill: false,
+          spanGaps: false,
+        }]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => {
+                const item = selectedChapterItems[ctx.dataIndex];
+                return ctx.parsed.y == null
+                  ? '题目效率：数据不足'
+                  : `题目效率：${ctx.parsed.y.toFixed(3)} ${selectedChapterTemplateStats.template.quantityUnit || '题'}/分钟`;
+              },
+              afterLabel: ctx => {
+                const item = selectedChapterItems[ctx.dataIndex];
+                return [
+                  `累计数量：${forecastDisplayMetric(item.quantity)} ${selectedChapterTemplateStats.template.quantityUnit || '题'}`,
+                  `累计耗时：${forecastDisplayMetric(item.minutes)} 分钟`,
+                  `首次完成：${item.completionDate}`,
+                ];
+              },
+            }
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#6b7a9e', maxRotation: 45, minRotation: 0, autoSkip: false }, grid: gridCfg },
+          y: {
+            ticks: { color: '#6b7a9e' },
+            grid: gridCfg,
+            min: 0,
+            title: { display: true, text: `${selectedChapterTemplateStats.template.quantityUnit || '题'}/分钟`, color: '#6b7a9e' }
+          }
+        }
+      }
+    });
+  }
+
   // 效率趋势图
   if (effDayDS.length > 0) {
     const effScale = s.effScale || 'linear';
@@ -4677,6 +6672,7 @@ function taskAnaNav(action, val) {
   else if (action === 'effScale') { s.effScale = val; }
   else if (action === 'catFilter') { s.catFilter = val; }
   else if (action === 'effCatFilter') { s.effCatFilter = val; }
+  else if (action === 'chapterEffTemplateId') { s.chapterEffTemplateId = val; }
   else if (action === 'prev') { if (s.mode === 'week') s.weekStart = addDays(s.weekStart, -7); else { s.month.month--; if (s.month.month < 0) { s.month.month = 11; s.month.year--; } } }
   else if (action === 'next') { if (s.mode === 'week') s.weekStart = addDays(s.weekStart, 7); else { s.month.month++; if (s.month.month > 11) { s.month.month = 0; s.month.year++; } } }
   else if (action === 'today') { const n = new Date(); if (s.mode === 'week') s.weekStart = getMondayOfDate(n); else { s.month.year = n.getFullYear(); s.month.month = n.getMonth(); } }
@@ -5196,6 +7192,2263 @@ function stackedGoToday(mode) {
 }
 
 // ============================================================
+// COMPLETION FORECAST TAB
+// ============================================================
+function getForecastGoals() {
+  if (!Array.isArray(state.data.__forecastGoals__)) state.data.__forecastGoals__ = [];
+  return state.data.__forecastGoals__;
+}
+
+function getForecastSettings() {
+  if (!state.data.__forecastSettings__ || typeof state.data.__forecastSettings__ !== 'object') {
+    state.data.__forecastSettings__ = {};
+  }
+  const settings = state.data.__forecastSettings__;
+  const legacyDailyMinutes = Number(settings.dailyMinutes);
+  if ((!Number.isFinite(Number(settings.manualDailyMinutes)) || Number(settings.manualDailyMinutes) <= 0) &&
+    Number.isFinite(legacyDailyMinutes) && legacyDailyMinutes > 0) {
+    settings.manualDailyMinutes = Math.round(legacyDailyMinutes);
+  }
+  delete settings.dailyMinutes;
+  const dates = getAllDates();
+  const fallbackStart = dates[0] || getTodayStr();
+  const fallbackEnd = dates[dates.length - 1] || getTodayStr();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(settings.capacityStartDate || '')) {
+    settings.capacityStartDate = fallbackStart;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(settings.capacityEndDate || '')) {
+    settings.capacityEndDate = fallbackEnd;
+  }
+  settings.capacityTrackLatest = settings.capacityTrackLatest === true;
+  settings.capacityMode = settings.capacityMode === 'manual' ? 'manual' : 'range';
+  settings.manualDailyMinutes = Number.isFinite(Number(settings.manualDailyMinutes))
+    ? Math.max(0, Math.round(Number(settings.manualDailyMinutes)))
+    : 0;
+  return settings;
+}
+
+function forecastTemplateLabel(template) {
+  return String(template?.activityType || '未分类模板');
+}
+
+function resolveTaskTemplateId(task) {
+  if (task?.templateId && getTaskTemplates().some(template => template.id === task.templateId)) {
+    return task.templateId;
+  }
+  const matches = getTaskTemplates().filter(template =>
+    template.activityType && template.activityType === task?.activityType
+  );
+  return matches.length === 1 ? matches[0].id : '';
+}
+
+function taskOrdinalNumbers(task) {
+  const values = Array.isArray(task?.ordinalNumbers)
+    ? task.ordinalNumbers
+    : Array.isArray(task?.chapterNumbers)
+      ? task.chapterNumbers
+      : (Number.isInteger(Number(task?.chapterNumber)) ? [Number(task.chapterNumber)] : []);
+  return [...new Set(values.map(Number).filter(Number.isInteger))].sort((a, b) => a - b);
+}
+
+function taskCompletedOrdinals(task) {
+  const values = Array.isArray(task?.completedOrdinals)
+    ? task.completedOrdinals
+    : Array.isArray(task?.completedChapters)
+      ? task.completedChapters
+      : (task?.chapterCompleted && Number.isInteger(Number(task?.chapterNumber)) ? [Number(task.chapterNumber)] : []);
+  const involved = new Set(taskOrdinalNumbers(task));
+  return [...new Set(values.map(Number).filter(value => Number.isInteger(value) && involved.has(value)))].sort((a, b) => a - b);
+}
+
+function taskOrdinalBadgeHtml(task) {
+  if (!taskOrdinalIsVisible(task)) return '';
+  const namedAllocations = taskNamedItemAllocations(task);
+  if (namedAllocations.length) {
+    const template = getTaskTemplateById(resolveTaskTemplateId(task));
+    const itemMap = new Map((template?.namedItems || []).map(item => [item.id, item.name]));
+    return ` <span class="forecast-chapter-badge">${namedAllocations.map(item => {
+      const label = itemMap.get(item.itemId) || item.itemName;
+      return `${escHtmlApp(label)}${item.completed ? ' ✓' : ''}`;
+    }).join('、')}</span>`;
+  }
+  const values = taskOrdinalNumbers(task);
+  if (!values.length) return '';
+  const template = getTaskTemplates().find(item => item.id === resolveTaskTemplateId(task));
+  const unit = template?.ordinalUnit || '';
+  const completed = taskCompletedOrdinals(task);
+  return ` <span class="forecast-chapter-badge">${values.map(value => `第${value}${escHtmlApp(unit)}`).join('、')}${completed.length ? ` · 完成${completed.map(value => `第${value}${escHtmlApp(unit)}`).join('、')}` : ''}</span>`;
+}
+
+function forecastModeFromTemplate(template) {
+  const namedItemEnabled = template?.namedItemEnabled ?? template?.ordinalEnabled;
+  if (namedItemEnabled) return template.quantityEnabled ? 'chapterQuantity' : 'chapter';
+  if (template?.quantityEnabled) return 'quantity';
+  return '';
+}
+
+function migrateForecastUnitModel() {
+  getTaskTemplates().forEach(template => {
+    const oldMode = template.forecastMode || '';
+    if (typeof template.ordinalEnabled !== 'boolean') {
+      template.ordinalEnabled = oldMode === 'chapter' || oldMode === 'chapterQuantity';
+    }
+    if (typeof template.quantityEnabled !== 'boolean') {
+      template.quantityEnabled = oldMode === 'quantity' || oldMode === 'chapterQuantity' ||
+        (!oldMode && Boolean(template.quantityUnit));
+    }
+    if (typeof template.namedItemEnabled !== 'boolean') {
+      template.namedItemEnabled = Boolean(template.ordinalEnabled);
+    }
+    if (!Array.isArray(template.namedItems)) template.namedItems = [];
+    if (!template.ordinalUnit) template.ordinalUnit = template.ordinalEnabled ? '章' : '';
+    delete template.name;
+    delete template.forecastMode;
+  });
+  getOrdinalUnitList();
+  getForecastGoals().forEach(goal => {
+    if (goal.startOrdinal == null && goal.startChapter != null) goal.startOrdinal = goal.startChapter;
+    if (goal.endOrdinal == null && goal.endChapter != null) goal.endOrdinal = goal.endChapter;
+    const template = getTaskTemplates().find(item => item.id === goal.templateId);
+    const namedItemEnabled = template?.namedItemEnabled ?? template?.ordinalEnabled;
+    if (namedItemEnabled && template) {
+      const start = Number(goal.startOrdinal);
+      const end = Number(goal.endOrdinal);
+      const unit = template?.ordinalUnit || '项';
+      const legacyItems = Array.isArray(goal.namedItems)
+        ? goal.namedItems
+        : Number.isInteger(start) && Number.isInteger(end) && start > 0 && end >= start
+        ? Array.from({ length: end - start + 1 }, (_, index) => {
+          const value = start + index;
+          return {
+            id: `legacy-${value}`,
+            name: `第${value}${unit}`,
+            order: index,
+            archived: false,
+          };
+        })
+        : [];
+      const merged = [...template.namedItems];
+      const knownIds = new Set(merged.map(item => String(item.id)));
+      const knownNames = new Set(merged.map(item => String(item.name || '').trim().toLocaleLowerCase()));
+      legacyItems.forEach(item => {
+        const id = String(item?.id || uid());
+        const name = String(item?.name || '').trim();
+        const normalizedName = name.toLocaleLowerCase();
+        if (!name || knownIds.has(id) || knownNames.has(normalizedName)) return;
+        merged.push({ id, name, order: merged.length, archived: Boolean(item?.archived) });
+        knownIds.add(id);
+        knownNames.add(normalizedName);
+      });
+      template.namedItems = merged.map((item, index) => ({ ...item, order: index }));
+    }
+    delete goal.namedItems;
+    delete goal.startChapter;
+    delete goal.endChapter;
+    delete goal.startOrdinal;
+    delete goal.endOrdinal;
+    delete goal.mode;
+    delete goal.quantityUnit;
+  });
+}
+
+function migrateTaskTemplateIds() {
+  Object.entries(state.data).forEach(([key, day]) => {
+    if (key.startsWith('__') || !day || !Array.isArray(day.tasks)) return;
+    day.tasks.forEach(task => {
+      if (!task.templateId) {
+        const templateId = resolveTaskTemplateId(task);
+        if (templateId) task.templateId = templateId;
+      }
+      const legacyOrdinals = taskOrdinalNumbers(task);
+      const legacyCompleted = new Set(taskCompletedOrdinals(task));
+      const template = getTaskTemplateById(task.templateId);
+      if ((!Array.isArray(task.namedItemAllocations) || !task.namedItemAllocations.length) &&
+        legacyOrdinals.length && template) {
+        if (!Array.isArray(template.namedItems)) template.namedItems = [];
+        const minuteShare = Number(task.minutes) > 0 ? Number(task.minutes) / legacyOrdinals.length : 0;
+        const validQuantity = Number(task.quantity) > 0;
+        const quantityShare = validQuantity ? Number(task.quantity) / legacyOrdinals.length : null;
+        task.namedItemAllocations = legacyOrdinals.map(value => {
+          const legacyName = `第${value}${template.ordinalUnit || '项'}`;
+          let item = template.namedItems.find(candidate =>
+            candidate.id === `legacy-${value}` ||
+            String(candidate.name || '').trim().toLocaleLowerCase() === legacyName.toLocaleLowerCase()
+          );
+          if (!item) {
+            item = {
+              id: `legacy-${template.id}-${value}`,
+              name: legacyName,
+              order: template.namedItems.length,
+              archived: false,
+            };
+            template.namedItems.push(item);
+          }
+          return {
+            itemId: item.id,
+            itemName: item.name,
+            minutes: minuteShare,
+            quantity: quantityShare,
+            completed: legacyCompleted.has(value),
+          };
+        });
+      }
+      if (!Array.isArray(task.namedItemAllocations)) task.namedItemAllocations = [];
+      if (!legacyOrdinals.length || task.namedItemAllocations.length) {
+        delete task.ordinalNumbers;
+        delete task.completedOrdinals;
+        delete task.chapterNumbers;
+        delete task.completedChapters;
+        delete task.chapterNumber;
+        delete task.chapterCompleted;
+      }
+    });
+  });
+}
+
+function getForecastTaskEntries() {
+  const entries = [];
+  Object.entries(state.data).forEach(([date, day]) => {
+    if (date.startsWith('__') || !day || !Array.isArray(day.tasks)) return;
+    day.tasks.forEach(task => entries.push({ date, task }));
+  });
+  return entries;
+}
+
+function getForecastGoalByTemplate(templateId) {
+  const goal = getForecastGoals().find(item => item.templateId === templateId);
+  return goal ? forecastGoalContext(goal) : null;
+}
+
+function forecastGoalContext(goal) {
+  const template = getTaskTemplates().find(item => item.id === goal?.templateId);
+  return {
+    ...goal,
+    mode: forecastModeFromTemplate(template),
+    namedItems: Array.isArray(template?.namedItems) ? template.namedItems : [],
+    ordinalUnit: template?.ordinalUnit || '',
+    quantityUnit: template?.quantityUnit || '',
+  };
+}
+
+function taskOrdinalCardHtml(value, unit, completed) {
+  return `<div class="forecast-chapter-chip task-ordinal-card" data-ordinal="${value}" style="display:flex;align-items:center;gap:8px">
+    <input type="checkbox" class="task-chapter-involved" value="${value}" checked hidden>
+    <b>第${value}${escHtmlApp(unit)}</b>
+    <label style="display:flex;align-items:center;gap:4px;font-weight:400">
+      <input type="checkbox" class="task-chapter-completed" value="${value}" ${completed ? 'checked' : ''}> 本次完成
+    </label>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="taskOrdinalRemove(${value})" title="移除">×</button>
+  </div>`;
+}
+
+function taskOrdinalCardsHtml(values, unit) {
+  const involved = taskOrdinalNumbers(values);
+  const completed = new Set(taskCompletedOrdinals(values));
+  return involved.map(value => taskOrdinalCardHtml(value, unit, completed.has(value))).join('');
+}
+
+function taskNamedItemAllocations(task) {
+  return Array.isArray(task?.namedItemAllocations)
+    ? task.namedItemAllocations.map(item => ({
+      itemId: String(item?.itemId || ''),
+      itemName: String(item?.itemName || '').trim(),
+      minutes: Number(item?.minutes) || 0,
+      quantity: item?.quantity == null ? null : Number(item.quantity),
+      completed: Boolean(item?.completed),
+      isNew: Boolean(item?.isNew),
+    })).filter(item => (item.itemId || item.itemName) && item.itemName)
+    : [];
+}
+
+function taskNamedItemCardHtml(allocation, quantityEnabled) {
+  const completed = Boolean(allocation.completed);
+  return `<div class="task-named-item-card" data-item-id="${escHtmlApp(allocation.itemId)}"
+    data-item-name="${escHtmlApp(allocation.itemName)}" data-new="${allocation.isNew ? 'true' : 'false'}"
+    data-completed="${completed ? 'true' : 'false'}" role="button" tabindex="0"
+    onclick="taskToggleNamedItemCompleted(event,this)"
+    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();taskToggleNamedItemCompleted(event,this)}"
+    style="display:grid;grid-template-columns:minmax(180px,1fr) auto;gap:10px;align-items:center;padding:10px;border:1px solid ${completed ? 'rgba(102,187,106,.65)' : 'var(--border)'};border-radius:7px;background:${completed ? 'rgba(102,187,106,.10)' : 'rgba(255,255,255,.015)'};cursor:pointer">
+    <div>
+      <div class="form-hint">章节</div>
+      <b>${escHtmlApp(allocation.itemName)}</b>
+      ${allocation.isNew ? '<span class="c-wake" style="font-size:10px;margin-left:5px">保存任务后入库</span>' : ''}
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="task-named-completed-status" style="font-size:11px;color:${completed ? '#66bb6a' : 'var(--muted)'}">${completed ? '✓ 本次完成' : '进行中'}</span>
+      <input type="checkbox" class="task-named-completed" ${completed ? 'checked' : ''} hidden>
+      <button type="button" class="btn btn-danger btn-sm" onclick="event.stopPropagation();taskNamedItemRemove('${allocation.itemId}')">移除</button>
+    </div>
+  </div>`;
+}
+
+function taskNamedItemsEditorHtml(template, values, quantityEnabled) {
+  const templateItems = Array.isArray(template?.namedItems) ? template.namedItems : [];
+  const allocations = taskNamedItemAllocations(values).map(allocation => {
+    const idMatch = templateItems.find(item => item.id === allocation.itemId);
+    const nameMatch = templateItems.find(item =>
+      String(item.name || '').trim().toLocaleLowerCase() === allocation.itemName.toLocaleLowerCase());
+    const match = idMatch || nameMatch;
+    return match
+      ? { ...allocation, itemId: match.id, itemName: match.name, isNew: false }
+      : { ...allocation, isNew: true };
+  });
+  const activeItems = [...(template?.namedItems || [])].filter(item => !item.archived).sort((a, b) => a.order - b.order);
+  return `<div id="task_named_item_editor" style="margin-top:12px" data-template-id="${template?.id || ''}" data-quantity-enabled="${quantityEnabled ? 'true' : 'false'}">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <label>本次涉及的命名章节 *</label>
+      ${template ? `<button type="button" class="btn btn-ghost btn-sm" onclick="taskManageSharedNamedItems('${template.id}')">管理共享章节库</button>` : ''}
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin:6px 0">
+      <input id="task_named_item_input" list="task_named_item_options" placeholder="搜索已有章节或输入新章节名称"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();taskNamedItemAdd('${template?.id || ''}')}">
+      <datalist id="task_named_item_options">${activeItems.map(item => `<option value="${escHtmlApp(item.name)}">`).join('')}</datalist>
+      <button type="button" class="btn btn-primary btn-sm" onclick="taskNamedItemAdd('${template?.id || ''}')">添加</button>
+    </div>
+    <div id="task_named_item_suggestion" style="display:none;margin:6px 0"></div>
+    <div id="task_named_item_cards" style="display:grid;gap:8px">${allocations.map(item => taskNamedItemCardHtml(item, quantityEnabled)).join('')}</div>
+    <div class="form-hint" style="margin-top:6px">时长${quantityEnabled ? '和数量' : ''}请在下方任务字段填写；选择多个章节时系统会在后台平均分配，且所有章节必须全部标记为“本次完成”。点击已添加章节可切换状态。新名称只在保存任务后同步到共享章节库。</div>
+  </div>`;
+}
+
+function taskManageSharedNamedItems(templateId) {
+  showTab('templates');
+  setTimeout(() => tmplManageNamedItems(templateId), 0);
+}
+
+function taskDimensionPanelHtml(templateId, values = {}) {
+  const template = getTaskTemplateById(templateId);
+  const goal = template ? getForecastGoalByTemplate(templateId) : null;
+  const ordinalEnabled = template ? Boolean(template.namedItemEnabled ?? template.ordinalEnabled) : Boolean(values.namedItemEnabled ?? values.ordinalEnabled);
+  const quantityEnabled = template ? Boolean(template.quantityEnabled) : Boolean(values.quantityEnabled);
+  const switchHtml = template
+    ? `<label style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" ${ordinalEnabled ? 'checked' : ''}
+          onchange="taskTemplateToggleFeature('${template.id}','ordinal',this)">
+        命名章节记录
+      </label>
+      <label style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" ${quantityEnabled ? 'checked' : ''}
+          onchange="taskTemplateToggleFeature('${template.id}','quantity',this)">
+        数量记录：${escHtmlApp(template.quantityUnit || '（未设置单位）')}
+      </label>`
+    : `<label style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="task_new_ordinal_enabled" ${ordinalEnabled ? 'checked' : ''} onchange="taskNewUnitToggle()">
+        新模板开启命名章节记录
+      </label>
+      <label style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="task_new_quantity_enabled" ${quantityEnabled ? 'checked' : ''} onchange="taskNewUnitToggle()">
+        新模板开启数量记录
+      </label>`;
+  return `<div class="forecast-task-fields">
+    <div style="display:flex;gap:18px;flex-wrap:wrap;padding:8px 0">${switchHtml}</div>
+    <div class="form-hint">${template ? '命名章节来自模板共享章节库；本次新建名称会在保存任务后入库。' : '保存任务时会按完整类别自动建立模板和章节库。'}</div>
+    <div id="task_ordinal_editor" style="${ordinalEnabled ? '' : 'display:none'};margin-top:12px">
+      ${taskNamedItemsEditorHtml(template, values, quantityEnabled)}
+    </div>
+  </div>`;
+}
+
+function renderForecastTaskFields(templateId, values = {}) {
+  const host = document.getElementById('task_forecast_fields');
+  if (!host) return;
+  host.innerHTML = taskDimensionPanelHtml(templateId, values);
+  const namedWrapper = document.getElementById('task_ordinal_editor');
+  const hasNamedEditor = Boolean(namedWrapper && namedWrapper.style.display !== 'none');
+  const minutesInput = document.getElementById('task_min');
+  const quantityInput = document.getElementById('task_qty');
+  if (minutesInput) minutesInput.readOnly = false;
+  if (quantityInput) quantityInput.readOnly = false;
+  taskRecalculateNamedItemTotals();
+  if (hasNamedEditor) taskUpdateNamedItemSuggestion(templateId);
+}
+
+function taskCompletedNamedItemIds(templateId) {
+  const completed = new Set();
+  getForecastTaskEntries().forEach(({ task }) => {
+    if (resolveTaskTemplateId(task) !== templateId) return;
+    taskNamedItemAllocations(task).forEach(item => {
+      if (item.completed) completed.add(item.itemId);
+    });
+  });
+  return completed;
+}
+
+function namedItemLibraryProgress(templateId) {
+  const template = getTaskTemplateById(templateId);
+  const items = Array.isArray(template?.namedItems) ? template.namedItems : [];
+  const byId = new Map(items.map(item => [item.id, item]));
+  const byName = new Map(items.map(item => [String(item.name || '').trim().toLocaleLowerCase(), item]));
+  const progress = new Map(items.map(item => [item.id, {
+    minutes: 0,
+    quantity: 0,
+    completed: false,
+    completionDate: '',
+    completionTaskName: '',
+    records: [],
+  }]));
+  getForecastTaskEntries()
+    .filter(({ task }) => resolveTaskTemplateId(task) === templateId)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .forEach(({ date, task }) => {
+      taskNamedItemAllocations(task).forEach(allocation => {
+        const item = byId.get(allocation.itemId) ||
+          byName.get(String(allocation.itemName || '').trim().toLocaleLowerCase());
+        if (!item) return;
+        const itemProgress = progress.get(item.id);
+        const allocatedMinutes = Math.max(0, Number(allocation.minutes) || 0);
+        const allocatedQuantity = Math.max(0, Number(allocation.quantity) || 0);
+        itemProgress.minutes += allocatedMinutes;
+        itemProgress.quantity += allocatedQuantity;
+        itemProgress.records.push({
+          date,
+          taskId: task.id,
+          taskName: task.name || '未命名任务',
+          activityType: task.activityType || '',
+          minutes: allocatedMinutes,
+          quantity: allocation.quantity != null && Number.isFinite(Number(allocation.quantity)) ? allocatedQuantity : null,
+          taskTotalQuantity: task.quantity != null && Number.isFinite(Number(task.quantity)) ? Number(task.quantity) : null,
+          quantityUnit: task.quantityUnit || template?.quantityUnit || '',
+          completed: Boolean(allocation.completed),
+        });
+        if (allocation.completed && !itemProgress.completed) {
+          itemProgress.completed = true;
+          itemProgress.completionDate = date;
+          itemProgress.completionTaskName = task.name || '未命名任务';
+        }
+      });
+    });
+  const activeItems = items.filter(item => !item.archived);
+  return {
+    progress,
+    completedActive: activeItems.filter(item => progress.get(item.id)?.completed).length,
+    totalQuantity: activeItems.reduce((sum, item) => sum + (progress.get(item.id)?.quantity || 0), 0),
+  };
+}
+
+function taskNamedItemCompletionInfo(templateId, itemId, itemName) {
+  const normalizedName = String(itemName || '').trim().toLocaleLowerCase();
+  const excludedTaskId = state._editingTaskId || '';
+  const matches = getForecastTaskEntries()
+    .filter(({ task }) => resolveTaskTemplateId(task) === templateId && task.id !== excludedTaskId)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  for (const { date, task } of matches) {
+    const allocation = taskNamedItemAllocations(task).find(item =>
+      item.completed && (
+        (itemId && item.itemId === itemId) ||
+        String(item.itemName || '').trim().toLocaleLowerCase() === normalizedName
+      )
+    );
+    if (allocation) return { date, taskId: task.id, taskName: task.name || '未命名任务' };
+  }
+  return null;
+}
+
+function taskOriginalNamedItemAllocation(itemId, itemName) {
+  const editingTaskId = state._editingTaskId || '';
+  if (!editingTaskId) return null;
+  const normalizedName = String(itemName || '').trim().toLocaleLowerCase();
+  const entry = getForecastTaskEntries().find(({ task }) => task.id === editingTaskId);
+  if (!entry) return null;
+  return taskNamedItemAllocations(entry.task).find(item =>
+    (itemId && item.itemId === itemId) ||
+    String(item.itemName || '').trim().toLocaleLowerCase() === normalizedName
+  ) || null;
+}
+
+function taskValidateNamedItemTimeline(templateId, allocations, dateStr) {
+  for (const allocation of allocations) {
+    const original = taskOriginalNamedItemAllocation(allocation.itemId, allocation.itemName);
+    const completionInfo = taskNamedItemCompletionInfo(
+      templateId,
+      allocation.itemId,
+      allocation.itemName
+    );
+    if (!completionInfo) continue;
+    if (original?.completed) {
+      if (allocation.completed && dateStr >= completionInfo.date) {
+        alert(`章节“${allocation.itemName}”已经在 ${completionInfo.date} 的任务“${completionInfo.taskName}”中更早完成。\n当前重复完成记录必须取消“本次完成”。`);
+        return false;
+      }
+      continue;
+    }
+    if (dateStr >= completionInfo.date) {
+      alert(`章节“${allocation.itemName}”已于 ${completionInfo.date} 的任务“${completionInfo.taskName}”中完成。\n完成日当天及之后不能再添加该章节。`);
+      return false;
+    }
+    if (allocation.completed) {
+      alert(`章节“${allocation.itemName}”已经在 ${completionInfo.date} 的任务“${completionInfo.taskName}”中完成。\n完成日前的任务可以记录该章节，但不能提前或重复标记完成。`);
+      return false;
+    }
+  }
+  return true;
+}
+
+function taskNamedItemAdd(templateId, suppliedName = '') {
+  const input = document.getElementById('task_named_item_input');
+  const name = String(suppliedName || input?.value || '').trim();
+  if (!name) {
+    alert('请输入或选择章节名称。');
+    return;
+  }
+  const template = getTaskTemplateById(templateId);
+  const allItems = Array.isArray(template?.namedItems) ? template.namedItems : [];
+  const normalized = name.toLocaleLowerCase();
+  const matched = allItems.find(item => String(item.name || '').trim().toLocaleLowerCase() === normalized);
+  if (matched?.archived) {
+    alert(`章节“${matched.name}”已归档，请先在共享章节库中恢复。`);
+    return;
+  }
+  if (matched) {
+    const completionInfo = taskNamedItemCompletionInfo(templateId, matched.id, matched.name);
+    if (completionInfo && state.selectedDate >= completionInfo.date) {
+      alert(`章节“${matched.name}”已于 ${completionInfo.date} 的任务“${completionInfo.taskName}”中完成。\n完成日当天及之后不能再添加；完成日前仍可添加为“进行中”。`);
+      return;
+    }
+  }
+  const itemId = matched?.id || `draft-${uid()}`;
+  const cards = document.getElementById('task_named_item_cards');
+  if (!cards) return;
+  if ([...cards.querySelectorAll('.task-named-item-card')].some(card =>
+    card.dataset.itemId === itemId || String(card.dataset.itemName || '').trim().toLocaleLowerCase() === normalized)) {
+    alert(`章节“${name}”已经加入本次任务。`);
+    return;
+  }
+  const quantityEnabled = document.getElementById('task_named_item_editor')?.dataset.quantityEnabled === 'true';
+  const holder = document.createElement('div');
+  holder.innerHTML = taskNamedItemCardHtml({
+    itemId,
+    itemName: matched?.name || name,
+    minutes: 0,
+    quantity: null,
+    completed: false,
+    isNew: !matched,
+  }, quantityEnabled);
+  cards.appendChild(holder.firstElementChild);
+  if (input) input.value = '';
+  taskRecalculateNamedItemTotals();
+  taskUpdateNamedItemSuggestion(templateId, itemId, matched?.name || name);
+}
+
+function taskToggleNamedItemCompleted(event, card) {
+  if (!card || event?.target?.closest('button')) return;
+  const checkbox = card.querySelector('.task-named-completed');
+  const status = card.querySelector('.task-named-completed-status');
+  if (!checkbox) return;
+  if (!checkbox.checked) {
+    const itemId = card.dataset.itemId || '';
+    const itemName = card.dataset.itemName || '';
+    const original = taskOriginalNamedItemAllocation(itemId, itemName);
+    const templateId = document.getElementById('task_named_item_editor')?.dataset.templateId || '';
+    const completionInfo = taskNamedItemCompletionInfo(templateId, itemId, itemName);
+    const restoringEarliestOriginal = Boolean(
+      completionInfo && original?.completed && state.selectedDate < completionInfo.date
+    );
+    if (completionInfo && !restoringEarliestOriginal) {
+      alert(`章节“${itemName}”已经在 ${completionInfo.date} 的任务“${completionInfo.taskName}”中完成。\n其他任务不能再次标记该章节完成。`);
+      return;
+    }
+  }
+  checkbox.checked = !checkbox.checked;
+  card.dataset.completed = checkbox.checked ? 'true' : 'false';
+  card.style.borderColor = checkbox.checked ? 'rgba(102,187,106,.65)' : 'var(--border)';
+  card.style.background = checkbox.checked ? 'rgba(102,187,106,.10)' : 'rgba(255,255,255,.015)';
+  if (status) {
+    status.textContent = checkbox.checked ? '✓ 本次完成' : '进行中';
+    status.style.color = checkbox.checked ? '#66bb6a' : 'var(--muted)';
+  }
+}
+
+function taskNamedItemRemove(itemId) {
+  document.querySelector(`.task-named-item-card[data-item-id="${itemId}"]`)?.remove();
+  taskRecalculateNamedItemTotals();
+  const templateId = document.getElementById('task_named_item_editor')?.dataset.templateId || '';
+  taskUpdateNamedItemSuggestion(templateId);
+}
+
+function taskUpdateNamedItemSuggestion(templateId, sourceItemId = '', sourceName = '') {
+  const host = document.getElementById('task_named_item_suggestion');
+  if (!host) return;
+  const template = getTaskTemplateById(templateId);
+  const activeItems = [...(template?.namedItems || [])].filter(item => !item.archived).sort((a, b) => a.order - b.order);
+  const selectedCards = [...document.querySelectorAll('.task-named-item-card')];
+  const selectedIds = new Set(selectedCards.map(card => card.dataset.itemId));
+  const completedIds = taskCompletedNamedItemIds(templateId);
+  const lastCard = selectedCards[selectedCards.length - 1];
+  const anchorId = sourceItemId || lastCard?.dataset.itemId || '';
+  const anchorName = sourceName || lastCard?.dataset.itemName || '';
+  const anchorIndex = activeItems.findIndex(item => item.id === anchorId);
+  let suggestion = anchorIndex >= 0
+    ? activeItems.slice(anchorIndex + 1).find(item => !selectedIds.has(item.id) && !completedIds.has(item.id))
+    : null;
+  let inferred = false;
+  if (!suggestion && anchorName) {
+    const nextName = inferNextNamedItemName(anchorName, (template?.namedItems || []).map(item => item.name));
+    if (nextName) {
+      suggestion = { id: '', name: nextName };
+      inferred = true;
+    }
+  }
+  if (!suggestion) {
+    host.style.display = 'none';
+    host.innerHTML = '';
+    delete host.dataset.suggestionName;
+    delete host.dataset.templateId;
+    return;
+  }
+  host.dataset.suggestionName = suggestion.name;
+  host.dataset.templateId = templateId;
+  host.style.display = '';
+  host.innerHTML = `<button type="button" class="btn btn-ghost btn-sm"
+    onclick="taskAcceptNamedItemSuggestion()">
+    💡 建议下一项：${escHtmlApp(suggestion.name)}${inferred ? '（名称推测）' : ''}
+  </button>`;
+}
+
+function taskAcceptNamedItemSuggestion() {
+  const host = document.getElementById('task_named_item_suggestion');
+  if (!host?.dataset.suggestionName) return;
+  taskNamedItemAdd(host.dataset.templateId || '', host.dataset.suggestionName);
+}
+
+function taskCollectNamedItemAllocations(validate = true) {
+  const editor = document.getElementById('task_named_item_editor');
+  if (!editor) return [];
+  const quantityEnabled = editor.dataset.quantityEnabled === 'true';
+  const rows = [...document.querySelectorAll('.task-named-item-card')];
+  if (!rows.length) return [];
+  const totalMinutes = Number(document.getElementById('task_min')?.value);
+  const quantityRaw = document.getElementById('task_qty')?.value ?? '';
+  const totalQuantity = quantityRaw === '' ? null : Number(quantityRaw);
+  const minuteShare = Number.isFinite(totalMinutes) && totalMinutes > 0 ? totalMinutes / rows.length : 0;
+  const quantityShare = quantityEnabled && Number.isFinite(totalQuantity) && totalQuantity > 0
+    ? totalQuantity / rows.length
+    : null;
+  return rows.map(row => ({
+      itemId: row.dataset.itemId,
+      itemName: row.dataset.itemName,
+      minutes: minuteShare,
+      quantity: quantityShare,
+      completed: Boolean(row.querySelector('.task-named-completed')?.checked),
+      isNew: row.dataset.new === 'true',
+    }));
+}
+
+function taskRecalculateNamedItemTotals() {
+  const editor = document.getElementById('task_named_item_editor');
+  const wrapper = document.getElementById('task_ordinal_editor');
+  if (!editor || !wrapper || wrapper.style.display === 'none') return;
+  const minutesInput = document.getElementById('task_min');
+  const quantityInput = document.getElementById('task_qty');
+  if (minutesInput) {
+    minutesInput.readOnly = false;
+    minutesInput.title = '';
+  }
+  if (quantityInput && editor.dataset.quantityEnabled === 'true') {
+    quantityInput.readOnly = false;
+    quantityInput.title = '';
+  }
+  autoCalcRate();
+}
+
+function taskCommitDraftNamedItems(template, allocations) {
+  if (!template || !Array.isArray(allocations)) return false;
+  const items = [...(template.namedItems || [])].sort((a, b) => a.order - b.order);
+  let changed = false;
+  allocations.forEach((allocation, allocationIndex) => {
+    if (!allocation.isNew || items.some(item => item.id === allocation.itemId)) return;
+    const previousAllocation = allocations.slice(0, allocationIndex).reverse()
+      .find(item => items.some(existing => existing.id === item.itemId));
+    const previousIndex = previousAllocation ? items.findIndex(item => item.id === previousAllocation.itemId) : -1;
+    const insertAt = previousIndex >= 0 ? previousIndex + 1 : items.length;
+    items.splice(insertAt, 0, {
+      id: allocation.itemId,
+      name: allocation.itemName,
+      order: insertAt,
+      archived: false,
+    });
+    changed = true;
+  });
+  if (changed) template.namedItems = items.map((item, index) => ({ ...item, order: index }));
+  return changed;
+}
+
+function taskOrdinalAdd(templateId) {
+  const input = document.getElementById('task_ordinal_input');
+  const raw = String(input?.value || '').trim();
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isInteger(value) || value <= 0) {
+    alert('序数必须是大于 0 的整数。');
+    return;
+  }
+  const template = getTaskTemplateById(templateId);
+  const goal = template ? getForecastGoalByTemplate(templateId) : null;
+  if ((goal?.mode === 'chapter' || goal?.mode === 'chapterQuantity') &&
+    (value < goal.startOrdinal || value > goal.endOrdinal)) {
+    alert(`序数必须在预测目标范围第 ${goal.startOrdinal}-${goal.endOrdinal}${goal.ordinalUnit}内。`);
+    return;
+  }
+  const existing = forecastSelectedChapters('.task-chapter-involved');
+  const currentUnit = document.getElementById('task_template_ordinal_unit')?.value.trim() ||
+    document.getElementById('task_new_ordinal_unit')?.value.trim() || template?.ordinalUnit || '';
+  if (existing.includes(value)) {
+    alert(`第${value}${currentUnit}已经添加。`);
+    return;
+  }
+  const completed = forecastSelectedChapters('.task-chapter-completed');
+  const cards = document.getElementById('task_ordinal_cards');
+  if (cards) {
+    const values = [...existing, value].sort((a, b) => a - b);
+    cards.innerHTML = values.map(item => taskOrdinalCardHtml(item, currentUnit, completed.includes(item))).join('');
+  }
+  if (input) input.value = '';
+}
+
+function taskOrdinalRemove(value) {
+  document.querySelector(`.task-ordinal-card[data-ordinal="${value}"]`)?.remove();
+}
+
+function forecastChapterCheckboxChanged(chapter, kind, checked) {
+  const involved = [...document.querySelectorAll('.task-chapter-involved')]
+    .find(input => Number(input.value) === chapter);
+  const completed = [...document.querySelectorAll('.task-chapter-completed')]
+    .find(input => Number(input.value) === chapter);
+  if (kind === 'completed' && checked && involved) {
+    involved.checked = true;
+    if (completed) completed.disabled = false;
+  }
+  if (kind === 'involved' && completed) {
+    completed.disabled = !checked;
+    if (!checked) completed.checked = false;
+  }
+}
+
+function forecastSelectedChapters(selector) {
+  return [...document.querySelectorAll(selector)]
+    .filter(input => input.checked)
+    .map(input => Number(input.value))
+    .filter(Number.isInteger)
+    .sort((a, b) => a - b);
+}
+
+function forecastPrimaryTargetLabel(goal) {
+  if (!goal.mode) return '模板单位均已关闭 · 需要重新配置';
+  if (goal.mode === 'quantity') return `数量目标 · ${goal.quantityUnit}`;
+  return `命名章节目标${goal.mode === 'chapterQuantity' ? ' · 题数辅助估算' : ''}`;
+}
+
+function forecastLinkedTasks(goal) {
+  return getForecastTaskEntries().filter(entry => resolveTaskTemplateId(entry.task) === goal.templateId);
+}
+
+function forecastQuantityResult(goal, entries) {
+  const valid = entries.filter(({ task }) =>
+    Number.isInteger(Number(task.quantity)) &&
+    Number(task.quantity) > 0 &&
+    Number.isInteger(Number(task.minutes)) &&
+    Number(task.minutes) > 0 &&
+    task.quantityUnit === goal.quantityUnit
+  );
+  const completed = valid.reduce((sum, entry) => sum + Number(entry.task.quantity), 0);
+  const minutes = valid.reduce((sum, entry) => sum + Number(entry.task.minutes), 0);
+  const speed = minutes > 0 ? completed / minutes : 0;
+  const remaining = Math.max(0, Number(goal.totalQuantity) - completed);
+  const complete = remaining === 0;
+  return {
+    goal,
+    complete,
+    ready: complete || speed > 0,
+    reason: complete || speed > 0 ? '' : '至少需要一条题数、单位和时长都有效的任务记录。',
+    requiredMinutes: complete ? 0 : remaining / speed,
+    progress: Number(goal.totalQuantity) > 0 ? Math.min(100, completed / Number(goal.totalQuantity) * 100) : 0,
+    completed,
+    remaining,
+    speed,
+    excluded: entries.length - valid.length,
+    summary: `已完成 ${completed} / ${goal.totalQuantity} ${goal.quantityUnit}`,
+    efficiency: speed > 0 ? `${speed.toFixed(2)} ${goal.quantityUnit}/分钟` : '数据不足',
+  };
+}
+
+function forecastActiveNamedItems(goal) {
+  return [...(Array.isArray(goal.namedItems) ? goal.namedItems : [])]
+    .filter(item => !item.archived && item.id && String(item.name || '').trim())
+    .sort((a, b) => Number(a.order) - Number(b.order));
+}
+
+function forecastNamedItemGroups(goal, entries, requireQuantity = false) {
+  const items = forecastActiveNamedItems(goal);
+  const groups = new Map(items.map((item, index) => [item.id, {
+    itemId: item.id,
+    name: String(item.name || '').trim(),
+    order: index,
+    minutes: 0,
+    quantity: 0,
+    quantityMinutes: 0,
+    speedQuantity: 0,
+    completed: false,
+  }]));
+  const byName = new Map(items.map(item => [String(item.name || '').trim().toLocaleLowerCase(), item.id]));
+  let excluded = 0;
+  entries.forEach(({ task }) => {
+    let contributed = false;
+    taskNamedItemAllocations(task).forEach(allocation => {
+      const fallbackId = byName.get(allocation.itemName.toLocaleLowerCase());
+      const group = groups.get(allocation.itemId) || groups.get(fallbackId);
+      if (!group) return;
+      const minutes = Number(allocation.minutes);
+      const quantity = Number(allocation.quantity);
+      const validMinutes = Number.isFinite(minutes) && minutes > 0;
+      const validQuantity = Number.isFinite(quantity) && quantity > 0 &&
+        task.quantityUnit === goal.quantityUnit;
+      if (validMinutes) group.minutes += minutes;
+      if (validQuantity) group.quantity += quantity;
+      if (validMinutes && validQuantity) {
+        group.quantityMinutes += minutes;
+        group.speedQuantity += quantity;
+      }
+      if (allocation.completed) group.completed = true;
+      if (validMinutes && (!requireQuantity || validQuantity)) contributed = true;
+    });
+    if (!contributed) excluded++;
+  });
+  return { groups: [...groups.values()].sort((a, b) => a.order - b.order), excluded };
+}
+
+function forecastChapterResult(goal, entries) {
+  const { groups, excluded } = forecastNamedItemGroups(goal, entries, false);
+  const chapterCount = groups.length;
+  const completedGroups = groups.filter(group => group.completed);
+  const validCompletedGroups = completedGroups.filter(group => group.minutes > 0);
+  const completed = completedGroups.length;
+  const remaining = chapterCount - completed;
+  const complete = chapterCount > 0 && remaining === 0;
+  const baseItems = groups.map(group => ({ ...group, estimatedRemainingMinutes: 0, estimatedRemainingQuantity: null }));
+  if (complete) {
+    return {
+      goal, complete: true, ready: true, reason: '', warning: '', requiredMinutes: 0,
+      progress: 100, completed, remaining: 0, speed: 0, excluded, items: baseItems,
+      summary: `已完成 ${completed} / ${chapterCount} 个章节`,
+      efficiency: '目标已完成',
+    };
+  }
+  if (!validCompletedGroups.length) {
+    return {
+      goal, complete: false, ready: false,
+      reason: '至少需要完成并勾选一个具有有效时长的章节后才能估算。',
+      warning: '', requiredMinutes: null, progress: chapterCount ? completed / chapterCount * 100 : 0,
+      completed, remaining, speed: 0, excluded, items: baseItems,
+      summary: `已完成 ${completed} / ${chapterCount} 个章节`,
+      efficiency: '数据不足',
+    };
+  }
+  const averageMinutes = validCompletedGroups.reduce((sum, group) => sum + group.minutes, 0) / validCompletedGroups.length;
+  const items = groups.map(group => ({
+    ...group,
+    estimatedRemainingMinutes: group.completed ? 0 : Math.max(0, averageMinutes - group.minutes),
+    estimatedRemainingQuantity: null,
+  }));
+  const requiredMinutes = items.reduce((sum, item) => sum + item.estimatedRemainingMinutes, 0);
+  return {
+    goal, complete: false, ready: true, reason: '', warning: '', requiredMinutes,
+    progress: chapterCount ? completed / chapterCount * 100 : 0, completed, remaining,
+    speed: averageMinutes > 0 ? 1 / averageMinutes : 0, excluded, items,
+    averageMinutes,
+    summary: `已完成 ${completed} / ${chapterCount} 个章节`,
+    efficiency: `平均 ${averageMinutes.toFixed(1)} 分钟/章节`,
+  };
+}
+
+function forecastChapterQuantityResult(goal, entries) {
+  const { groups, excluded } = forecastNamedItemGroups(goal, entries, true);
+  const chapterCount = groups.length;
+  const completedGroups = groups.filter(group => group.completed);
+  const validCompletedGroups = completedGroups.filter(group => group.quantity > 0 && group.quantityMinutes > 0);
+  const completed = completedGroups.length;
+  const remaining = chapterCount - completed;
+  const complete = chapterCount > 0 && remaining === 0;
+  const baseItems = groups.map(group => ({ ...group, estimatedRemainingMinutes: 0, estimatedRemainingQuantity: 0 }));
+  if (complete) {
+    return {
+      goal, complete: true, ready: true, reason: '', warning: '', requiredMinutes: 0,
+      progress: 100, completed, remaining: 0, speed: 0, excluded, items: baseItems,
+      summary: `已完成 ${completed} / ${chapterCount} 个章节`,
+      efficiency: '目标已完成',
+    };
+  }
+  const totalQuestions = groups.reduce((sum, group) => sum + group.speedQuantity, 0);
+  const questionMinutes = groups.reduce((sum, group) => sum + group.quantityMinutes, 0);
+  const questionSpeed = questionMinutes > 0 ? totalQuestions / questionMinutes : 0;
+  if (!validCompletedGroups.length || !questionSpeed) {
+    return {
+      goal, complete: false, ready: false,
+      reason: `至少需要完成一个章节，并为它记录有效的${goal.quantityUnit || '数量'}和时长。`,
+      warning: '', requiredMinutes: null, progress: chapterCount ? completed / chapterCount * 100 : 0,
+      completed, remaining, speed: questionSpeed, excluded, items: baseItems,
+      summary: `已完成 ${completed} / ${chapterCount} 个章节`,
+      efficiency: questionSpeed > 0 ? `${questionSpeed.toFixed(2)} ${goal.quantityUnit}/分钟` : '数据不足',
+    };
+  }
+  const averageQuestions = validCompletedGroups.reduce((sum, group) => sum + group.quantity, 0) / validCompletedGroups.length;
+  const averageMinutes = validCompletedGroups.reduce((sum, group) => sum + group.minutes, 0) / validCompletedGroups.length;
+  const items = groups.map(group => {
+    const estimatedRemainingQuantity = group.completed ? 0 : Math.max(0, averageQuestions - group.quantity);
+    return {
+      ...group,
+      estimatedRemainingQuantity,
+      estimatedRemainingMinutes: estimatedRemainingQuantity / questionSpeed,
+      quantityExceededAverage: !group.completed && group.quantity >= averageQuestions,
+    };
+  });
+  const exceededCount = items.filter(item => item.quantityExceededAverage).length;
+  const requiredMinutes = items.reduce((sum, item) => sum + item.estimatedRemainingMinutes, 0);
+  return {
+    goal, complete: false, ready: true, reason: '',
+    warning: exceededCount
+      ? `${exceededCount} 个未完成章节的累计${goal.quantityUnit || '数量'}已达到或超过已完成章节平均值，这些章节暂按剩余 0 分钟估算，请确认是否应勾选完成。`
+      : '',
+    requiredMinutes,
+    progress: chapterCount ? completed / chapterCount * 100 : 0, completed, remaining,
+    speed: questionSpeed, excluded, items, averageQuestions, averageMinutes,
+    summary: `已完成 ${completed} / ${chapterCount} 个章节 · 平均 ${averageQuestions.toFixed(1)} ${goal.quantityUnit}/章节`,
+    efficiency: `${questionSpeed.toFixed(2)} ${goal.quantityUnit}/分钟 · 平均 ${averageMinutes.toFixed(1)} 分钟/章节`,
+  };
+}
+
+function calculateForecastGoal(goal) {
+  const context = forecastGoalContext(goal);
+  const invalid = reason => ({
+    goal: context,
+    complete: false,
+    ready: false,
+    configurationInvalid: true,
+    reason,
+    requiredMinutes: null,
+    progress: 0,
+    completed: 0,
+    remaining: 0,
+    speed: 0,
+    excluded: 0,
+    items: [],
+    warning: '',
+    summary: '预测配置不完整',
+    efficiency: '暂停计算',
+  });
+  if (!context.mode) return invalid('模板的序数和数量开关均已关闭，请先开启至少一个单位并重新配置目标。');
+  if (context.mode === 'quantity' &&
+    (!Number.isInteger(Number(context.totalQuantity)) || Number(context.totalQuantity) <= 0)) {
+    return invalid('当前主目标已切换为数量，请编辑目标并填写总任务量。');
+  }
+  if ((context.mode === 'chapter' || context.mode === 'chapterQuantity') &&
+    !forecastActiveNamedItems(context).length) {
+    return invalid('当前模板没有活动章节，请先在共享章节库中建立或恢复章节。');
+  }
+  const entries = forecastLinkedTasks(context);
+  if (context.mode === 'quantity') return forecastQuantityResult(context, entries);
+  if (context.mode === 'chapter') return forecastChapterResult(context, entries);
+  return forecastChapterQuantityResult(context, entries);
+}
+
+function forecastDateAfter(dateStr, days) {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  date.setDate(date.getDate() + days);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function forecastActualMinutesForDay(dateStr) {
+  const day = state.data[dateStr];
+  if (!day || !Array.isArray(day.sessions)) return 0;
+  return day.sessions.reduce((sum, session) => {
+    if (isUnavailableSession(session)) return sum;
+    return sum + (Number(session.actualMinutes) || 0);
+  }, 0);
+}
+
+function forecastCapacityStats(settings = getForecastSettings()) {
+  if (settings.capacityMode === 'manual') {
+    const averageMinutes = Number(settings.manualDailyMinutes) || 0;
+    return {
+      source: 'manual',
+      valid: averageMinutes > 0,
+      startDate: '',
+      endDate: '',
+      averageMinutes,
+      eligibleDays: 0,
+      excludedDays: 0,
+      totalActualMinutes: 0,
+    };
+  }
+  const start = settings.capacityStartDate;
+  const end = settings.capacityTrackLatest ? getTodayStr() : settings.capacityEndDate;
+  if (!start || !end || start > end) {
+    return { source: 'range', valid: false, startDate: start, endDate: end, averageMinutes: 0, eligibleDays: 0, excludedDays: 0, totalActualMinutes: 0 };
+  }
+  let cursor = start;
+  let eligibleDays = 0;
+  let excludedDays = 0;
+  let totalActualMinutes = 0;
+  while (cursor <= end) {
+    const day = state.data[cursor];
+    if (day?.excludeFromRating) {
+      excludedDays++;
+    } else {
+      eligibleDays++;
+      totalActualMinutes += forecastActualMinutesForDay(cursor);
+    }
+    cursor = forecastDateAfter(cursor, 1);
+  }
+  return {
+    source: 'range',
+    valid: eligibleDays > 0,
+    startDate: start,
+    endDate: end,
+    averageMinutes: eligibleDays > 0 ? totalActualMinutes / eligibleDays : 0,
+    eligibleDays,
+    excludedDays,
+    totalActualMinutes,
+  };
+}
+
+function calculateForecastOverall(results) {
+  const settings = getForecastSettings();
+  const capacity = forecastCapacityStats(settings);
+  const unfinished = results.filter(result => !result.complete);
+  const insufficient = unfinished.filter(result => !result.ready);
+  const today = getTodayStr();
+  const todayExcluded = Boolean(state.data[today]?.excludeFromRating);
+  const todayUsed = todayExcluded ? 0 : forecastActualMinutesForDay(today);
+  if (!unfinished.length) {
+    return { label: '全部目标已完成', totalMinutes: 0, todayUsed, insufficient: 0, capacity };
+  }
+  if (insufficient.length) {
+    const needsConfiguration = insufficient.filter(result => result.configurationInvalid).length;
+    return {
+      label: needsConfiguration
+        ? `${needsConfiguration} 个目标需要重新配置`
+        : `${insufficient.length} 个目标数据不足`,
+      totalMinutes: null,
+      todayUsed,
+      insufficient: insufficient.length,
+      capacity,
+    };
+  }
+  if (!capacity.valid || capacity.averageMinutes <= 0) {
+    return {
+      label: capacity.source === 'manual' ? '请设置有效的每日学习时长' : '历史日均实际学习时间不足',
+      totalMinutes: null,
+      todayUsed,
+      insufficient: 0,
+      capacity,
+    };
+  }
+  const totalMinutes = unfinished.reduce((sum, result) => sum + result.requiredMinutes, 0);
+  const availableToday = todayExcluded ? 0 : Math.max(0, capacity.averageMinutes - todayUsed);
+  if (totalMinutes <= availableToday) {
+    return { label: today, totalMinutes, todayUsed, insufficient: 0, capacity };
+  }
+  // 从明天起逐日分配学习能力；已标记“不参与评分”的日期不分配时长，也不计入完成天数。
+  let remainingMinutes = totalMinutes - availableToday;
+  let completionDate = today;
+  let guard = 0;
+  while (remainingMinutes > 0 && guard < 36600) {
+    completionDate = forecastDateAfter(completionDate, 1);
+    if (!state.data[completionDate]?.excludeFromRating) {
+      remainingMinutes -= capacity.averageMinutes;
+    }
+    guard++;
+  }
+  return {
+    label: completionDate,
+    totalMinutes,
+    todayUsed,
+    insufficient: 0,
+    capacity,
+  };
+}
+
+function forecastStartNew() {
+  state.forecastEditingId = null;
+  renderForecast();
+}
+
+function forecastEdit(id) {
+  state.forecastEditingId = id;
+  renderForecast();
+}
+
+function forecastNamedItemRecordsHtml(records = [], quantityUnit = '') {
+  if (!records.length) {
+    return '<div class="form-hint">该章节还没有关联的任务记录。</div>';
+  }
+  return `<div style="max-height:240px;overflow:auto">
+    <table style="width:100%;font-size:11px">
+      <thead><tr><th>日期</th><th>任务</th><th>活动类别</th><th>本章分钟</th><th>本章数量</th><th>任务总数量</th><th>状态</th></tr></thead>
+      <tbody>${records.map(record => `<tr>
+        <td class="fw-mono">${escHtmlApp(record.date)}</td>
+        <td>${escHtmlApp(record.taskName)}</td>
+        <td class="c-muted">${escHtmlApp(record.activityType || '-')}</td>
+        <td class="fw-mono">${forecastDisplayMetric(record.minutes)} 分钟</td>
+        <td class="fw-mono">${record.quantity == null ? '-' : `${forecastDisplayMetric(record.quantity)} ${escHtmlApp(record.quantityUnit || quantityUnit || '')}`}</td>
+        <td class="fw-mono">${record.taskTotalQuantity == null ? '-' : `${forecastDisplayMetric(record.taskTotalQuantity)} ${escHtmlApp(record.quantityUnit || quantityUnit || '')}`}</td>
+        <td style="color:${record.completed ? '#66bb6a' : 'var(--muted)'}">${record.completed ? '✓ 本次完成' : '进行中'}</td>
+      </tr>`).join('')}</tbody>
+    </table>
+  </div>
+  <div class="form-hint" style="margin-top:6px">“本章数量”是该任务分配给本章节的数量；一条任务选择多个章节时，任务总数量会平均分配。</div>`;
+}
+
+function forecastToggleNamedItemDetails(button) {
+  const details = button?.closest('.forecast-named-item-row')?.querySelector('.forecast-named-item-details');
+  if (!details) return;
+  const opening = details.style.display === 'none';
+  details.style.display = opening ? '' : 'none';
+  button.textContent = opening ? '收起明细' : `录入明细（${button.dataset.count || '0'}）`;
+}
+
+function forecastNamedItemRowHtml(item, itemProgress = null, quantityEnabled = false, quantityUnit = '') {
+  const archived = Boolean(item.archived);
+  const draft = Boolean(item.draft);
+  const hasProgress = Boolean(itemProgress && (itemProgress.minutes > 0 || itemProgress.quantity > 0));
+  const statusText = itemProgress?.completed ? '✓ 已完成' : hasProgress ? '进行中' : '未开始';
+  const statusColor = itemProgress?.completed ? '#66bb6a' : hasProgress ? 'var(--wake)' : 'var(--muted)';
+  return `<div class="forecast-named-item-row" data-item-id="${escHtmlApp(item.id)}" data-archived="${archived ? 'true' : 'false'}" data-draft="${draft ? 'true' : 'false'}"
+    style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:7px;background:rgba(255,255,255,.02)">
+    <input class="forecast-named-item-name" value="${escHtmlApp(item.name || '')}" maxlength="160"
+      ${archived ? 'disabled' : ''}
+      oninput="forecastRefreshNamedItemEditorState()"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur()}"
+      aria-label="命名章节名称">
+    <div style="display:flex;gap:5px;align-items:center">
+      ${!draft ? `<div style="display:flex;flex-direction:column;align-items:flex-end;margin-right:5px;font-size:10px;white-space:nowrap">
+        <span style="color:${statusColor}">${statusText}</span>
+        ${itemProgress?.completed ? `<span class="c-muted">${escHtmlApp(itemProgress.completionDate)} · ${escHtmlApp(itemProgress.completionTaskName)}</span>` : ''}
+        ${quantityEnabled ? `<span class="c-muted">已录入 ${forecastDisplayMetric(itemProgress?.quantity || 0)} ${escHtmlApp(quantityUnit || '数量')}</span>` : ''}
+      </div>` : ''}
+      ${quantityEnabled && !draft ? `<button type="button" class="btn btn-ghost btn-sm" data-count="${itemProgress?.records?.length || 0}" onclick="forecastToggleNamedItemDetails(this)">录入明细（${itemProgress?.records?.length || 0}）</button>` : ''}
+      ${archived
+        ? `<span class="c-muted" style="font-size:11px">已归档</span>
+           <button type="button" class="btn btn-ghost btn-sm" onclick="forecastRestoreNamedItem('${item.id}')">恢复</button>`
+        : `<button type="button" class="btn btn-ghost btn-sm" onclick="forecastMoveNamedItem('${item.id}',-1)" title="上移">↑</button>
+           <button type="button" class="btn btn-ghost btn-sm" onclick="forecastMoveNamedItem('${item.id}',1)" title="下移">↓</button>
+           <button type="button" class="btn btn-danger btn-sm" onclick="forecastRemoveNamedItem('${item.id}')" title="移除" aria-label="移除章节">－</button>`}
+    </div>
+    ${quantityEnabled && !draft ? `<div class="forecast-named-item-details" style="display:none;grid-column:1/-1;padding-top:8px;border-top:1px solid var(--border)">
+      ${forecastNamedItemRecordsHtml(itemProgress?.records || [], quantityUnit)}
+    </div>` : ''}
+  </div>`;
+}
+
+function forecastNamedItemsEditorHtml(items = [], templateId = '') {
+  const normalized = Array.isArray(items) ? items
+    .map((item, index) => ({
+      id: String(item?.id || uid()),
+      name: String(item?.name || '').trim(),
+      order: Number.isFinite(Number(item?.order)) ? Number(item.order) : index,
+      archived: Boolean(item?.archived),
+    }))
+    .filter(item => item.name)
+    : [];
+  const active = normalized.filter(item => !item.archived).sort((a, b) => a.order - b.order);
+  const archived = normalized.filter(item => item.archived).sort((a, b) => a.order - b.order);
+  const template = getTaskTemplateById(templateId);
+  const libraryProgress = templateId ? namedItemLibraryProgress(templateId) : { progress: new Map(), completedActive: 0, totalQuantity: 0 };
+  const lastActiveName = [...active].reverse().find(item => item.name)?.name || '';
+  const predictedName = inferNextNamedItemName(lastActiveName, normalized.map(item => item.name));
+  return `<div class="forecast-named-items-editor">
+    <label>命名章节清单 *</label>
+    ${template ? `<div class="form-hint" style="margin-top:5px">活动章节完成 ${libraryProgress.completedActive}/${active.length}${template.quantityEnabled ? ` · 已录入 ${forecastDisplayMetric(libraryProgress.totalQuantity)} ${escHtmlApp(template.quantityUnit || '数量')}` : ''}</div>` : ''}
+    <div style="max-height:min(45vh,360px);overflow-y:auto;margin-top:6px;border:1px solid var(--border);border-radius:8px;background:rgba(0,0,0,.08)">
+      <div id="forecast_named_items_active" style="display:grid;gap:7px;padding:8px">
+        ${active.map(item => forecastNamedItemRowHtml(item, libraryProgress.progress.get(item.id), Boolean(template?.quantityEnabled), template?.quantityUnit || '')).join('')}
+        <div id="forecast_named_items_empty" class="form-hint" style="${active.length ? 'display:none' : ''}">尚未添加章节。点击“＋”新增空白行。</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--card-bg, var(--surface))">
+      <button type="button" class="btn btn-primary btn-sm" onclick="forecastAddBlankNamedItem()" title="新增空白章节" aria-label="新增空白章节">＋</button>
+      <button type="button" id="forecast_named_item_predict" class="btn btn-ghost btn-sm"
+        onclick="forecastAddPredictedNamedItem()" ${predictedName ? '' : 'disabled'}>
+        ${predictedName ? `⚡＋ ${escHtmlApp(predictedName)}` : '⚡＋预测下一项'}
+      </button>
+      <span id="forecast_named_item_predict_hint" class="form-hint" style="margin:0">
+        ${predictedName ? '' : (lastActiveName ? '当前名称无法推测下一项' : '请先添加并填写一个章节')}
+      </span>
+    </div>
+    <details id="forecast_named_items_archived_wrap" style="margin-top:10px;${archived.length ? '' : 'display:none'}">
+      <summary style="cursor:pointer;color:var(--muted);font-size:12px">已归档章节（<span id="forecast_named_items_archived_count">${archived.length}</span>）</summary>
+      <div id="forecast_named_items_archived" style="display:grid;gap:7px;margin-top:7px">
+        ${archived.map(item => forecastNamedItemRowHtml(item, libraryProgress.progress.get(item.id), Boolean(template?.quantityEnabled), template?.quantityUnit || '')).join('')}
+      </div>
+    </details>
+    <div class="form-hint" style="margin-top:7px">名称在同一模板内不可重复；清单顺序会同步到完成预测和任务录入。已被历史任务引用的章节只能归档，不能物理删除。</div>
+  </div>`;
+}
+
+function forecastNamedItemRows() {
+  return [...document.querySelectorAll('.forecast-named-item-row')];
+}
+
+function forecastNamedItemNameExists(name, exceptId = '') {
+  const normalized = String(name || '').trim().toLocaleLowerCase();
+  return forecastNamedItemRows().some(row =>
+    row.dataset.itemId !== exceptId &&
+    String(row.querySelector('.forecast-named-item-name')?.value || '').trim().toLocaleLowerCase() === normalized
+  );
+}
+
+function forecastRefreshNamedItemEditorState() {
+  const activeHost = document.getElementById('forecast_named_items_active');
+  const archivedHost = document.getElementById('forecast_named_items_archived');
+  const empty = document.getElementById('forecast_named_items_empty');
+  const archivedWrap = document.getElementById('forecast_named_items_archived_wrap');
+  const archivedCount = document.getElementById('forecast_named_items_archived_count');
+  const predictButton = document.getElementById('forecast_named_item_predict');
+  const predictHint = document.getElementById('forecast_named_item_predict_hint');
+  const activeCount = activeHost?.querySelectorAll('.forecast-named-item-row').length || 0;
+  const archivedTotal = archivedHost?.querySelectorAll('.forecast-named-item-row').length || 0;
+  if (empty) empty.style.display = activeCount ? 'none' : '';
+  if (archivedWrap) archivedWrap.style.display = archivedTotal ? '' : 'none';
+  if (archivedCount) archivedCount.textContent = String(archivedTotal);
+  const activeRows = [...(activeHost?.querySelectorAll('.forecast-named-item-row') || [])];
+  const lastName = activeRows
+    .map(row => String(row.querySelector('.forecast-named-item-name')?.value || '').trim())
+    .reverse()
+    .find(Boolean) || '';
+  const existingNames = forecastNamedItemRows()
+    .map(row => String(row.querySelector('.forecast-named-item-name')?.value || '').trim())
+    .filter(Boolean);
+  const predictedName = inferNextNamedItemName(lastName, existingNames);
+  if (predictButton) {
+    predictButton.disabled = !predictedName;
+    predictButton.textContent = predictedName ? `⚡＋ ${predictedName}` : '⚡＋预测下一项';
+  }
+  if (predictHint) {
+    predictHint.textContent = predictedName ? '' : (lastName ? '当前名称无法推测下一项' : '请先添加并填写一个章节');
+  }
+}
+
+function chineseNamedItemNumberToValue(text) {
+  const digits = { '零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9 };
+  const units = { '十': 10, '百': 100, '千': 1000, '万': 10000, '亿': 100000000 };
+  const chars = [...String(text || '')];
+  if (!chars.length || chars.some(char => digits[char] === undefined && units[char] === undefined)) return null;
+  if (!chars.some(char => units[char] !== undefined)) {
+    const value = Number(chars.map(char => digits[char]).join(''));
+    return Number.isSafeInteger(value) ? value : null;
+  }
+  let total = 0;
+  let section = 0;
+  let number = 0;
+  chars.forEach(char => {
+    if (digits[char] !== undefined) {
+      number = digits[char];
+      return;
+    }
+    const unit = units[char];
+    if (unit < 10000) {
+      section += (number || 1) * unit;
+    } else {
+      section += number;
+      total += (section || 1) * unit;
+      section = 0;
+    }
+    number = 0;
+  });
+  const value = total + section + number;
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+function namedItemValueToChineseNumber(value) {
+  const digits = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+  const underTenThousand = number => {
+    const places = [
+      { value: 1000, label: '千' },
+      { value: 100, label: '百' },
+      { value: 10, label: '十' },
+      { value: 1, label: '' },
+    ];
+    let result = '';
+    let remainder = number;
+    let pendingZero = false;
+    places.forEach(place => {
+      const digit = Math.floor(remainder / place.value);
+      remainder %= place.value;
+      if (digit) {
+        if (pendingZero && result) result += '零';
+        result += digits[digit] + place.label;
+        pendingZero = false;
+      } else if (result && remainder) {
+        pendingZero = true;
+      }
+    });
+    return result.replace(/^一十/, '十');
+  };
+  const convert = number => {
+    if (number < 10000) return underTenThousand(number);
+    if (number < 100000000) {
+      const high = Math.floor(number / 10000);
+      const low = number % 10000;
+      return convert(high) + '万' + (low ? `${low < 1000 ? '零' : ''}${underTenThousand(low)}` : '');
+    }
+    const high = Math.floor(number / 100000000);
+    const low = number % 100000000;
+    return convert(high) + '亿' + (low ? `${low < 10000000 ? '零' : ''}${convert(low)}` : '');
+  };
+  if (!Number.isSafeInteger(value) || value < 0) return '';
+  return value === 0 ? '零' : convert(value);
+}
+
+function inferNextNamedItemName(name, existingNames = []) {
+  const source = String(name || '').trim();
+  const matches = [...source.matchAll(/\d+|[零〇一二两三四五六七八九十百千万亿]+/g)];
+  const match = matches[matches.length - 1];
+  if (!match) return '';
+  const token = match[0];
+  const isArabic = /^\d+$/.test(token);
+  const start = isArabic ? Number(token) : chineseNamedItemNumberToValue(token);
+  if (!Number.isSafeInteger(start)) return '';
+  const used = new Set(existingNames.map(value => String(value || '').trim().toLocaleLowerCase()));
+  for (let offset = 1; offset <= 1000; offset++) {
+    const nextNumber = isArabic
+      ? String(start + offset).padStart(token.length, '0')
+      : namedItemValueToChineseNumber(start + offset);
+    if (!nextNumber) return '';
+    const candidate = source.slice(0, match.index) + nextNumber + source.slice(match.index + token.length);
+    if (!used.has(candidate.toLocaleLowerCase())) return candidate;
+  }
+  return '';
+}
+
+function forecastAppendNamedItem(name = '') {
+  const host = document.getElementById('forecast_named_items_active');
+  if (!host) return;
+  const holder = document.createElement('div');
+  holder.innerHTML = forecastNamedItemRowHtml({ id: uid(), name, archived: false, draft: true });
+  const row = holder.firstElementChild;
+  const empty = document.getElementById('forecast_named_items_empty');
+  host.insertBefore(row, empty || null);
+  forecastRefreshNamedItemEditorState();
+  const input = row.querySelector('.forecast-named-item-name');
+  input?.focus();
+  if (name) input?.select();
+  row.scrollIntoView({ block: 'nearest' });
+}
+
+function forecastAddBlankNamedItem() {
+  forecastAppendNamedItem('');
+}
+
+function forecastAddPredictedNamedItem() {
+  const activeHost = document.getElementById('forecast_named_items_active');
+  const activeRows = [...(activeHost?.querySelectorAll('.forecast-named-item-row') || [])];
+  const lastName = activeRows
+    .map(row => String(row.querySelector('.forecast-named-item-name')?.value || '').trim())
+    .reverse()
+    .find(Boolean) || '';
+  const existingNames = forecastNamedItemRows()
+    .map(row => String(row.querySelector('.forecast-named-item-name')?.value || '').trim())
+    .filter(Boolean);
+  const predictedName = inferNextNamedItemName(lastName, existingNames);
+  if (!predictedName) return;
+  forecastAppendNamedItem(predictedName);
+}
+
+function forecastMoveNamedItem(id, direction) {
+  const row = forecastNamedItemRows().find(item => item.dataset.itemId === id && item.dataset.archived !== 'true');
+  if (!row || !row.parentElement) return;
+  if (direction < 0) {
+    const previous = row.previousElementSibling;
+    if (previous?.classList.contains('forecast-named-item-row')) row.parentElement.insertBefore(row, previous);
+  } else {
+    const next = row.nextElementSibling;
+    if (next?.classList.contains('forecast-named-item-row')) row.parentElement.insertBefore(next, row);
+  }
+}
+
+function forecastNamedItemIsReferenced(id) {
+  return getForecastTaskEntries().some(({ task }) =>
+    Array.isArray(task.namedItemAllocations) &&
+    task.namedItemAllocations.some(allocation => allocation?.itemId === id)
+  );
+}
+
+function forecastRemoveNamedItem(id) {
+  const row = forecastNamedItemRows().find(item => item.dataset.itemId === id);
+  if (!row) return;
+  if (!forecastNamedItemIsReferenced(id)) {
+    row.remove();
+    forecastRefreshNamedItemEditorState();
+    return;
+  }
+  const archivedHost = document.getElementById('forecast_named_items_archived');
+  if (!archivedHost) return;
+  row.dataset.archived = 'true';
+  const input = row.querySelector('.forecast-named-item-name');
+  if (input) input.disabled = true;
+  const actions = row.lastElementChild;
+  if (actions) {
+    actions.innerHTML = `<span class="c-muted" style="font-size:11px">已归档</span>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="forecastRestoreNamedItem('${id}')">恢复</button>`;
+  }
+  archivedHost.appendChild(row);
+  forecastRefreshNamedItemEditorState();
+}
+
+function forecastRestoreNamedItem(id) {
+  const row = forecastNamedItemRows().find(item => item.dataset.itemId === id && item.dataset.archived === 'true');
+  if (!row) return;
+  const name = String(row.querySelector('.forecast-named-item-name')?.value || '').trim();
+  if (forecastNamedItemNameExists(name, id)) {
+    alert(`活动清单中已经存在“${name}”，请先处理重名章节。`);
+    return;
+  }
+  const activeHost = document.getElementById('forecast_named_items_active');
+  if (!activeHost) return;
+  row.dataset.archived = 'false';
+  const input = row.querySelector('.forecast-named-item-name');
+  if (input) input.disabled = false;
+  const actions = row.lastElementChild;
+  if (actions) {
+    actions.innerHTML = `<button type="button" class="btn btn-ghost btn-sm" onclick="forecastMoveNamedItem('${id}',-1)" title="上移">↑</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="forecastMoveNamedItem('${id}',1)" title="下移">↓</button>
+      <button type="button" class="btn btn-danger btn-sm" onclick="forecastRemoveNamedItem('${id}')">移除</button>`;
+  }
+  const empty = document.getElementById('forecast_named_items_empty');
+  activeHost.insertBefore(row, empty || null);
+  forecastRefreshNamedItemEditorState();
+}
+
+function forecastCollectNamedItems() {
+  const activeHost = document.getElementById('forecast_named_items_active');
+  const archivedHost = document.getElementById('forecast_named_items_archived');
+  const active = [...(activeHost?.querySelectorAll('.forecast-named-item-row') || [])];
+  const archived = [...(archivedHost?.querySelectorAll('.forecast-named-item-row') || [])];
+  return [...active, ...archived]
+    .map(row => ({
+      id: row.dataset.itemId,
+      name: String(row.querySelector('.forecast-named-item-name')?.value || '').trim(),
+      archived: row.dataset.archived === 'true',
+      draft: row.dataset.draft === 'true',
+    }))
+    .filter(item => item.name || !item.draft)
+    .map((item, index) => ({
+      id: item.id,
+      name: item.name,
+      order: index,
+      archived: item.archived,
+    }));
+}
+
+function forecastUpdateGoalFields(updateName = false) {
+  const templateId = document.getElementById('forecast_goal_template')?.value || '';
+  const template = getTaskTemplates().find(item => item.id === templateId);
+  const mode = forecastModeFromTemplate(template);
+  const modeLabel = document.getElementById('forecast_goal_primary_label');
+  if (modeLabel) {
+    const namedItemEnabled = template?.namedItemEnabled ?? template?.ordinalEnabled;
+    modeLabel.value = namedItemEnabled
+      ? `命名章节主目标${template.quantityEnabled ? '（题数辅助估算）' : ''}`
+      : template?.quantityEnabled
+        ? `数量主目标：${template.quantityUnit}`
+        : '请先在模板库开启单位';
+  }
+  const quantityGroup = document.getElementById('forecast_quantity_group');
+  const totalField = document.getElementById('forecast_total_field');
+  const chapterGroup = document.getElementById('forecast_chapter_group');
+  if (quantityGroup) quantityGroup.style.display = mode === 'quantity' || mode === 'chapterQuantity' ? 'grid' : 'none';
+  if (totalField) totalField.style.display = mode === 'quantity' ? '' : 'none';
+  if (chapterGroup) chapterGroup.style.display = mode === 'chapter' || mode === 'chapterQuantity' ? 'grid' : 'none';
+  if (chapterGroup && (mode === 'chapter' || mode === 'chapterQuantity') && updateName) {
+    chapterGroup.innerHTML = forecastNamedItemsEditorHtml(template?.namedItems || [], template?.id || '');
+  }
+  const unit = document.getElementById('forecast_goal_unit');
+  if (unit) unit.value = template?.quantityUnit || '';
+  if (updateName) {
+    const name = document.getElementById('forecast_goal_name');
+    if (name && !name.value.trim() && template) name.value = forecastTemplateLabel(template);
+  }
+}
+
+async function forecastSaveCapacityRange() {
+  const capacityMode = document.getElementById('forecast_capacity_mode')?.value === 'manual'
+    ? 'manual'
+    : 'range';
+  const manualDailyMinutes = Number(document.getElementById('forecast_manual_daily_minutes')?.value);
+  const startDate = document.getElementById('forecast_capacity_start')?.value || '';
+  const trackLatest = Boolean(document.getElementById('forecast_capacity_track_latest')?.checked);
+  const endDate = trackLatest
+    ? getTodayStr()
+    : document.getElementById('forecast_capacity_end')?.value || '';
+  if (capacityMode === 'manual' &&
+    (!Number.isInteger(manualDailyMinutes) || manualDailyMinutes <= 0 || manualDailyMinutes > 1440)) {
+    alert('手动每日学习时长必须是 1 至 1440 之间的整数分钟。');
+    return;
+  }
+  if (capacityMode === 'range' && (!startDate || !endDate || startDate > endDate)) {
+    alert('请选择有效的统计起止日期，结束日期不能早于开始日期。');
+    return;
+  }
+  const settings = getForecastSettings();
+  settings.capacityMode = capacityMode;
+  if (capacityMode === 'manual') settings.manualDailyMinutes = manualDailyMinutes;
+  settings.capacityStartDate = startDate;
+  settings.capacityEndDate = endDate;
+  settings.capacityTrackLatest = trackLatest;
+  await saveAllStorage();
+  renderForecast();
+}
+
+function forecastToggleCapacityMode() {
+  const manual = document.getElementById('forecast_capacity_mode')?.value === 'manual';
+  const rangePanel = document.getElementById('forecast_capacity_range_panel');
+  const manualPanel = document.getElementById('forecast_capacity_manual_panel');
+  if (rangePanel) rangePanel.style.display = manual ? 'none' : '';
+  if (manualPanel) manualPanel.style.display = manual ? '' : 'none';
+  if (!manual) forecastApplyCapacityTrackingUi();
+}
+
+function forecastToggleCapacityTracking() {
+  const trackLatest = Boolean(document.getElementById('forecast_capacity_track_latest')?.checked);
+  if (trackLatest) editableDatePicked('forecast_capacity_end', getTodayStr());
+  forecastApplyCapacityTrackingUi();
+}
+
+function forecastApplyCapacityTrackingUi() {
+  const trackLatest = Boolean(document.getElementById('forecast_capacity_track_latest')?.checked);
+  const wrap = document.getElementById('forecast_capacity_end_wrap');
+  if (!wrap) return;
+  wrap.querySelectorAll('input:not([type="hidden"]), button').forEach(element => {
+    element.disabled = trackLatest;
+  });
+  wrap.style.opacity = trackLatest ? '.6' : '';
+  wrap.title = trackLatest ? '已跟踪今天，结束日期会每天自动更新' : '';
+}
+
+async function forecastSaveGoal() {
+  const templateId = document.getElementById('forecast_goal_template')?.value || '';
+  const template = getTaskTemplates().find(item => item.id === templateId);
+  const name = document.getElementById('forecast_goal_name')?.value.trim() || '';
+  const mode = forecastModeFromTemplate(template);
+  const goals = getForecastGoals();
+  const existingIndex = goals.findIndex(goal => goal.id === state.forecastEditingId);
+  const existing = existingIndex >= 0 ? goals[existingIndex] : null;
+  if (!template) { alert('请选择任务模板。'); return; }
+  if (!name) { alert('请填写目标名称。'); return; }
+  if (!mode) {
+    alert('该模板没有开启命名章节记录或数量记录，不能创建完成预测目标。');
+    return;
+  }
+  if (goals.some(goal => goal.templateId === templateId && goal.id !== existing?.id)) {
+    alert('该模板已经绑定一个完成预测目标。每个模板只能绑定一个目标。');
+    return;
+  }
+  if ((mode === 'quantity' || mode === 'chapterQuantity') && !template.quantityUnit) {
+    alert('该模式要求模板先设置数量单位。请到模板库补充后再创建目标。');
+    return;
+  }
+
+  const totalQuantity = Number(document.getElementById('forecast_goal_total')?.value);
+  const namedMode = mode === 'chapter' || mode === 'chapterQuantity';
+  const namedItems = namedMode ? forecastCollectNamedItems() : [];
+  const activeNamedItems = namedItems.filter(item => !item.archived);
+  if (mode === 'quantity' && (!Number.isInteger(totalQuantity) || totalQuantity <= 0)) {
+    alert('总任务量必须是大于 0 的整数。');
+    return;
+  }
+  if (namedMode) {
+    if (!activeNamedItems.length) {
+      alert('命名章节目标必须至少保留一个未归档章节。');
+      return;
+    }
+    if (namedItems.some(item => !item.name)) {
+      alert('章节名称不能为空。');
+      return;
+    }
+    const normalizedNames = namedItems.map(item => item.name.toLocaleLowerCase());
+    if (new Set(normalizedNames).size !== normalizedNames.length) {
+      alert('同一个预测目标内不能存在完全同名的章节。');
+      return;
+    }
+  }
+
+  const now = new Date().toISOString();
+  const saved = {
+    id: existing?.id || uid(),
+    templateId,
+    name,
+    totalQuantity: mode === 'quantity' ? totalQuantity : null,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+  if (namedMode) {
+    template.namedItems = namedItems;
+    template.namedItemEnabled = true;
+    template.ordinalEnabled = true;
+  }
+  if (existingIndex >= 0) goals[existingIndex] = saved;
+  else goals.push(saved);
+  state.forecastEditingId = saved.id;
+  await saveAllStorage();
+  renderForecast();
+}
+
+async function forecastDelete(id) {
+  const goal = getForecastGoals().find(item => item.id === id);
+  if (!goal || !confirm(`确定删除完成预测目标「${goal.name}」？任务记录不会被删除。`)) return;
+  state.data.__forecastGoals__ = getForecastGoals().filter(item => item.id !== id);
+  if (state.forecastEditingId === id) state.forecastEditingId = null;
+  await saveAllStorage();
+  renderForecast();
+}
+
+function forecastGoalFormHtml() {
+  const goals = getForecastGoals();
+  const editing = goals.find(goal => goal.id === state.forecastEditingId) || null;
+  const templates = getTaskTemplates();
+  const boundIds = new Set(goals.filter(goal => goal.id !== editing?.id).map(goal => goal.templateId));
+  const editingTemplate = getTaskTemplates().find(template => template.id === editing?.templateId);
+  const mode = forecastModeFromTemplate(editingTemplate);
+  return `<div class="card forecast-editor">
+    <div class="card-title">${editing ? '编辑预测目标' : '新建预测目标'}</div>
+    ${templates.length ? `<div class="form-grid forecast-goal-grid">
+      <div class="form-group">
+        <label>任务模板 *</label>
+        <select id="forecast_goal_template" onchange="forecastUpdateGoalFields(true)" ${editing ? 'disabled' : ''}>
+          <option value="">-- 选择模板 --</option>
+          ${templates.map(template => `<option value="${template.id}"
+            ${template.id === editing?.templateId ? 'selected' : ''}
+            ${boundIds.has(template.id) || !forecastModeFromTemplate(template) ? 'disabled' : ''}>${escHtmlApp(forecastTemplateLabel(template))}${boundIds.has(template.id) ? '（已绑定）' : !forecastModeFromTemplate(template) ? '（未开启单位）' : ''}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>目标名称 *</label>
+        <input id="forecast_goal_name" value="${escHtmlApp(editing?.name || '')}" placeholder="例：完成数学800题">
+      </div>
+      <div class="form-group">
+        <label>预测主目标</label>
+        <input id="forecast_goal_primary_label" readonly value="${(editingTemplate?.namedItemEnabled ?? editingTemplate?.ordinalEnabled) ? `命名章节主目标${editingTemplate.quantityEnabled ? '（题数辅助估算）' : ''}` : editingTemplate?.quantityEnabled ? `数量主目标：${escHtmlApp(editingTemplate.quantityUnit)}` : '请先在模板库开启单位'}">
+        <div class="form-hint">命名章节开启时始终以章节清单为主目标。</div>
+      </div>
+    </div>
+    <div id="forecast_quantity_group" class="form-grid forecast-goal-grid">
+      <div class="form-group" id="forecast_total_field">
+        <label>总任务量 *</label>
+        <input type="number" id="forecast_goal_total" min="1" step="1" value="${editing?.totalQuantity ?? ''}">
+      </div>
+      <div class="form-group">
+        <label>数量单位</label>
+        <input id="forecast_goal_unit" readonly value="${escHtmlApp(editingTemplate?.quantityUnit || '')}">
+      </div>
+    </div>
+    <div id="forecast_chapter_group">
+      ${forecastNamedItemsEditorHtml(editingTemplate?.namedItems || [], editingTemplate?.id || '')}
+    </div>
+    <div class="forecast-editor-actions">
+      <button class="btn btn-success" onclick="forecastSaveGoal()">💾 保存预测目标</button>
+      <button class="btn btn-ghost" onclick="forecastStartNew()">新建空白目标</button>
+    </div>` : '<div class="empty-state"><p>请先在模板库建立任务模板。</p></div>'}
+  </div>`;
+}
+
+function forecastDisplayMetric(value) {
+  const number = Number(value) || 0;
+  return Number.isInteger(number) ? String(number) : number.toFixed(1);
+}
+
+function forecastNamedItemProgressHtml(result) {
+  if (!['chapter', 'chapterQuantity'].includes(result.goal.mode) || !Array.isArray(result.items)) return '';
+  const quantityEnabled = result.goal.mode === 'chapterQuantity';
+  return `<details style="margin-top:10px">
+    <summary style="cursor:pointer;font-size:12px;color:var(--muted)">逐章进度（${result.items.length} 项）</summary>
+    <div style="display:grid;gap:6px;max-height:360px;overflow-y:auto;margin-top:8px;padding-right:3px">
+      ${result.items.map(item => {
+        const hasProgress = item.minutes > 0 || item.quantity > 0;
+        const stateLabel = item.completed ? '✓ 已完成' : hasProgress ? '进行中' : '未开始';
+        const stateColor = item.completed ? 'var(--success)' : hasProgress ? 'var(--wake)' : 'var(--muted)';
+        let estimate = '';
+        if (!item.completed && result.ready) {
+          estimate = quantityEnabled
+            ? `预计剩余 ${forecastDisplayMetric(item.estimatedRemainingQuantity)} ${escHtmlApp(result.goal.quantityUnit)} · ${fmtMin(Math.ceil(item.estimatedRemainingMinutes), true)}`
+            : `预计剩余 ${fmtMin(Math.ceil(item.estimatedRemainingMinutes), true)}`;
+        }
+        return `<div style="display:grid;grid-template-columns:minmax(160px,1fr) auto;gap:8px;padding:8px;border:1px solid var(--border);border-radius:7px">
+          <div>
+            <b style="font-size:12px">${escHtmlApp(item.name)}</b>
+            ${item.quantityExceededAverage ? '<div class="c-wake" style="font-size:10px;margin-top:3px">累计数量已达到平均值，但尚未勾选完成</div>' : ''}
+          </div>
+          <div style="text-align:right;font-size:11px">
+            <div style="color:${stateColor}">${stateLabel}</div>
+            <div class="c-muted">累计 ${forecastDisplayMetric(item.minutes)} 分钟${quantityEnabled ? ` · ${forecastDisplayMetric(item.quantity)} ${escHtmlApp(result.goal.quantityUnit)}` : ''}</div>
+            ${estimate ? `<div>${estimate}</div>` : ''}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+  </details>`;
+}
+
+function forecastGoalCardsHtml(results) {
+  if (!results.length) return '<div class="empty-state"><p>暂无预测目标。</p></div>';
+  return `<div class="forecast-goal-list">${results.map(result => {
+    const status = result.complete
+      ? '<span class="forecast-status complete">已完成</span>'
+      : result.ready
+        ? `<span class="forecast-status ready">预计还需 ${fmtMin(Math.ceil(result.requiredMinutes), true)}</span>`
+        : result.configurationInvalid
+          ? '<span class="forecast-status insufficient">需要重新配置</span>'
+          : '<span class="forecast-status insufficient">数据不足</span>';
+    return `<div class="card forecast-goal-card">
+      <div class="forecast-goal-head">
+        <div>
+          <b>${escHtmlApp(result.goal.name)}</b>
+          <span>${escHtmlApp(forecastPrimaryTargetLabel(result.goal))}</span>
+        </div>
+        <div class="forecast-goal-actions">
+          <button class="btn btn-ghost btn-sm" onclick="forecastEdit('${result.goal.id}')">编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="forecastDelete('${result.goal.id}')">删除</button>
+        </div>
+      </div>
+      <div class="forecast-progress"><span style="width:${Math.max(0, Math.min(100, result.progress)).toFixed(2)}%"></span></div>
+      <div class="forecast-goal-stats">
+        <span>${escHtmlApp(result.summary)}</span>
+        <span>当前效率：${escHtmlApp(result.efficiency)}</span>
+        ${result.excluded ? `<span class="c-wake">${result.excluded} 条记录未计入</span>` : ''}
+      </div>
+      ${status}
+      ${result.warning ? `<div class="forecast-reason c-wake">${escHtmlApp(result.warning)}</div>` : ''}
+      ${result.reason ? `<div class="forecast-reason">${escHtmlApp(result.reason)}</div>` : ''}
+      ${forecastNamedItemProgressHtml(result)}
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function renderForecast() {
+  const host = document.getElementById('tab-forecast');
+  if (!host) return;
+  const templateManager = document.getElementById('template-named-items-manager');
+  if (templateManager) templateManager.innerHTML = '';
+  const settings = getForecastSettings();
+  const capacityEndDate = settings.capacityTrackLatest ? getTodayStr() : settings.capacityEndDate;
+  const results = getForecastGoals().map(calculateForecastGoal);
+  const overall = calculateForecastOverall(results);
+  const capacity = overall.capacity;
+  host.innerHTML = `<div class="forecast-page">
+    <div class="forecast-heading">
+      <div>
+        <h2>📅 完成预测</h2>
+        <p>按模板隔离历史进度和效率，将全部目标换算为剩余时间。</p>
+      </div>
+    </div>
+    <div class="forecast-overall-grid">
+      <div class="card forecast-overall-primary">
+        <div class="stat-label">全部目标预计完成日</div>
+        <div class="forecast-date">${escHtmlApp(overall.label)}</div>
+        <div class="stat-sub">${overall.totalMinutes == null ? '请先补足目标所需历史数据' : `剩余约 ${fmtMin(Math.ceil(overall.totalMinutes), true)}`}</div>
+      </div>
+      <div class="card">
+        <div class="form-group">
+          <label>每日可用学习时长来源</label>
+          <select id="forecast_capacity_mode" onchange="forecastToggleCapacityMode()" style="margin-bottom:10px">
+            <option value="range" ${settings.capacityMode === 'range' ? 'selected' : ''}>按统计范围计算日均</option>
+            <option value="manual" ${settings.capacityMode === 'manual' ? 'selected' : ''}>手动设置每日时长</option>
+          </select>
+          <div id="forecast_capacity_range_panel" style="${settings.capacityMode === 'manual' ? 'display:none' : ''}">
+            <label style="display:flex;align-items:center;gap:7px;margin:2px 0 9px;font-weight:400">
+              <input type="checkbox" id="forecast_capacity_track_latest"
+                ${settings.capacityTrackLatest ? 'checked' : ''}
+                onchange="forecastToggleCapacityTracking()">
+              跟踪今天（结束日期每天自动更新）
+            </label>
+            <div class="forecast-capacity-range">
+              ${editableDateInputHtml('forecast_capacity_start', settings.capacityStartDate)}
+              <span>至</span>
+              ${editableDateInputHtml('forecast_capacity_end', capacityEndDate)}
+              <button class="btn btn-primary btn-sm" onclick="forecastSaveCapacityRange()">计算并保存</button>
+            </div>
+            <div class="form-hint">
+              当前统计 ${capacity.source === 'range' ? capacity.startDate || '-' : settings.capacityStartDate} 至 ${capacity.source === 'range' ? capacity.endDate || '-' : capacityEndDate} ·
+              有效 ${capacity.source === 'range' ? capacity.eligibleDays : '-'} 天 · 排除不评分 ${capacity.source === 'range' ? capacity.excludedDays : '-'} 天 ·
+              累计实际 ${capacity.source === 'range' ? fmtMin(Math.round(capacity.totalActualMinutes), true) : '-'} ·
+              日均实际 ${capacity.source === 'range' ? fmtMin(Math.round(capacity.averageMinutes), true) : '切换并保存后计算'}
+            </div>
+            <div class="form-hint">${settings.capacityTrackLatest ? '正在持续跟踪：开始日期保持不变，结束日期会在每天打开本页时自动变为当天。' : '当前为固定范围；启用“跟踪今天”后结束日期将自动前移。'}</div>
+          </div>
+          <div id="forecast_capacity_manual_panel" style="${settings.capacityMode === 'manual' ? '' : 'display:none'}">
+            <div class="forecast-capacity-range">
+              <input type="number" id="forecast_manual_daily_minutes" min="1" max="1440" step="1"
+                value="${settings.manualDailyMinutes || ''}" placeholder="例如 480">
+              <span>分钟 / 天</span>
+              <button class="btn btn-primary btn-sm" onclick="forecastSaveCapacityRange()">保存并计算</button>
+            </div>
+            <div class="form-hint">当前手动每日时长：${settings.manualDailyMinutes > 0 ? fmtMin(settings.manualDailyMinutes, true) : '尚未设置'}。</div>
+          </div>
+          <div class="form-hint">标记为“不参与评分”的日期不会进入历史日均，也不会分配预测学习时长。</div>
+          <div class="form-hint">今天已完成实际学习 ${overall.todayUsed} 分钟；预测会先扣除今天已经使用的时间。</div>
+        </div>
+      </div>
+    </div>
+    ${forecastGoalFormHtml()}
+    ${forecastGoalCardsHtml(results)}
+  </div>`;
+  requestAnimationFrame(() => {
+    forecastUpdateGoalFields();
+    forecastToggleCapacityMode();
+    forecastApplyCapacityTrackingUi();
+  });
+}
+
+// ============================================================
+// WORKBOOK REVIEW TAB
+// ============================================================
+function getWorkbookReviews() {
+  if (!Array.isArray(state.data.__workbookReviews__)) state.data.__workbookReviews__ = [];
+  return state.data.__workbookReviews__;
+}
+
+function createWorkbookDraft() {
+  return {
+    title: '',
+    subject: '',
+    completedDate: getTodayStr(),
+    note: '',
+    sections: [createWorkbookSection()],
+  };
+}
+
+function createWorkbookSection() {
+  return { id: uid(), name: '', totalQuestions: '', wrongAnswers: '', note: '' };
+}
+
+function cloneWorkbookReview(review) {
+  return JSON.parse(JSON.stringify(review));
+}
+
+function ensureWorkbookDraft() {
+  if (state.workbookDraft) return;
+  const reviews = getWorkbookReviews();
+  const selected = reviews.find(review => review.id === state.workbookReviewId) || reviews[0];
+  if (selected) {
+    state.workbookReviewId = selected.id;
+    state.workbookDraft = cloneWorkbookReview(selected);
+  } else {
+    state.workbookReviewId = null;
+    state.workbookDraft = createWorkbookDraft();
+  }
+}
+
+function workbookMetric(section) {
+  const total = Number(section?.totalQuestions) || 0;
+  // 旧版输入框名为 correctAnswers，但用户实际按错题数录入；兼容读取后统一保存为 wrongAnswers。
+  const wrong = Number(section?.wrongAnswers ?? section?.correctAnswers) || 0;
+  const correct = Math.max(0, total - wrong);
+  return {
+    total,
+    correct,
+    wrong,
+    accuracy: total > 0 ? correct / total * 100 : 0,
+    errorRate: total > 0 ? wrong / total * 100 : 0,
+  };
+}
+
+function workbookTotals(sections) {
+  const totals = (sections || []).reduce((sum, section) => {
+    const metric = workbookMetric(section);
+    sum.total += metric.total;
+    sum.correct += metric.correct;
+    sum.wrong += metric.wrong;
+    return sum;
+  }, { total: 0, correct: 0, wrong: 0 });
+  totals.accuracy = totals.total > 0 ? totals.correct / totals.total * 100 : 0;
+  totals.errorRate = totals.total > 0 ? totals.wrong / totals.total * 100 : 0;
+  return totals;
+}
+
+function workbookPct(value) {
+  return `${Number(value || 0).toFixed(2)}%`;
+}
+
+function workbookUniqueTitle(requestedTitle, editingId = null) {
+  const titles = new Set(
+    getWorkbookReviews()
+      .filter(review => review.id !== editingId)
+      .map(review => String(review.title || '').trim())
+      .filter(Boolean)
+  );
+  if (!titles.has(requestedTitle)) return requestedTitle;
+  const baseTitle = requestedTitle.replace(/（副本\d+）$/, '');
+  let copyNumber = 1;
+  while (titles.has(`${baseTitle}（副本${copyNumber}）`)) copyNumber++;
+  return `${baseTitle}（副本${copyNumber}）`;
+}
+
+function workbookSetMeta(field, value) {
+  ensureWorkbookDraft();
+  state.workbookDraft[field] = value;
+}
+
+function workbookSetSection(index, field, value) {
+  ensureWorkbookDraft();
+  const section = state.workbookDraft.sections[index];
+  if (!section) return;
+  section[field] = value;
+  updateWorkbookCalculations();
+  if (field === 'name') workbookRefreshSectionPrediction();
+}
+
+function workbookAddSection(name = '') {
+  ensureWorkbookDraft();
+  const section = createWorkbookSection();
+  section.name = String(name || '');
+  state.workbookDraft.sections.push(section);
+  renderWorkbookReview();
+  setTimeout(() => {
+    const input = document.getElementById(`workbook-section-name-${state.workbookDraft.sections.length - 1}`);
+    input?.focus();
+    if (name) input?.select();
+  }, 0);
+}
+
+function workbookSectionPrediction() {
+  ensureWorkbookDraft();
+  const names = state.workbookDraft.sections
+    .map(section => String(section?.name || '').trim())
+    .filter(Boolean);
+  const lastName = names[names.length - 1] || '';
+  return {
+    lastName,
+    predictedName: inferNextNamedItemName(lastName, names),
+  };
+}
+
+function workbookRefreshSectionPrediction() {
+  const button = document.getElementById('workbook-section-predict');
+  const hint = document.getElementById('workbook-section-predict-hint');
+  if (!button || !hint) return;
+  const { lastName, predictedName } = workbookSectionPrediction();
+  button.disabled = !predictedName;
+  button.textContent = predictedName ? `⚡＋ ${predictedName}` : '⚡＋预测下一项';
+  hint.textContent = predictedName ? '' : (lastName ? '当前名称无法推测下一项' : '请先填写一个分段名称');
+}
+
+function workbookAddPredictedSection() {
+  const { predictedName } = workbookSectionPrediction();
+  if (predictedName) workbookAddSection(predictedName);
+}
+
+function workbookRemoveSection(index) {
+  ensureWorkbookDraft();
+  if (state.workbookDraft.sections.length <= 1) {
+    alert('每份整册复盘至少需要一个分段。');
+    return;
+  }
+  state.workbookDraft.sections.splice(index, 1);
+  renderWorkbookReview();
+}
+
+function workbookStartNew() {
+  state.workbookReviewId = null;
+  state.workbookDraft = createWorkbookDraft();
+  renderWorkbookReview();
+}
+
+function workbookOpenReview(id) {
+  const review = getWorkbookReviews().find(item => item.id === id);
+  if (!review) return;
+  state.workbookReviewId = id;
+  state.workbookDraft = cloneWorkbookReview(review);
+  renderWorkbookReview();
+}
+
+function workbookResetDraft() {
+  const review = getWorkbookReviews().find(item => item.id === state.workbookReviewId);
+  state.workbookDraft = review ? cloneWorkbookReview(review) : createWorkbookDraft();
+  if (!review) state.workbookReviewId = null;
+  renderWorkbookReview();
+}
+
+function workbookValidateDraft(draft) {
+  if (!String(draft.title || '').trim()) return '请填写资料标题。';
+  if (!String(draft.subject || '').trim()) return '请填写学科。';
+  if (!String(draft.completedDate || '').trim()) return '请选择完成日期。';
+  if (!Array.isArray(draft.sections) || draft.sections.length === 0) return '至少需要一个分段。';
+
+  for (let index = 0; index < draft.sections.length; index++) {
+    const section = draft.sections[index];
+    const total = Number(section.totalQuestions);
+    const wrong = Number(section.wrongAnswers ?? section.correctAnswers);
+    const label = `第 ${index + 1} 行`;
+    if (!String(section.name || '').trim()) return `${label}缺少分段名称。`;
+    if (!Number.isInteger(total) || total <= 0) return `${label}的总题数必须是大于 0 的整数。`;
+    if (!Number.isInteger(wrong) || wrong < 0) return `${label}的错误数必须是非负整数。`;
+    if (wrong > total) return `${label}的错误数不能超过总题数。`;
+  }
+  return '';
+}
+
+async function workbookSave() {
+  ensureWorkbookDraft();
+  const validationError = workbookValidateDraft(state.workbookDraft);
+  if (validationError) {
+    alert(validationError);
+    return;
+  }
+
+  const reviews = getWorkbookReviews();
+  const existingIndex = reviews.findIndex(review => review.id === state.workbookReviewId);
+  const existing = existingIndex >= 0 ? reviews[existingIndex] : null;
+  const now = new Date().toISOString();
+  const requestedTitle = String(state.workbookDraft.title).trim();
+  const title = workbookUniqueTitle(requestedTitle, existing?.id || null);
+  const saved = {
+    id: existing?.id || uid(),
+    title,
+    subject: String(state.workbookDraft.subject).trim(),
+    completedDate: String(state.workbookDraft.completedDate).trim(),
+    note: String(state.workbookDraft.note || '').trim(),
+    sections: state.workbookDraft.sections.map(section => ({
+      id: section.id || uid(),
+      name: String(section.name).trim(),
+      totalQuestions: Number(section.totalQuestions),
+      wrongAnswers: Number(section.wrongAnswers ?? section.correctAnswers),
+      note: String(section.note || '').trim(),
+    })),
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+
+  if (existingIndex >= 0) reviews[existingIndex] = saved;
+  else reviews.push(saved);
+  state.workbookReviewId = saved.id;
+  state.workbookDraft = cloneWorkbookReview(saved);
+  await saveAllStorage();
+  renderWorkbookReview();
+  const message = document.getElementById('workbook-save-message');
+  if (message) {
+    message.textContent = title === requestedTitle
+      ? '✅ 整册复盘已保存'
+      : `✅ 已保存为「${title}」`;
+    setTimeout(() => { message.textContent = ''; }, 3500);
+  }
+}
+
+async function workbookDelete(id) {
+  const review = getWorkbookReviews().find(item => item.id === id);
+  if (!review || !confirm(`确定删除整册复盘「${review.title}」？`)) return;
+  state.data.__workbookReviews__ = getWorkbookReviews().filter(item => item.id !== id);
+  if (state.workbookReviewId === id) {
+    state.workbookReviewId = null;
+    state.workbookDraft = null;
+  }
+  await saveAllStorage();
+  renderWorkbookReview();
+}
+
+function workbookCardsHtml(reviews) {
+  if (!reviews.length) {
+    return '<div class="empty-state workbook-empty"><p>暂无整册复盘，点击右上角新建第一份。</p></div>';
+  }
+  return reviews.map(review => {
+    const totals = workbookTotals(review.sections);
+    const active = review.id === state.workbookReviewId;
+    return `<div class="workbook-card ${active ? 'active' : ''}">
+      <button class="workbook-card-main" onclick="workbookOpenReview('${review.id}')">
+        <b>${escHtmlApp(review.title || '未命名资料')}</b>
+        <span>${escHtmlApp(review.subject || '未填写学科')} · ${escHtmlApp(review.completedDate || '-')}</span>
+        <span>${totals.total} 题 · 错 ${totals.wrong} 题 · 错误率 ${workbookPct(totals.errorRate)}</span>
+      </button>
+      <button class="btn btn-danger btn-sm" onclick="workbookDelete('${review.id}')">删除</button>
+    </div>`;
+  }).join('');
+}
+
+function workbookSectionsHtml(sections) {
+  return sections.map((section, index) => {
+    const metric = workbookMetric(section);
+    return `<tr>
+      <td class="fw-mono c-muted">${index + 1}</td>
+      <td><input id="workbook-section-name-${index}" value="${escHtmlApp(section.name || '')}" placeholder="例：第一章、卷二、P20-35" oninput="workbookSetSection(${index},'name',this.value)"></td>
+      <td><input type="number" min="1" step="1" value="${section.totalQuestions ?? ''}" oninput="workbookSetSection(${index},'totalQuestions',this.value)"></td>
+      <td><input type="number" min="0" step="1" value="${section.wrongAnswers ?? section.correctAnswers ?? ''}" oninput="workbookSetSection(${index},'wrongAnswers',this.value)"></td>
+      <td class="fw-mono" id="workbook-correct-${index}">${metric.correct}</td>
+      <td class="fw-mono" id="workbook-accuracy-${index}">${workbookPct(metric.accuracy)}</td>
+      <td class="fw-mono" id="workbook-error-rate-${index}">${workbookPct(metric.errorRate)}</td>
+      <td><input value="${escHtmlApp(section.note || '')}" placeholder="可选" oninput="workbookSetSection(${index},'note',this.value)"></td>
+      <td><button class="btn btn-danger btn-sm" onclick="workbookRemoveSection(${index})">删除</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderWorkbookReview() {
+  ensureWorkbookDraft();
+  const reviews = getWorkbookReviews();
+  const draft = state.workbookDraft;
+  const totals = workbookTotals(draft.sections);
+  const sectionPrediction = workbookSectionPrediction();
+  const host = document.getElementById('tab-workbookReview');
+  if (!host) return;
+
+  host.innerHTML = `
+    <div class="workbook-page">
+      <div class="workbook-heading">
+        <div>
+          <h2>📚 整册复盘</h2>
+          <p>整本练习册、教材或题库完成后，按章节、单元、试卷或页段汇总题量和错题情况。</p>
+        </div>
+        <button class="btn btn-primary" onclick="workbookStartNew()">＋ 新建复盘</button>
+      </div>
+
+      <div class="workbook-list">${workbookCardsHtml(reviews)}</div>
+
+      <div class="card workbook-editor">
+        <div class="card-title">${state.workbookReviewId ? '编辑整册复盘' : '新建整册复盘'}</div>
+        <div class="form-grid workbook-meta-grid">
+          <div class="form-group">
+            <label>资料标题 *</label>
+            <input value="${escHtmlApp(draft.title || '')}" placeholder="例：肖秀荣1000题" oninput="workbookSetMeta('title',this.value)">
+          </div>
+          <div class="form-group">
+            <label>学科 *</label>
+            <input value="${escHtmlApp(draft.subject || '')}" placeholder="例：政治、数学" oninput="workbookSetMeta('subject',this.value)">
+          </div>
+          <div class="form-group">
+            <label>完成日期 *</label>
+            ${editableDateInputHtml('workbook_completed_date', draft.completedDate || '', "workbookSetMeta('completedDate',document.getElementById('workbook_completed_date').value)")}
+          </div>
+          <div class="form-group">
+            <label>整册备注</label>
+            <input value="${escHtmlApp(draft.note || '')}" placeholder="可选" oninput="workbookSetMeta('note',this.value)">
+          </div>
+        </div>
+
+        <div class="workbook-summary-grid">
+          <div class="mini-card"><div class="lbl">总题数</div><div class="val" id="workbook-total">${totals.total}</div></div>
+          <div class="mini-card"><div class="lbl">正确数</div><div class="val c-green" id="workbook-correct">${totals.correct}</div></div>
+          <div class="mini-card"><div class="lbl">错题数</div><div class="val c-red" id="workbook-wrong">${totals.wrong}</div></div>
+          <div class="mini-card"><div class="lbl">正确率</div><div class="val c-green" id="workbook-accuracy">${workbookPct(totals.accuracy)}</div></div>
+          <div class="mini-card"><div class="lbl">错误率</div><div class="val c-red" id="workbook-error-rate">${workbookPct(totals.errorRate)}</div></div>
+        </div>
+
+        <div class="table-wrap workbook-table-wrap">
+          <table class="workbook-table">
+            <thead><tr><th>#</th><th>分段名称 *</th><th>总题数 *</th><th>错误数 *</th><th>正确数</th><th>正确率</th><th>错误率</th><th>备注</th><th>操作</th></tr></thead>
+            <tbody>${workbookSectionsHtml(draft.sections)}</tbody>
+          </table>
+        </div>
+        <div class="workbook-editor-actions">
+          <button class="btn btn-primary btn-sm" onclick="workbookAddSection()" title="新增空白分段">＋ 新增空白分段</button>
+          <button type="button" id="workbook-section-predict" class="btn btn-ghost btn-sm"
+            onclick="workbookAddPredictedSection()" ${sectionPrediction.predictedName ? '' : 'disabled'}>
+            ${sectionPrediction.predictedName ? `⚡＋ ${escHtmlApp(sectionPrediction.predictedName)}` : '⚡＋预测下一项'}
+          </button>
+          <span id="workbook-section-predict-hint" class="form-hint" style="margin:0">
+            ${sectionPrediction.predictedName ? '' : (sectionPrediction.lastName ? '当前名称无法推测下一项' : '请先填写一个分段名称')}
+          </span>
+          <button class="btn btn-success" onclick="workbookSave()">💾 保存整册复盘</button>
+          <button class="btn btn-ghost" onclick="workbookResetDraft()">撤销未保存修改</button>
+          <span id="workbook-save-message"></span>
+        </div>
+      </div>
+
+      <div class="card workbook-chart-card">
+        <div class="card-title">章节题量与错误率</div>
+        <canvas id="workbookReviewChart" height="110"></canvas>
+      </div>
+    </div>`;
+
+  requestAnimationFrame(renderWorkbookChart);
+}
+
+function updateWorkbookCalculations() {
+  ensureWorkbookDraft();
+  state.workbookDraft.sections.forEach((section, index) => {
+    const metric = workbookMetric(section);
+    const correct = document.getElementById(`workbook-correct-${index}`);
+    const accuracy = document.getElementById(`workbook-accuracy-${index}`);
+    const errorRate = document.getElementById(`workbook-error-rate-${index}`);
+    if (correct) correct.textContent = metric.correct;
+    if (accuracy) accuracy.textContent = workbookPct(metric.accuracy);
+    if (errorRate) errorRate.textContent = workbookPct(metric.errorRate);
+  });
+  const totals = workbookTotals(state.workbookDraft.sections);
+  const values = {
+    'workbook-total': totals.total,
+    'workbook-correct': totals.correct,
+    'workbook-wrong': totals.wrong,
+    'workbook-accuracy': workbookPct(totals.accuracy),
+    'workbook-error-rate': workbookPct(totals.errorRate),
+  };
+  Object.entries(values).forEach(([id, value]) => {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value;
+  });
+  renderWorkbookChart();
+}
+
+function renderWorkbookChart() {
+  if (!document.getElementById('workbookReviewChart') || !state.workbookDraft) return;
+  const sections = state.workbookDraft.sections || [];
+  mkChart('workbookReviewChart', {
+    type: 'bar',
+    data: {
+      labels: sections.map((section, index) => String(section.name || '').trim() || `分段 ${index + 1}`),
+      datasets: [
+        {
+          label: '总题数',
+          data: sections.map(section => workbookMetric(section).total),
+          backgroundColor: 'rgba(79,195,247,.45)',
+          borderColor: '#4fc3f7',
+          borderWidth: 1,
+          yAxisID: 'y',
+        },
+        {
+          type: 'line',
+          label: '错误率',
+          data: sections.map(section => Number(workbookMetric(section).errorRate.toFixed(2))),
+          borderColor: '#ef9a9a',
+          backgroundColor: '#ef9a9a',
+          pointRadius: 4,
+          borderWidth: 2,
+          tension: .25,
+          yAxisID: 'y1',
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            label(context) {
+              return context.dataset.yAxisID === 'y1'
+                ? `${context.dataset.label}: ${Number(context.parsed.y).toFixed(2)}%`
+                : `${context.dataset.label}: ${context.parsed.y} 题`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: '#6b7a9e' }, grid: gridCfg },
+        y: {
+          beginAtZero: true,
+          position: 'left',
+          title: { display: true, text: '题数' },
+          ticks: { precision: 0 },
+          grid: gridCfg,
+        },
+        y1: {
+          beginAtZero: true,
+          min: 0,
+          max: 100,
+          position: 'right',
+          title: { display: true, text: '错误率 (%)' },
+          grid: { drawOnChartArea: false },
+        },
+      },
+    },
+  });
+}
+
+// ============================================================
 // INIT
 // ============================================================
 async function init() {
@@ -5203,15 +9456,36 @@ async function init() {
   applyThemeColors(SETTINGS);
   await loadStorage();
   migrateOldTypes();
+  migrateForecastUnitModel();
+  migrateTaskTemplateIds();
   await saveAllStorage();
+  await loadServerSnapshot();
 
   const sd = strToDate(state.selectedDate);
   state.cal = { year: sd.getFullYear(), month: sd.getMonth() };
   state.monthView = { year: sd.getFullYear(), month: sd.getMonth() };
 
-  renderHeader();
-  renderEntry();
+  showTab(state.tab || 'entry');
   startDraftAutoSave();
 }
 
 document.addEventListener('DOMContentLoaded', init);
+let _lastSnapshotFlush = 0;
+function flushSnapshotOnExit() {
+  if (![30000, 60000].includes(Number(SETTINGS.snapshotInterval))) return;
+  const now = Date.now();
+  if (now - _lastSnapshotFlush < 250) return;
+  _lastSnapshotFlush = now;
+  try {
+    const snapshot = buildServerSnapshot();
+    saveLocalSnapshotCache(snapshot);
+    state._serverSnapshot = snapshot;
+    const payload = JSON.stringify(snapshot);
+    navigator.sendBeacon('/api/snapshot', new Blob([payload], { type: 'application/json' }));
+  } catch (error) { }
+}
+window.addEventListener('beforeunload', flushSnapshotOnExit);
+window.addEventListener('pagehide', flushSnapshotOnExit);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushSnapshotOnExit();
+});
