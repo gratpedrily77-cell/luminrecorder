@@ -5,7 +5,6 @@
 
 import json
 import os
-from datetime import datetime
 from flask import Flask, jsonify, request, send_from_directory
 
 app = Flask(__name__, static_folder=".", static_url_path="")
@@ -50,6 +49,36 @@ def save_snapshot(payload: dict) -> None:
     with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(temp_file, SNAPSHOT_FILE)
+
+
+def parse_minutes(value) -> int | None:
+    try:
+      hour, minute = str(value or "").split(":", 1)
+      hour_num = int(hour)
+      minute_num = int(minute)
+    except (TypeError, ValueError):
+      return None
+    if not (0 <= hour_num <= 23 and 0 <= minute_num <= 59):
+      return None
+    return hour_num * 60 + minute_num
+
+
+def session_segments(session: dict) -> list[tuple[int, int]]:
+    start = parse_minutes(session.get("startTime"))
+    end = parse_minutes(session.get("endTime"))
+    if start is None or end is None or start == end:
+      return []
+    if end > start:
+      return [(start, end)]
+    return [(start, 1440), (0, end)]
+
+
+def sessions_overlap(first: dict, second: dict) -> bool:
+    return any(
+        first_start < second_end and second_start < first_end
+        for first_start, first_end in session_segments(first)
+        for second_start, second_end in session_segments(second)
+    )
 
 
 # ── 页面入口 ─────────────────────────────────────────────────
@@ -100,14 +129,6 @@ def delete_snapshot():
     return jsonify({"ok": True})
 
 
-@app.route("/api/data/<date_str>", methods=["GET"])
-def get_day(date_str: str):
-    """返回某天数据"""
-    data = load_data()
-    day = data.get(date_str, {"wakeTime": "", "sleepTime": "", "sessions": [], "tasks": []})
-    return jsonify(day)
-
-
 @app.route("/api/data/<date_str>", methods=["PUT"])
 def put_day(date_str: str):
     """整体更新某天数据"""
@@ -122,19 +143,34 @@ def put_day(date_str: str):
 
 @app.route("/api/data/<date_str>/sleep", methods=["PUT"])
 def put_sleep(date_str: str):
-    """保存作息时间（含特殊天标记）"""
+    """保存作息时间、对应备注及日期类型评分属性"""
     payload = request.get_json(force=True, silent=True) or {}
     data = load_data()
     day = data.setdefault(date_str, {"wakeTime": "", "sleepTime": "", "sessions": [], "tasks": []})
     day["wakeTime"] = payload.get("wakeTime", day.get("wakeTime", ""))
     day["sleepTime"] = payload.get("sleepTime", day.get("sleepTime", ""))
+    day["wakeNote"] = str(payload.get("wakeNote", day.get("wakeNote", "")) or "")
+    day["sleepNote"] = str(payload.get("sleepNote", day.get("sleepNote", "")) or "")
     if "dayType" in payload:
-        day["dayType"] = payload["dayType"]
-    # 特殊天标记
-    if "specialDay" in payload:
-        day["specialDay"] = payload["specialDay"]
-    if "excludeFromRating" in payload:
-        day["excludeFromRating"] = payload["excludeFromRating"]
+        day["dayType"] = str(payload["dayType"] or "").strip()
+    if not day.get("dayType"):
+        day["excludeFromRating"] = False
+    elif "excludeFromRating" in payload:
+        day["excludeFromRating"] = bool(day.get("dayType")) and bool(payload["excludeFromRating"])
+    day.pop("specialDay", None)
+    save_data(data)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/data/<date_str>/dayType", methods=["PUT"])
+def put_day_type(date_str: str):
+    """独立保存日期类型与范围汇总排除标记"""
+    payload = request.get_json(force=True, silent=True) or {}
+    data = load_data()
+    day = data.setdefault(date_str, {"wakeTime": "", "sleepTime": "", "sessions": [], "tasks": []})
+    day["dayType"] = str(payload.get("dayType", "")).strip()
+    day["excludeFromRating"] = bool(day["dayType"]) and bool(payload.get("excludeFromRating", False))
+    day.pop("specialDay", None)
     save_data(data)
     return jsonify({"ok": True})
 
@@ -158,6 +194,16 @@ def add_session(date_str: str):
         return jsonify({"error": "invalid JSON"}), 400
     data = load_data()
     day = data.setdefault(date_str, {"wakeTime": "", "sleepTime": "", "sessions": [], "tasks": []})
+    conflict = next(
+        (session for session in day.get("sessions", []) if sessions_overlap(payload, session)),
+        None,
+    )
+    if conflict:
+        return jsonify({
+            "error": "session_overlap",
+            "startTime": conflict.get("startTime", ""),
+            "endTime": conflict.get("endTime", ""),
+        }), 409
     day.setdefault("sessions", []).append(payload)
     save_data(data)
     return jsonify({"ok": True})
@@ -228,9 +274,11 @@ def move_day_items():
     selected_tasks = [item for item in source_tasks if str(item.get("id")) in task_ids]
 
     moved = 0
-    if selection.get("wakeTime") and source_day.get("wakeTime"):
-        target_day["wakeTime"] = source_day["wakeTime"]
+    if selection.get("wakeTime") and (source_day.get("wakeTime") or source_day.get("wakeNote")):
+        target_day["wakeTime"] = source_day.get("wakeTime", "")
+        target_day["wakeNote"] = source_day.get("wakeNote", "")
         source_day["wakeTime"] = ""
+        source_day["wakeNote"] = ""
         moved += 1
     if selection.get("dayNote") and source_day.get("dayNote"):
         target_day["dayNote"] = source_day["dayNote"]
@@ -256,9 +304,11 @@ def move_day_items():
             item for item in source_tasks if str(item.get("id")) not in task_ids
         ]
         moved += len(selected_tasks)
-    if selection.get("sleepTime") and source_day.get("sleepTime"):
-        target_day["sleepTime"] = source_day["sleepTime"]
+    if selection.get("sleepTime") and (source_day.get("sleepTime") or source_day.get("sleepNote")):
+        target_day["sleepTime"] = source_day.get("sleepTime", "")
+        target_day["sleepNote"] = source_day.get("sleepNote", "")
         source_day["sleepTime"] = ""
+        source_day["sleepNote"] = ""
         moved += 1
 
     if moved == 0:
@@ -273,21 +323,6 @@ def move_day_items():
         "sourceDay": source_day,
         "targetDay": target_day,
     })
-
-
-@app.route("/api/export", methods=["GET"])
-def export_json():
-    """以附件形式下载全部数据"""
-    from flask import Response
-    data = load_data()
-    today = datetime.now().strftime("%Y-%m-%d")
-    filename = f"学习数据_{today}.json"
-    content = json.dumps(data, ensure_ascii=False, indent=2)
-    return Response(
-        content,
-        mimetype="application/json",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
-    )
 
 
 if __name__ == "__main__":

@@ -28,28 +28,13 @@
 
   <div class="stats-grid" id="statsGrid"></div>
 
-  <div class="tabs-wrapper">
-    <div class="tab active" onclick="showTab('entry')">✏️ 录入</div>
-    <div class="tab" onclick="showTab('calendar')">📆 日历</div>
-    <div class="tab" onclick="showTab('day')">📊 日览</div>
-    <div class="tab" onclick="showTab('week')">📈 周览</div>
-    <div class="tab" onclick="showTab('month')">🗓️ 月览</div>
-    <div class="tab" onclick="showTab('stacked')">📊 堆积图</div>
-    <div class="tab" onclick="showTab('sessAnalysis')">⏱️ 时段分析</div>
-    <div class="tab" onclick="showTab('taskAnalysis')">📝 任务分析</div>
-    <div class="tab" onclick="showTab('sleep')">🌙 作息</div>
-    <div class="tab" onclick="showTab('export')">💾 导出</div>
-    <div class="tab" onclick="showTab('templates')">📋 模板库</div>
-    <div class="tab" onclick="showTab('forecast')">📅 完成预测</div>
-    <div class="tab" onclick="showTab('workbookReview')">📚 整册复盘</div>
-    <div class="tab" onclick="showTab('settings')">⚙️ 设置</div>
-  </div>
+  <nav class="tabs-wrapper" id="primaryTabs" aria-label="主要页面"></nav>
 
+  <main class="app-main">
   <div class="tab-content active" id="tab-entry"></div>
   <div class="tab-content" id="tab-calendar"></div>
   <div class="tab-content" id="tab-day"></div>
-  <div class="tab-content" id="tab-week"></div>
-  <div class="tab-content" id="tab-month"></div>
+  <div class="tab-content" id="tab-overview"></div>
   <div class="tab-content" id="tab-sleep"></div>
   <div class="tab-content" id="tab-stacked"></div>
   <div class="tab-content" id="tab-sessAnalysis"></div>
@@ -59,6 +44,7 @@
   <div class="tab-content" id="tab-forecast"></div>
   <div class="tab-content" id="tab-workbookReview"></div>
   <div class="tab-content" id="tab-settings"></div>
+  </main>
 
   <script src="app.js"></script>
 </body>

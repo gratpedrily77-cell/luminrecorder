@@ -21,30 +21,9 @@ const DEFAULT_SETTINGS = {
     { color: '#b388ff', cls: 'sleep' },
     { color: '#ffd54f', cls: 'wake' },
   ],
-  // 时间与计算规则
-  dailyGoalHours: 8,
-  wakeGoalHour: 7,
-  sleepGoalHour: 0,
-  utilPassPct: 50,            // 不可用时间占比警戒线
-  focusGoodPct: 80,
-  focusOkPct: 60,
-  weekStartDay: 1, // 1=周一, 0=周日
   // 数据存储
   snapshotInterval: 30000,
   useLocalStorageCache: true,
-  // 评分规则
-  ratingActualMin: 480,       // 实际专注>=480min(8h)得1分
-  ratingDeviationPct: -10,    // 偏差>=-10%得1分
-  ratingWakeLimit: 480,       // 起床<=480min(8:00)得1分
-  ratingUtilPct: 50,          // 不可用时间占比<=50%得1分
-  ratingStarThreshold: 3,     // >=3分⭐
-  ratingOkThreshold: 2,       // >=2分👌
-  ratingWarnThreshold: 1,     // >=1分⚠️
-  // 作息颜色阈值
-  wakeGoodMinute: 420,        // <=7:00 绿色
-  wakeWarnMinute: 480,        // <=8:00 黄色, >8:00 红色
-  sleepGoodHour: 0,           // <=0:00 绿色
-  sleepWarnHour: 0.5,         // <=0:30 黄色, >0:30 红色
 };
 
 const SETTINGS_KEY = 'tracker_settings';
@@ -62,6 +41,13 @@ function loadSettings() {
       }
       if (![0, 30000, 60000].includes(Number(settings.snapshotInterval))) settings.snapshotInterval = 30000;
       delete settings.autosaveInterval;
+      [
+        'utilPassPct', 'focusGoodPct', 'focusOkPct',
+        'ratingActualMin', 'ratingDeviationPct', 'ratingWakeLimit', 'ratingUtilPct',
+        'ratingStarThreshold', 'ratingOkThreshold', 'ratingWarnThreshold',
+        'wakeGoodMinute', 'wakeWarnMinute', 'sleepGoodHour', 'sleepWarnHour',
+        'dailyGoalHours', 'wakeGoalHour', 'sleepGoalHour', 'weekStartDay',
+      ].forEach(key => delete settings[key]);
       return settings;
     }
   } catch (e) { console.warn('加载设置失败', e); }
@@ -98,15 +84,16 @@ const TIPS = {
   effectiveClock: '⏱ 有效时钟\n普通专注时段扣除休息后，再加上特殊学习时段中的真实学习分钟。它是衡量专注效率的分母。\n\n公式：普通专注时钟 − 休息时间 + 特殊学习实际分钟',
   nominal: '📋 名义时长\n你预先设定的计划专注时长，手动录入。代表「打算专注多久」，是自己定下的目标基准。\n\n公式：∑ 各时段名义时长（手动输入合计）',
   actual: '✅ 实际专注\n剔除分心和休息后，真正高效专注的时长，手动录入。代表「实际学了多久」，是最能反映学习成果的指标。\n\n公式：∑ 各时段实际专注分钟数（手动输入合计）',
-  efficiency: '🎯 专注效率\n实际专注占有效时段时长的比例，衡量这段时间的专注密度。数值越高代表越少走神。\n\n≥80% 优秀 · ≥60% 合格 · <60% 需改善\n\n公式：实际专注 ÷ (时钟时长 − 休息时间) × 100%',
+  efficiency: '🎯 专注效率\n实际专注占有效时段时长的比例，用于描述这段时间中实际专注所占的比重。\n\n普通时段：实际专注 ÷ (时钟时长 − 休息时间)\n特殊学习时段：只用实际专注进入分母，不用完整时钟跨度\n不可用时段：不参与专注效率',
   rest: '😴 休息时间\n该时段内的计划休息时长（如番茄钟间隔休息、课间休息等），手动录入。\n\n公式：∑ 各时段休息分钟数（手动输入合计）',
   distract: '😶 分心时间\n时钟时长中扣除实际专注和休息后的剩余时间，反映走神/摸鱼的时长。\n\n公式：时钟时长 − 实际专注 − 休息时间',
   awake: '🌤 清醒时长\n从起床到睡觉的总时长，是当天可用于学习与生活的全部时间。需要录入起床和睡觉时间后才能计算。\n\n公式：睡觉时间 − 起床时间（跨午夜自动修正）',
-  util: '📊 不可用时间占比\n不可用时长占清醒时长的比例，表示一天清醒时间中有多少被吃饭、通勤、外出等特殊时段占用。数值越低，代表可支配时间越多；它不用于衡量专注效率。\n\n≤30% 较低 · ≤50% 中等 · >50% 较高\n\n公式：不可用时长 ÷ 清醒时长 × 100%\n不可用时长包括普通特殊时段的完整跨度，以及特殊学习时段中未学习的部分。',
+  util: '📊 不可用时间占比\n不可用时长占清醒时长的比例，表示一天清醒时间中有多少被吃饭、通勤、外出等特殊时段占用；它不用于衡量专注效率。\n\n公式：不可用时长 ÷ 清醒时长 × 100%\n不可用时长包括普通特殊时段的完整跨度，以及特殊学习时段中未学习的部分。',
   deviation: '📉 偏差率（实际 vs 名义）\n实际专注与名义时长的差值比，反映真实专注量 vs 计划目标的差距。\n\n正值 = 超额完成计划\n负值 = 未达计划（走神多或提前结束）\n\n公式：(实际专注 − 名义时长) ÷ 名义时长 × 100%',
   clockDev: '⚡ 时钟偏差（学习口径时钟 vs 名义）\n普通专注跨度与特殊学习实际分钟之和，与名义时长相比的偏差。完全不可用时段不会混入计划偏差。\n\n正值 = 学习口径时钟超过计划\n负值 = 比计划提前结束\n\n公式：(普通专注时钟 + 特殊学习实际分钟 − 名义时长) ÷ 名义时长 × 100%',
-  sessRate: '🎯 专注率（单时段）\n该时段的实际专注占有效时段时长的比例，反映单次时段的专注密度。\n\n公式：实际专注 ÷ (时钟时长 − 休息时间) × 100%',
+  sessRate: '🎯 专注率（单时段）\n该时段的实际专注占有效时段时长的比例，反映单次时段的专注密度。\n\n普通时段：实际专注 ÷ (时钟时长 − 休息时间)\n特殊学习时段：只计实际专注，完整时钟跨度不进入分母\n不可用时段：不参与专注率',
   taskMin: '📝 任务记录时长\n任务记录板中所有任务的时长总和。任务板与时段统计相互独立，用于记录具体的学习内容和数量。',
+  taskActualDeviation: '📐 任务/实际误差\n比较每天任务记录总时长与实际专注总时长。正值表示任务时长高于实际专注，负值表示任务时长低于实际专注。实际专注为 0 的日期不参与统计。\n\n每日误差率：(任务时长 − 实际专注) ÷ 实际专注 × 100%\n平均误差率：有效日期的每日误差率算术平均\nCV：标准差 ÷ |平均误差率|',
   // 堆积图专用
   stackAwake: '🌤 清醒总时长\n所选时间范围内每天清醒时长（起床→睡觉）的总和。\n只计算同时录入了起床和睡觉时间的天数。\n\n公式：∑ (睡觉时间 − 起床时间)',
   stackTask: '📝 任务记录总时长\n所选时间范围内「任务记录板」中所有任务时长的总和。\n按活动类别（一级分类）分组后堆叠在面积图最底层。\n\n公式：∑ 所有任务的 minutes 字段',
@@ -116,7 +103,7 @@ const TIPS = {
   stackIdle: '⬜ 空闲/未记录时间\n清醒时长中，扣除「任务记录时长 + 特殊时段 + 休息 + 分心」后的剩余时间。\n代表没有被任何记录覆盖的时间段，可能是：\n· 忘记录入的学习时间\n· 日常琐事（洗漱、整理等）\n· 真正的空闲放松时间\n\n公式：清醒时长 − 任务时长 − 特殊时段 − 休息 − 分心\n\n注意：如果任务和专注时段有重叠记录，\n空闲时间可能被低估甚至出现负值（会被截断为0）',
   // 统计指标
   stdDev: '📏 标准差 (σ)\n衡量数据围绕均值的分散程度。\n标准差越大，说明每天的波动越大。\n\n公式：σ = √(Σ(xi − μ)² / n)',
-  cv: '📊 变异系数 (CV)\n标准差与均值的比值，用百分比表示。\n消除了量纲影响，可以跨指标比较稳定性。\n\nCV < 15% → 非常稳定\nCV 15-30% → 较稳定\nCV 30-50% → 波动较大\nCV > 50% → 波动很大\n\n公式：CV = σ / μ × 100%',
+  cv: '📊 变异系数 (CV)\n标准差与均值的比值，用百分比表示，可用于比较不同指标的相对离散程度。\n\n公式：CV = σ / μ × 100%',
 };
 
 /** 返回一个带 hover 提示的 ⓘ 图标 HTML */
@@ -168,29 +155,205 @@ function hideTip() {
 }
 
 const chartReg = {};
+const TABLE_SORT_STATE = Object.create(null);
+let tableSortObserver = null;
+
+function sortableTableHeaderHtml(tableId, key, labelHtml, type = 'number', className = '') {
+  const active = TABLE_SORT_STATE[tableId]?.key === key ? TABLE_SORT_STATE[tableId] : null;
+  const indicator = active ? (active.direction === 'asc' ? '↑' : '↓') : '';
+  const ariaSort = active ? (active.direction === 'asc' ? 'ascending' : 'descending') : 'none';
+  return `<th${className ? ` class="${className}"` : ''} data-sort-key="${key}" data-sort-type="${type}" aria-sort="${ariaSort}"><button type="button" class="table-sort-button${active ? ' active' : ''}" onclick="cycleTableSort('${tableId}','${key}','${type}')"><span class="table-sort-label">${labelHtml}</span><span class="table-sort-indicator" aria-hidden="true">${indicator}</span></button></th>`;
+}
+
+function sortableTableRowAttrs(values, origin) {
+  return `data-sort-values="${encodeURIComponent(JSON.stringify(values || {}))}" data-sort-origin="${origin}"`;
+}
+
+function tableSortRowValues(row) {
+  try { return JSON.parse(decodeURIComponent(row.dataset.sortValues || '%7B%7D')); }
+  catch (error) { return {}; }
+}
+
+function tableSortValueMissing(value) {
+  if (Array.isArray(value)) return value.length === 0 || tableSortValueMissing(value[0]);
+  return value == null || value === '' || (typeof value === 'number' && !Number.isFinite(value));
+}
+
+function compareTableSortValues(left, right) {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    const leftValues = Array.isArray(left) ? left : [left];
+    const rightValues = Array.isArray(right) ? right : [right];
+    const length = Math.max(leftValues.length, rightValues.length);
+    for (let index = 0; index < length; index++) {
+      const leftValue = leftValues[index];
+      const rightValue = rightValues[index];
+      const leftMissing = tableSortValueMissing(leftValue);
+      const rightMissing = tableSortValueMissing(rightValue);
+      if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+      if (leftMissing) continue;
+      const compared = compareTableSortValues(leftValue, rightValue);
+      if (compared) return compared;
+    }
+    return 0;
+  }
+  if (typeof left === 'string' || typeof right === 'string') {
+    return String(left).localeCompare(String(right), 'zh-Hans', { numeric: true });
+  }
+  return Number(left) - Number(right);
+}
+
+function applyTableSort(table) {
+  if (!table?.tBodies?.length) return;
+  const tableId = table.dataset.sortTable;
+  let current = TABLE_SORT_STATE[tableId] || null;
+  if (current && ![...table.querySelectorAll('thead th[data-sort-key]')].some(header => header.dataset.sortKey === current.key)) {
+    delete TABLE_SORT_STATE[tableId];
+    current = null;
+  }
+  const rows = [...table.tBodies[0].rows].map((row, index) => {
+    if (!row.hasAttribute('data-sort-origin')) row.dataset.sortOrigin = String(index);
+    return { row, origin: Number(row.dataset.sortOrigin) || 0, values: tableSortRowValues(row) };
+  });
+  rows.sort((left, right) => {
+    if (!current) return left.origin - right.origin;
+    const leftValue = left.values[current.key];
+    const rightValue = right.values[current.key];
+    const leftMissing = tableSortValueMissing(leftValue);
+    const rightMissing = tableSortValueMissing(rightValue);
+    if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+    if (leftMissing) return left.origin - right.origin;
+    const compared = compareTableSortValues(leftValue, rightValue);
+    return compared ? (current.direction === 'asc' ? compared : -compared) : left.origin - right.origin;
+  });
+  rows.forEach(item => table.tBodies[0].appendChild(item.row));
+  table.querySelectorAll('thead th[data-sort-key]').forEach(header => {
+    const active = current?.key === header.dataset.sortKey;
+    header.setAttribute('aria-sort', active ? (current.direction === 'asc' ? 'ascending' : 'descending') : 'none');
+    const button = header.querySelector('.table-sort-button');
+    const indicator = header.querySelector('.table-sort-indicator');
+    button?.classList.toggle('active', active);
+    if (indicator) indicator.textContent = active ? (current.direction === 'asc' ? '↑' : '↓') : '';
+  });
+}
+
+function cycleTableSort(tableId, key, type = 'number') {
+  const firstDirection = type === 'number' ? 'desc' : 'asc';
+  const current = TABLE_SORT_STATE[tableId];
+  if (!current || current.key !== key) {
+    TABLE_SORT_STATE[tableId] = { key, type, direction: firstDirection };
+  } else if (current.direction === firstDirection) {
+    TABLE_SORT_STATE[tableId] = { key, type, direction: firstDirection === 'asc' ? 'desc' : 'asc' };
+  } else {
+    delete TABLE_SORT_STATE[tableId];
+  }
+  const table = [...document.querySelectorAll('table[data-sort-table]')].find(item => item.dataset.sortTable === tableId);
+  applyTableSort(table);
+}
+
+function restoreSortableTablesIn(root) {
+  if (!root || root.nodeType !== 1) return;
+  const tables = new Set();
+  if (root.matches?.('table[data-sort-table]')) tables.add(root);
+  root.querySelectorAll?.('table[data-sort-table]').forEach(table => tables.add(table));
+  tables.forEach(table => {
+    if (TABLE_SORT_STATE[table.dataset.sortTable]) applyTableSort(table);
+  });
+}
+
+function startSortableTableObserver() {
+  if (tableSortObserver || typeof MutationObserver === 'undefined') return;
+  tableSortObserver = new MutationObserver(mutations => {
+    mutations.forEach(mutation => mutation.addedNodes.forEach(node => restoreSortableTablesIn(node)));
+  });
+  tableSortObserver.observe(document.body, { childList: true, subtree: true });
+}
 
 const state = {
   data: {},
   selectedDate: getTodayStr(),
   tab: 'entry',
   cal: { year: new Date().getFullYear(), month: new Date().getMonth() },
-  weekStart: getMondayOfDate(new Date()),
-  monthView: { year: new Date().getFullYear(), month: new Date().getMonth() },
+  rangeChartViews: {
+    overview: { time: 'daily', task: 'daily' },
+  },
+  analysisRanges: {
+    overview: { mode: '30d', start: '', end: '', dayTypeFilter: '', pickerOpen: false, hierarchyLevel: 'year', hierarchyYear: new Date().getFullYear(), hierarchyMonth: new Date().getMonth(), hierarchyWeekStart: '', hierarchyLabel: '' },
+    stacked: { mode: '30d', start: '', end: '', dayTypeFilter: '', pickerOpen: false, hierarchyLevel: 'year', hierarchyYear: new Date().getFullYear(), hierarchyMonth: new Date().getMonth(), hierarchyWeekStart: '', hierarchyLabel: '' },
+    session: { mode: '30d', start: '', end: '', dayTypeFilter: '', pickerOpen: false, hierarchyLevel: 'year', hierarchyYear: new Date().getFullYear(), hierarchyMonth: new Date().getMonth(), hierarchyWeekStart: '', hierarchyLabel: '' },
+    task: { mode: '30d', start: '', end: '', dayTypeFilter: '', pickerOpen: false, hierarchyLevel: 'year', hierarchyYear: new Date().getFullYear(), hierarchyMonth: new Date().getMonth(), hierarchyWeekStart: '', hierarchyLabel: '' },
+    sleep: { mode: '30d', start: '', end: '', dayTypeFilter: '', pickerOpen: false, hierarchyLevel: 'year', hierarchyYear: new Date().getFullYear(), hierarchyMonth: new Date().getMonth(), hierarchyWeekStart: '', hierarchyLabel: '' },
+  },
+  exportDataRange: '30d',
+  exportCustomStart: '',
+  exportCustomEnd: '',
+  sleepWakeDistributionGranularity: 3,
+  sleepBedtimeDistributionGranularity: 3,
+  sleepWakeDistributionView: 'pie',
+  sleepBedtimeDistributionView: 'pie',
+  sleepTimelineView: 'daily',
+  sleepFocusView: 'duration',
+  sleepUtilView: 'daily',
   _editingSessionId: null,
   _sessType: 'normal',
   _editingTaskId: null,
   forecastEditingId: null,
+  forecastCategoryFilter: { level1: '', level2: '', level3: '' },
   workbookReviewId: null,
   workbookDraft: null,
+  workbookReviewQuery: '',
+  workbookReviewSort: 'updatedDesc',
+  workbookChartView: 'questions',
+  visualColorEditorGroup: 'level1',
+  visualColorEditorParentL1: '',
+  visualColorEditorParentL2: '',
+  visualColorEditorDraft: null,
+  visualColorEditorDirty: false,
+  templateLibraryView: 'task',
+  templateAuditOpen: false,
   _serverSnapshot: null,
   _pendingSnapshotRestore: false,
-  _taskFilter: {},  // { entry: '类别', day: '类别', week: '类别', month: '类别' }
-  stackedMode: 'week', // 'week' or 'month'
-  stackedWeekStart: getMondayOfDate(new Date()),
-  stackedMonth: { year: new Date().getFullYear(), month: new Date().getMonth() },
+  _taskFilter: {},  // { entry: '类别', day: '类别' }
   stackedGroupLevel: 1, // 1=一级, 2=二级, 3=三级
-  sessAna: { mode: 'week', weekStart: getMondayOfDate(new Date()), month: { year: new Date().getFullYear(), month: new Date().getMonth() }, catFilter: '' },
-  taskAna: { mode: 'week', weekStart: getMondayOfDate(new Date()), month: { year: new Date().getFullYear(), month: new Date().getMonth() }, level: 1, effScale: 'linear', effYMax: '', catFilter: '', effCatFilter: '', chapterEffTemplateId: '' },
+  stackedChartView: 'absolute',
+  stackedHiddenSeries: [],
+  sessAna: {
+    mode: 'week',
+    typeFilter: '',
+    catFilter: '',
+    trendView: 'daily',
+    durationBasis: 'clock',
+    durationCategory: '',
+    durationBinSize: 30,
+    detailCategory: '',
+    hiddenSeries: [],
+  },
+  taskAna: {
+    mode: 'week',
+    level: 1,
+    effScale: 'linear',
+    effYMax: '',
+    catFilter: '',
+    effCatFilter: '',
+    effLevel1: '',
+    effLevel2: '',
+    effLevel3: '',
+    chapterEffTemplateId: '',
+    durationView: 'daily',
+    countView: 'daily',
+    chapterMetric: 'minutes',
+    chapterView: 'single',
+    efficiencyView: 'daily',
+    hiddenSeries: { duration: [], efficiency: [] },
+    taskDetailLevel1: '',
+    taskDetailLevel2: '',
+    taskDetailLevel3: '',
+    distributionLevel1: '',
+    distributionLevel2: '',
+    distributionLevel3: '',
+    distributionMetric: 'duration',
+    distributionUnit: '',
+    distributionGranularity: 3,
+  },
 };
 
 // ============================================================
@@ -241,7 +404,7 @@ function filterTasksByView(tasks, viewId) {
 
 function applyTaskFilter(viewId, value) {
   state._taskFilter[viewId] = value || '';
-  const renders = { entry: renderEntry, day: renderDayOverview, week: renderWeekOverview, month: renderMonthOverview };
+  const renders = { entry: renderEntry, day: renderDayOverview };
   if (renders[viewId]) renders[viewId]();
 }
 
@@ -359,10 +522,34 @@ function loadDraft(dateStr) {
     ? remoteDraft
     : localDraft;
 }
-function clearDraft(dateStr) {
-  try { localStorage.removeItem(DRAFT_KEY_PREFIX + dateStr); } catch (e) { }
+const ENTRY_SESSION_DRAFT_KEYS = [
+  'sess_name', 'sess_start_h', 'sess_start_m', 'sess_end_h', 'sess_end_m',
+  'sess_nominal', 'sess_actual', 'sess_rest', 'sess_note',
+];
+const ENTRY_TASK_DRAFT_KEYS = [
+  'task_name', 'task_tmpl', 'task_l1', 'task_l1_custom', 'task_l2', 'task_l2_custom',
+  'task_l3', 'task_l3_custom', 'task_min', 'task_qty', 'task_unit',
+  'task_new_ordinal_unit', 'task_template_ordinal_unit', 'task_wrong', 'task_acc',
+  'task_note', 'task_new_ordinal_enabled', 'task_new_quantity_enabled', 'task_new_accuracy_enabled',
+  'task_ordinal_numbers', 'task_completed_ordinals', 'task_named_item_allocations',
+  'task_chapter_numbers', 'task_completed_chapters',
+];
+
+function saveCurrentEntryDraft(dateStr = state.selectedDate) {
+  if (state.tab === 'entry' && document.getElementById('taskForm')) {
+    saveDraft(dateStr, collectEntryDraft());
+  }
+}
+
+function clearEntryDraftFields(dateStr, fieldKeys) {
+  const draft = state.tab === 'entry' && document.getElementById('taskForm')
+    ? collectEntryDraft()
+    : (loadDraft(dateStr) || {});
+  fieldKeys.forEach(key => { delete draft[key]; });
+  draft._savedAt = new Date().toISOString();
+  saveDraft(dateStr, draft);
   if (state._serverSnapshot?.entryDraftDate === dateStr) {
-    state._serverSnapshot.entryDraft = null;
+    state._serverSnapshot.entryDraft = draft;
   }
 }
 
@@ -382,6 +569,10 @@ function collectEntryDraft() {
   const sh = document.getElementById('sleepInput_h'), sm = document.getElementById('sleepInput_m');
   if (sh) draft.sleepH = sh.value;
   if (sm) draft.sleepM = sm.value;
+  const wakeNoteEl = document.getElementById('wakeNoteInput');
+  if (wakeNoteEl) draft.wakeNote = wakeNoteEl.value;
+  const sleepNoteEl = document.getElementById('sleepNoteInput');
+  if (sleepNoteEl) draft.sleepNote = sleepNoteEl.value;
   const noteEl = document.getElementById('dayNoteInput');
   if (noteEl) draft.dayNote = noteEl.value;
   ['sess_name', 'sess_start_h', 'sess_start_m', 'sess_end_h', 'sess_end_m', 'sess_nominal', 'sess_actual', 'sess_rest', 'sess_note'].forEach(id => {
@@ -392,6 +583,7 @@ function collectEntryDraft() {
   });
   draft.task_new_ordinal_enabled = Boolean(document.getElementById('task_new_ordinal_enabled')?.checked);
   draft.task_new_quantity_enabled = Boolean(document.getElementById('task_new_quantity_enabled')?.checked);
+  draft.task_new_accuracy_enabled = Boolean(document.getElementById('task_new_accuracy_enabled')?.checked);
   draft.task_ordinal_numbers = forecastSelectedChapters('.task-chapter-involved');
   draft.task_completed_ordinals = forecastSelectedChapters('.task-chapter-completed');
   draft.task_named_item_allocations = taskCollectNamedItemAllocations(false) || [];
@@ -414,7 +606,7 @@ function collectActiveTabFields() {
 function collectOpenPanelIds() {
   const ids = [];
   document.querySelectorAll('.form-panel.open[id]').forEach(element => ids.push(element.id));
-  ['tmpl-form-body', 'sess-tmpl-form-body', 'day-type-tmpl-form-body'].forEach(id => {
+  ['tmpl-form-body', 'sess-tmpl-form-body-unavailable', 'sess-tmpl-form-body-special-study', 'day-type-tmpl-form-body'].forEach(id => {
     const element = document.getElementById(id);
     if (element && element.style.display !== 'none') ids.push(id);
   });
@@ -465,8 +657,9 @@ function applyLoadedSnapshot(snapshot) {
   if (typeof snapshot.selectedDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(snapshot.selectedDate)) {
     state.selectedDate = snapshot.selectedDate;
   }
-  const validTabs = ['entry', 'calendar', 'day', 'week', 'month', 'stacked', 'sessAnalysis', 'taskAnalysis', 'sleep', 'export', 'templates', 'forecast', 'workbookReview', 'settings'];
-  if (validTabs.includes(snapshot.tab)) state.tab = snapshot.tab;
+  const restoredTab = ['week', 'month'].includes(snapshot.tab) ? 'overview' : snapshot.tab;
+  const validTabs = ['entry', 'calendar', 'day', 'overview', 'stacked', 'sessAnalysis', 'taskAnalysis', 'sleep', 'export', 'templates', 'forecast', 'workbookReview', 'settings'];
+  if (validTabs.includes(restoredTab)) state.tab = restoredTab;
   state._editingSessionId = snapshot.editingSessionId || null;
   state._editingTaskId = snapshot.editingTaskId || null;
   state._sessType = snapshot.sessionType || 'normal';
@@ -573,6 +766,8 @@ function restoreDraft(dateStr) {
     if (draft.wakeM) { const el = document.getElementById('wakeInput_m'); if (el && !el.value) el.value = draft.wakeM; }
     if (draft.sleepH) { const el = document.getElementById('sleepInput_h'); if (el && !el.value) el.value = draft.sleepH; }
     if (draft.sleepM) { const el = document.getElementById('sleepInput_m'); if (el && !el.value) el.value = draft.sleepM; }
+    if (draft.wakeNote) { const el = document.getElementById('wakeNoteInput'); if (el && !el.value) el.value = draft.wakeNote; }
+    if (draft.sleepNote) { const el = document.getElementById('sleepNoteInput'); if (el && !el.value) el.value = draft.sleepNote; }
     if (draft.dayNote) { const el = document.getElementById('dayNoteInput'); if (el && !el.value) el.value = draft.dayNote; }
     if (draft.task_tmpl) {
       const templateEl = document.getElementById('task_tmpl');
@@ -584,12 +779,13 @@ function restoreDraft(dateStr) {
         });
         configureTaskUnitFields(draft.task_tmpl);
       }
-    } else if (draft.task_new_ordinal_enabled || draft.task_new_quantity_enabled ||
+    } else if (draft.task_new_ordinal_enabled || draft.task_new_quantity_enabled || draft.task_new_accuracy_enabled ||
       (draft.task_ordinal_numbers || []).length) {
       renderForecastTaskFields('', {
         ordinalEnabled: draft.task_new_ordinal_enabled,
         namedItemEnabled: draft.task_new_ordinal_enabled,
         quantityEnabled: draft.task_new_quantity_enabled,
+        accuracyEnabled: draft.task_new_accuracy_enabled,
         ordinalUnit: draft.task_new_ordinal_unit || '',
         ordinalNumbers: draft.task_ordinal_numbers || draft.task_chapter_numbers || [],
         completedOrdinals: draft.task_completed_ordinals || draft.task_completed_chapters || [],
@@ -784,8 +980,6 @@ function calcStats(values) {
 
 /** 格式化变异系数 */
 function fmtCV(cv) { return cv != null ? (cv * 100).toFixed(1) + '%' : '-'; }
-/** 格式化标准差（分钟→时分） */
-function fmtSD(sd) { return fmtMin(Math.round(sd)); }
 function sessionClock(s) {
   const a = parseMin(s.startTime), b = parseMin(s.endTime);
   if (a == null || b == null) return 0;
@@ -831,12 +1025,26 @@ function sessionTypeMeta(s) {
   return { label: '普通', short: '', color: 'var(--text)', bg: '' };
 }
 function devClass(pct) {
-  if (pct == null) return 'c-muted';
-  if (pct > 5) return 'dev-pos'; if (pct < -5) return 'dev-neg'; return 'dev-zero';
+  return pct == null ? 'c-muted' : 'c-text';
 }
 function devStr(pct) {
   if (pct == null) return '-';
   return (pct >= 0 ? '+' : '') + pct + '%';
+}
+
+function actualFocusDeviationPct(actualMinutes, averageActualMinutes) {
+  const actual = Number(actualMinutes);
+  const average = Number(averageActualMinutes);
+  if (!Number.isFinite(actual) || !Number.isFinite(average) || average <= 0) return null;
+  return (actual / average - 1) * 100;
+}
+
+function actualFocusDeviationBoxHtml(pct, averageActualMinutes) {
+  if (!Number.isFinite(pct)) return '<span class="actual-focus-deviation-box c-muted">—</span>';
+  const rounded = Math.round(pct * 10) / 10;
+  const className = rounded > 0 ? 'c-green' : rounded < 0 ? 'c-red' : 'c-muted';
+  const title = `比较基准：日均实际专注 ${fmtMin(Math.round(Number(averageActualMinutes) || 0), true)}`;
+  return `<span class="actual-focus-deviation-box ${className}" title="${title}">${rounded >= 0 ? '+' : ''}${rounded.toFixed(1)}%</span>`;
 }
 
 // ============================================================
@@ -890,13 +1098,6 @@ function normalizeTimeInputPair(idPrefix) {
   hEl.value = String(hour).padStart(2, '0');
   mEl.value = String(minute).padStart(2, '0');
 }
-function clampTimeInput(el, min, max) {
-  let v = parseInt(el.value, 10);
-  if (isNaN(v)) return;
-  if (v < min) el.value = min;
-  if (v > max) el.value = max;
-}
-
 // ============================================================
 // ACTIVITY CATEGORY CONFIG (3 independent flat lists)
 // ============================================================
@@ -951,7 +1152,10 @@ async function addCatItem(level, name) {
   if (!name || !name.trim()) return;
   name = name.trim();
   const list = getCatList(level);
-  if (!list.includes(name)) list.push(name);
+  if (!list.includes(name)) {
+    list.push(name);
+    ensureVisualCategoryColor(level, name, list.length - 1);
+  }
   await saveAllStorage();
 }
 
@@ -1051,9 +1255,6 @@ function unitSelFilter(inputId, msgId, library = 'quantity') {
     if (label) label.textContent = unitText ? `数量（${unitText}，可选）` : '数量（可选）';
     if (wrongLabel) wrongLabel.textContent = unitText ? `错误数量（${unitText}，可选）` : '错误数量（可选）';
   }
-  if (inputId === 'task_template_ordinal_unit' || inputId === 'task_new_ordinal_unit') {
-    taskUpdateOrdinalUnitPreview(input.value.trim());
-  }
   const items = getUnitList(library);
   const matched = query ? items.filter(it => it.toLowerCase().includes(query)) : items;
   const remaining = query ? items.filter(it => !it.toLowerCase().includes(query)) : [];
@@ -1135,9 +1336,6 @@ function parseActPath(path) {
   const parts = path.split(' > ');
   return [parts[0] || '', parts[1] || '', parts[2] || ''];
 }
-// Get top-level category from path (for color)
-function getActL1(path) { return parseActPath(path)[0]; }
-
 // Backward compat: getActivityTypes returns flat list of all L1 names
 function getActivityTypes() { return getLevel1Names(); }
 
@@ -1149,8 +1347,35 @@ function getSessionTemplates() {
   return state.data.__sessionTemplates__;
 }
 
+function normalizeSessionTemplateType(value) {
+  return value === 'special-study' ? 'special-study' : 'special';
+}
+
+function migrateSessionTemplateTypes() {
+  const usage = new Map();
+  Object.entries(state.data).forEach(([dateStr, day]) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !Array.isArray(day?.sessions)) return;
+    day.sessions.forEach(sessionRecord => {
+      if (!isUnavailableSession(sessionRecord) && !isSpecialStudySession(sessionRecord)) return;
+      const name = String(sessionRecord.name || '').trim();
+      if (!name) return;
+      if (!usage.has(name)) usage.set(name, new Set());
+      usage.get(name).add(isSpecialStudySession(sessionRecord) ? 'special-study' : 'special');
+    });
+  });
+  let changed = false;
+  getSessionTemplates().forEach(template => {
+    if (['special', 'special-study'].includes(template.sessionType)) return;
+    const types = usage.get(String(template.name || '').trim()) || new Set();
+    template.sessionType = types.size === 1 && types.has('special-study') ? 'special-study' : 'special';
+    changed = true;
+  });
+  return changed;
+}
+
 async function addSessionTemplate(tmpl) {
   tmpl.id = uid();
+  tmpl.sessionType = normalizeSessionTemplateType(tmpl.sessionType);
   getSessionTemplates().push(tmpl);
   await saveAllStorage();
 }
@@ -1161,6 +1386,7 @@ async function deleteSessionTemplate(id) {
 }
 
 async function saveSessionTemplate(tmpl) {
+  tmpl.sessionType = normalizeSessionTemplateType(tmpl.sessionType);
   const list = getSessionTemplates();
   const idx = list.findIndex(t => t.id === tmpl.id);
   if (idx >= 0) list[idx] = tmpl; else list.push(tmpl);
@@ -1170,9 +1396,92 @@ async function saveSessionTemplate(tmpl) {
 // ============================================================
 // DAY TYPE TEMPLATES (日期类型模板)
 // ============================================================
+const DAY_TYPE_SYMBOLS = [
+  { key: 'diamond', glyph: '◆', label: '菱形' },
+  { key: 'star', glyph: '★', label: '星形' },
+  { key: 'triangle', glyph: '▲', label: '三角' },
+  { key: 'square', glyph: '■', label: '方形' },
+  { key: 'circle', glyph: '●', label: '圆形' },
+  { key: 'cross', glyph: '✚', label: '十字' },
+  { key: 'spark', glyph: '✦', label: '闪光' },
+  { key: 'hexagon', glyph: '⬢', label: '六边形' },
+  { key: 'hollowDiamond', glyph: '◇', label: '空心菱形' },
+  { key: 'hollowStar', glyph: '☆', label: '空心星形' },
+  { key: 'hollowCircle', glyph: '○', label: '空心圆形' },
+  { key: 'hollowSquare', glyph: '□', label: '空心方形' },
+];
+
 function getDayTypeTemplates() {
   if (!state.data.__dayTypeTemplates__) state.data.__dayTypeTemplates__ = [];
   return state.data.__dayTypeTemplates__;
+}
+
+function dayTypeSymbolMeta(symbolKey) {
+  return DAY_TYPE_SYMBOLS.find(item => item.key === symbolKey) || DAY_TYPE_SYMBOLS[0];
+}
+
+function nextAvailableDayTypeSymbol(excludedId = '') {
+  const used = new Set(getDayTypeTemplates()
+    .filter(template => template.id !== excludedId && template.symbolKey)
+    .map(template => template.symbolKey));
+  return DAY_TYPE_SYMBOLS.find(item => !used.has(item.key))?.key || DAY_TYPE_SYMBOLS[0].key;
+}
+
+function dayTypeSymbolOptionsHtml(selectedKey, excludedId = '') {
+  const usedBy = new Map(getDayTypeTemplates()
+    .filter(template => template.id !== excludedId && template.symbolKey)
+    .map(template => [template.symbolKey, template.name || '其他模板']));
+  return DAY_TYPE_SYMBOLS.map(item => `<option value="${item.key}" ${selectedKey === item.key ? 'selected' : ''} ${usedBy.has(item.key) ? 'disabled' : ''}>${item.glyph} ${item.label}${usedBy.has(item.key) ? ` · 已用于${escHtmlApp(usedBy.get(item.key))}` : ''}</option>`).join('');
+}
+
+function migrateDayTypeModel() {
+  let needsUntypedTemplate = false;
+  Object.entries(state.data).forEach(([dateStr, day]) => {
+    if (dateStr.startsWith('__') || !day || typeof day !== 'object') return;
+    let dayType = String(day.dayType || '').trim();
+    if (!dayType && day.specialDay) {
+      dayType = '未分类日期类型';
+      needsUntypedTemplate = true;
+    }
+    day.dayType = dayType;
+    day.excludeFromRating = Boolean(dayType && day.excludeFromRating);
+    delete day.specialDay;
+  });
+  const templates = getDayTypeTemplates();
+  if (needsUntypedTemplate && !templates.some(template => String(template.name || '').trim() === '未分类日期类型')) {
+    templates.push({ id: uid(), name: '未分类日期类型', symbolKey: '', excludeFromRating: false });
+  }
+  const used = new Set();
+  templates.forEach(template => {
+    delete template.specialDay;
+    template.excludeFromRating = Boolean(template.excludeFromRating);
+    const valid = DAY_TYPE_SYMBOLS.some(item => item.key === template.symbolKey);
+    if (!valid || used.has(template.symbolKey)) template.symbolKey = '';
+    if (template.symbolKey) used.add(template.symbolKey);
+  });
+  templates.forEach(template => {
+    if (template.symbolKey) return;
+    const available = DAY_TYPE_SYMBOLS.find(item => !used.has(item.key)) || DAY_TYPE_SYMBOLS[0];
+    template.symbolKey = available.key;
+    used.add(available.key);
+  });
+}
+
+function validateDayTypeTemplate(template, editingId = '') {
+  const normalizedName = String(template.name || '').trim().toLocaleLowerCase();
+  if (getDayTypeTemplates().some(item => item.id !== editingId && String(item.name || '').trim().toLocaleLowerCase() === normalizedName)) {
+    alert('日期类型名称不能重复');
+    return false;
+  }
+  if (!DAY_TYPE_SYMBOLS.some(item => item.key === template.symbolKey)) {
+    alert('请选择日期类型符号');
+    return false;
+  }
+  if (getDayTypeTemplates().some(item => item.id !== editingId && item.symbolKey === template.symbolKey)) {
+    alert('这个符号已被其他日期类型使用，请选择不同符号');
+    return false;
+  }
+  return true;
 }
 
 async function addDayTypeTemplate(tmpl) {
@@ -1211,10 +1520,14 @@ function switchSessionType(type) {
     btn.style.fontWeight = active ? '600' : '';
     btn.className = active ? 'btn btn-sm' : 'btn btn-ghost btn-sm';
   });
-  if (nameGroup) nameGroup.style.display = type === 'normal' ? 'none' : 'block';
-  if (nominalGroup) nominalGroup.style.display = type === 'normal' ? 'block' : 'none';
-  if (actualGroup) actualGroup.style.display = type === 'special' ? 'none' : 'block';
-  if (restGroup) restGroup.style.display = type === 'normal' ? 'block' : 'none';
+  const setVisible = (element, visible) => {
+    if (!element) return;
+    element.style.display = visible ? '' : 'none';
+  };
+  setVisible(nameGroup, type !== 'normal');
+  setVisible(nominalGroup, type === 'normal');
+  setVisible(actualGroup, type !== 'special');
+  setVisible(restGroup, type === 'normal');
   state._sessType = type;
 }
 
@@ -1223,8 +1536,7 @@ function applySessionTemplate(id) {
   if (!id) return;
   const tmpl = getSessionTemplates().find(t => t.id === id);
   if (!tmpl) return;
-  // Auto-switch to special mode and fill name
-  switchSessionType('special');
+  switchSessionType(normalizeSessionTemplateType(tmpl.sessionType));
   const nameEl = document.getElementById('sess_name');
   if (nameEl && tmpl.name) nameEl.value = tmpl.name;
   if (tmpl.note) {
@@ -1235,7 +1547,8 @@ function applySessionTemplate(id) {
 // ============================================================
 // TASK TEMPLATES
 // ============================================================
-// Structure: { id, activityType, defaultMinutes, ordinalEnabled, ordinalUnit, quantityEnabled, quantityUnit, note }
+// Structure: { id, activityType, defaultMinutes, ordinalEnabled, ordinalUnit, quantityEnabled, quantityUnit, accuracyEnabled, note }
+// note 仅作为模板库中的说明文字，不应带入任务记录。
 function getTaskTemplates() {
   if (!state.data.__taskTemplates__) state.data.__taskTemplates__ = [];
   return state.data.__taskTemplates__;
@@ -1280,6 +1593,213 @@ function visibleTaskQuantity(task) {
 
 function visibleTaskQuantityUnit(task) {
   return taskQuantityIsVisible(task) ? String(task?.quantityUnit || '') : '';
+}
+
+function taskEfficiencyScopeKey(task) {
+  const templateId = resolveTaskTemplateId(task);
+  const unit = visibleTaskQuantityUnit(task).trim();
+  return templateId
+    ? `template:${templateId}\u0000${unit}`
+    : `category:${String(task?.activityType || '未分类').trim()}\u0000${unit}`;
+}
+
+function taskUsesChapterEfficiency(task) {
+  const template = getTaskTemplateForTask(task);
+  return Boolean(template && (template.namedItemEnabled ?? template.ordinalEnabled)) ||
+    taskNamedItemAllocations(task).length > 0 || taskOrdinalNumbers(task).length > 0;
+}
+
+function taskEfficiencyRecordKey(dateStr, task) {
+  return task?.id ? `${dateStr}\u0000${task.id}` : '';
+}
+
+function buildTaskEfficiencyComparisonIndex() {
+  const rows = Object.entries(state.data)
+    .filter(([dateStr, day]) => /^\d{4}-\d{2}-\d{2}$/.test(dateStr) && Array.isArray(day?.tasks))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([dateStr, day]) => day.tasks.map((task, sourceIndex) => ({ dateStr, task, sourceIndex })))
+    .sort((a, b) => a.dateStr.localeCompare(b.dateStr) || a.sourceIndex - b.sourceIndex);
+  const aggregates = new Map();
+  const chapterProgress = new Map();
+  const samples = [];
+  const addSample = (row, quantity, minutes, kind, scopeKey) => {
+    if (!(quantity > 0) || !(minutes > 0)) return;
+    const aggregateKey = `${kind}\u0000${scopeKey}`;
+    if (!aggregates.has(aggregateKey)) aggregates.set(aggregateKey, { quantity: 0, minutes: 0, count: 0 });
+    const aggregate = aggregates.get(aggregateKey);
+    aggregate.quantity += quantity;
+    aggregate.minutes += minutes;
+    aggregate.count++;
+    samples.push({ row, quantity, minutes, kind, aggregateKey });
+  };
+
+  rows.forEach(row => {
+    const task = row.task;
+    const minutes = Math.max(0, Number(task?.minutes) || 0);
+    const quantity = visibleTaskQuantity(task);
+    const scopeKey = taskEfficiencyScopeKey(task);
+    if (!taskUsesChapterEfficiency(task)) {
+      addSample(row, quantity, minutes, 'task', scopeKey);
+      return;
+    }
+
+    let allocations = taskNamedItemAllocations(task);
+    if (!allocations.length) {
+      const ordinals = taskOrdinalNumbers(task);
+      const completed = new Set(taskCompletedOrdinals(task));
+      allocations = ordinals.map(value => ({
+        itemId: `ordinal:${value}`,
+        itemName: String(value),
+        minutes: ordinals.length ? minutes / ordinals.length : 0,
+        quantity: ordinals.length && quantity > 0 ? quantity / ordinals.length : null,
+        completed: completed.has(value),
+      }));
+    }
+    if (!allocations.length) return;
+    if (!chapterProgress.has(scopeKey)) chapterProgress.set(scopeKey, new Map());
+    const progressByItem = chapterProgress.get(scopeKey);
+    let completedQuantity = 0;
+    let completedMinutes = 0;
+    allocations.forEach(allocation => {
+      const itemKey = allocation.itemId || String(allocation.itemName || '').trim().toLocaleLowerCase();
+      if (!itemKey) return;
+      if (!progressByItem.has(itemKey)) progressByItem.set(itemKey, { quantity: 0, minutes: 0, completed: false });
+      const progress = progressByItem.get(itemKey);
+      if (progress.completed) return;
+      progress.minutes += Math.max(0, Number(allocation.minutes) || 0);
+      const allocationQuantity = taskQuantityIsVisible(task) ? Number(allocation.quantity) : NaN;
+      if (Number.isFinite(allocationQuantity) && allocationQuantity > 0) progress.quantity += allocationQuantity;
+      if (!allocation.completed) return;
+      progress.completed = true;
+      if (progress.quantity > 0 && progress.minutes > 0) {
+        completedQuantity += progress.quantity;
+        completedMinutes += progress.minutes;
+      }
+    });
+    addSample(row, completedQuantity, completedMinutes, 'chapter', scopeKey);
+  });
+
+  const byTask = new WeakMap();
+  const byKey = new Map();
+  samples.forEach(sample => {
+    const aggregate = aggregates.get(sample.aggregateKey);
+    if (!aggregate || !(aggregate.quantity > 0) || !(aggregate.minutes > 0)) return;
+    const efficiency = sample.quantity / sample.minutes;
+    const average = aggregate.quantity / aggregate.minutes;
+    const comparison = {
+      efficiency,
+      average,
+      deltaPct: average > 0 ? (efficiency / average - 1) * 100 : null,
+      quantity: sample.quantity,
+      minutes: sample.minutes,
+      kind: sample.kind,
+      sampleCount: aggregate.count,
+      unit: visibleTaskQuantityUnit(sample.row.task),
+    };
+    byTask.set(sample.row.task, comparison);
+    const key = taskEfficiencyRecordKey(sample.row.dateStr, sample.row.task);
+    if (key) byKey.set(key, comparison);
+  });
+  return { byTask, byKey };
+}
+
+function taskEfficiencyComparisonFor(index, task, dateStr) {
+  if (!index || !task) return null;
+  return index.byTask.get(task) || index.byKey.get(taskEfficiencyRecordKey(dateStr, task)) || null;
+}
+
+function taskEfficiencyDeltaHtml(comparison) {
+  if (!comparison || !Number.isFinite(comparison.deltaPct)) return '-';
+  const delta = Math.round(comparison.deltaPct * 10) / 10;
+  const unit = comparison.unit ? ` ${comparison.unit}/min` : '/min';
+  const basis = comparison.kind === 'chapter' ? '本次完成章节' : '本条任务';
+  const averageBasis = comparison.kind === 'chapter' ? '同模板已完成章节' : '同模板/分类任务';
+  const title = `${basis}效率 ${comparison.efficiency.toFixed(3)}${unit}；${averageBasis}加权平均 ${comparison.average.toFixed(3)}${unit}（${comparison.sampleCount} 个有效样本）`;
+  const className = delta > 0 ? 'c-green' : delta < 0 ? 'c-red' : 'c-muted';
+  return `<span class="${className}" title="${escHtmlApp(title)}">${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%</span>`;
+}
+
+function taskOutputDeviationForDates(dateStrs, efficiencyIndex = buildTaskEfficiencyComparisonIndex()) {
+  let equivalentMinutes = 0;
+  let baselineMinutes = 0;
+  let sampleCount = 0;
+  (dateStrs || []).forEach(dateStr => {
+    const day = state.data[dateStr];
+    (day?.tasks || []).forEach(task => {
+      const comparison = taskEfficiencyComparisonFor(efficiencyIndex, task, dateStr);
+      if (!comparison || !(comparison.average > 0) || !(comparison.quantity > 0) || !(comparison.minutes > 0)) return;
+      equivalentMinutes += comparison.quantity / comparison.average;
+      baselineMinutes += comparison.minutes;
+      sampleCount++;
+    });
+  });
+  if (!sampleCount || !(baselineMinutes > 0)) return null;
+  return {
+    deltaPct: (equivalentMinutes / baselineMinutes - 1) * 100,
+    equivalentMinutes,
+    baselineMinutes,
+    sampleCount,
+  };
+}
+
+function taskOutputDeviationHtml(summary) {
+  if (!summary || !Number.isFinite(summary.deltaPct)) return '-';
+  const delta = Math.round(summary.deltaPct * 10) / 10;
+  const className = delta > 0 ? 'c-green' : delta < 0 ? 'c-red' : 'c-muted';
+  const title = `共 ${summary.sampleCount} 个有效效率样本；按各自历史平均效率换算，实际产出相当于 ${summary.equivalentMinutes.toFixed(1)} 个标准分钟，基准投入 ${summary.baselineMinutes.toFixed(1)} 分钟。章节样本只归入完成日。`;
+  return `<span class="${className}" title="${escHtmlApp(title)}">${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%</span>`;
+}
+
+function taskAccuracyIsVisible(task) {
+  const template = getTaskTemplateForTask(task);
+  if (template) return Boolean(template.accuracyEnabled);
+  return task?.wrongCount != null && task?.wrongCount !== '';
+}
+
+function visibleTaskWrongCount(task) {
+  if (!taskAccuracyIsVisible(task)) return null;
+  const quantity = visibleTaskQuantity(task);
+  const wrong = Number(task?.wrongCount);
+  return Number.isInteger(quantity) && quantity > 0 && Number.isInteger(wrong) && wrong >= 0 && wrong <= quantity
+    ? wrong
+    : null;
+}
+
+function visibleTaskAccuracy(task) {
+  const quantity = visibleTaskQuantity(task);
+  const wrong = visibleTaskWrongCount(task);
+  return wrong == null || quantity <= 0 ? null : Number((((quantity - wrong) / quantity) * 100).toFixed(2));
+}
+
+function taskAccuracyEvidence(task, backfillWrongCount = false) {
+  const quantity = Number(task?.quantity);
+  if (!Number.isInteger(quantity) || quantity <= 0) return null;
+  let wrong = Number(task?.wrongCount);
+  const explicitWrong = task?.wrongCount != null && task.wrongCount !== '' &&
+    Number.isInteger(wrong) && wrong >= 0 && wrong <= quantity;
+  if (!explicitWrong) {
+    const accuracy = Number(task?.accuracy);
+    if (task?.accuracy == null || task.accuracy === '' || !Number.isFinite(accuracy) || accuracy < 0 || accuracy > 100) return null;
+    const estimatedWrong = quantity * (100 - accuracy) / 100;
+    const candidate = Math.round(estimatedWrong);
+    if (candidate < 0 || candidate > quantity) return null;
+    const accuracyText = String(task.accuracy);
+    const decimals = accuracyText.includes('e') ? 8 : Math.min((accuracyText.split('.')[1] || '').length, 8);
+    const tolerance = 0.5 * (10 ** -decimals) + 1e-9;
+    const candidateAccuracy = (quantity - candidate) / quantity * 100;
+    if (Math.abs(candidateAccuracy - accuracy) > tolerance) return null;
+    const ambiguous = [candidate - 1, candidate + 1].some(other =>
+      other >= 0 && other <= quantity && Math.abs(((quantity - other) / quantity * 100) - accuracy) <= tolerance);
+    if (ambiguous) return null;
+    wrong = candidate;
+    if (backfillWrongCount) task.wrongCount = candidate;
+  }
+  return {
+    quantity,
+    wrong,
+    accuracy: Number((((quantity - wrong) / quantity) * 100).toFixed(2)),
+    quantityUnit: String(task?.quantityUnit || '').trim(),
+  };
 }
 
 async function addTaskTemplate(tmpl) {
@@ -1364,7 +1884,6 @@ function applyTemplate(id) {
   if (tmpl.quantityEnabled && tmpl.quantityUnit) {
     const el = document.getElementById('task_unit'); if (el) el.value = tmpl.quantityUnit;
   }
-  if (tmpl.note) { const el = document.getElementById('task_note'); if (el) el.value = tmpl.note; }
   if (message) message.textContent = `正在套用模板「${forecastTemplateLabel(tmpl)}」；修改类别后会自动脱离并重新匹配。`;
   updateTaskCategorySequenceUi();
 }
@@ -1380,6 +1899,9 @@ function taskCurrentDimensionValues(sourceTemplate = null) {
     quantityEnabled: sourceTemplate
       ? Boolean(sourceTemplate.quantityEnabled)
       : Boolean(document.getElementById('task_new_quantity_enabled')?.checked),
+    accuracyEnabled: sourceTemplate
+      ? Boolean(sourceTemplate.accuracyEnabled)
+      : Boolean(document.getElementById('task_new_accuracy_enabled')?.checked),
     ordinalUnit: document.getElementById('task_template_ordinal_unit')?.value.trim() ||
       sourceTemplate?.ordinalUnit || document.getElementById('task_new_ordinal_unit')?.value.trim() || '',
     ordinalNumbers: forecastSelectedChapters('.task-chapter-involved'),
@@ -1439,10 +1961,27 @@ function taskTemplateMonitor() {
   taskAutoLinkFromCategories(values);
 }
 
+function syncTemplateAccuracyControls(quantityId, accuracyId, source = '') {
+  const quantity = document.getElementById(quantityId);
+  const accuracy = document.getElementById(accuracyId);
+  if (!quantity || !accuracy) return;
+  if (source === 'quantity' && !quantity.checked && accuracy.checked) {
+    quantity.checked = true;
+    alert('正确率记录已开启，请先关闭正确率记录，再关闭数量记录。');
+  } else if (source === 'accuracy' && accuracy.checked && !quantity.checked) {
+    accuracy.checked = false;
+    alert('开启正确率记录前必须先开启数量记录。');
+  }
+  accuracy.disabled = !quantity.checked;
+  if (!quantity.checked) accuracy.checked = false;
+}
+
 function configureTaskUnitFields(templateId) {
   const template = getTaskTemplateById(templateId);
   const manualEnabled = Boolean(document.getElementById('task_new_quantity_enabled')?.checked);
   const showQuantity = template ? Boolean(template.quantityEnabled) : manualEnabled;
+  const manualAccuracyEnabled = Boolean(document.getElementById('task_new_accuracy_enabled')?.checked);
+  const showAccuracy = showQuantity && (template ? Boolean(template.accuracyEnabled) : manualAccuracyEnabled);
   const quantity = document.getElementById('task_qty');
   const unit = document.getElementById('task_unit');
   const rate = document.getElementById('task_rate');
@@ -1451,14 +1990,15 @@ function configureTaskUnitFields(templateId) {
   const rateGroup = document.getElementById('task_rate_group');
   const wrongGroup = document.getElementById('task_wrong_group');
   const accuracyGroup = document.getElementById('task_accuracy_group');
+  const wrong = document.getElementById('task_wrong');
   const quantityLabel = document.getElementById('task_qty_label');
   const wrongLabel = document.getElementById('task_wrong_label');
   const unitLabel = document.getElementById('task_unit_label');
   if (quantityGroup) quantityGroup.style.display = showQuantity ? '' : 'none';
   if (unitGroup) unitGroup.style.display = showQuantity ? '' : 'none';
   if (rateGroup) rateGroup.style.display = showQuantity ? '' : 'none';
-  if (wrongGroup) wrongGroup.style.display = showQuantity ? '' : 'none';
-  if (accuracyGroup) accuracyGroup.style.display = showQuantity ? '' : 'none';
+  if (wrongGroup) wrongGroup.style.display = showAccuracy ? '' : 'none';
+  if (accuracyGroup) accuracyGroup.style.display = showAccuracy ? '' : 'none';
   if (template && unit && unit.dataset.templateId !== template.id) {
     unit.value = template.quantityUnit || '';
     unit.dataset.templateId = template.id;
@@ -1467,8 +2007,16 @@ function configureTaskUnitFields(templateId) {
   }
   if (quantityLabel) {
     const unitText = (unit?.value || template?.quantityUnit || '').trim();
-    quantityLabel.textContent = unitText ? `数量（${unitText}，可选）` : '数量（可选）';
-    if (wrongLabel) wrongLabel.textContent = unitText ? `错误数量（${unitText}，可选）` : '错误数量（可选）';
+    quantityLabel.textContent = unitText ? `数量（${unitText}，${showAccuracy ? '必填' : '可选'}）` : `数量（${showAccuracy ? '必填' : '可选'}）`;
+    if (wrongLabel) wrongLabel.textContent = unitText ? `错误数量（${unitText}，必填）` : '错误数量（必填）';
+  }
+  if (quantity) {
+    quantity.required = showAccuracy;
+    quantity.setAttribute('aria-required', showAccuracy ? 'true' : 'false');
+  }
+  if (wrong) {
+    wrong.required = showAccuracy;
+    wrong.setAttribute('aria-required', showAccuracy ? 'true' : 'false');
   }
   if (unitLabel) unitLabel.textContent = template ? '模板数量单位（全局）' : '新模板数量单位';
   unitGroup?.querySelectorAll('input,select,button').forEach(control => {
@@ -1478,17 +2026,9 @@ function configureTaskUnitFields(templateId) {
   if (showQuantity) autoCalcRate();
 }
 
-function taskUpdateOrdinalUnitPreview(unit) {
-  const suffix = document.getElementById('task_ordinal_unit_suffix');
-  if (suffix) suffix.textContent = unit;
-  document.querySelectorAll('.task-ordinal-card').forEach(card => {
-    const label = card.querySelector('b');
-    if (label) label.textContent = `第${card.dataset.ordinal}${unit}`;
-  });
-}
-
-function taskNewUnitToggle() {
+function taskNewUnitToggle(source = '') {
   const ordinalEnabled = Boolean(document.getElementById('task_new_ordinal_enabled')?.checked);
+  syncTemplateAccuracyControls('task_new_quantity_enabled', 'task_new_accuracy_enabled', source);
   const ordinalConfig = document.getElementById('task_new_ordinal_config');
   const ordinalEditor = document.getElementById('task_ordinal_editor');
   if (ordinalConfig) ordinalConfig.style.display = ordinalEnabled ? '' : 'none';
@@ -1503,17 +2043,27 @@ function taskNewUnitToggle() {
 
 async function taskTemplateToggleFeature(templateId, feature, checkbox) {
   const template = getTaskTemplateById(templateId);
-  const key = feature === 'ordinal' ? 'namedItemEnabled' : 'quantityEnabled';
+  const key = feature === 'ordinal' ? 'namedItemEnabled' : feature === 'accuracy' ? 'accuracyEnabled' : 'quantityEnabled';
   if (!template || !checkbox) return;
   const previous = feature === 'ordinal'
     ? Boolean(template.namedItemEnabled ?? template.ordinalEnabled)
     : Boolean(template[key]);
   const next = Boolean(checkbox.checked);
   if (previous === next) return;
+  if (feature === 'accuracy' && next && !template.quantityEnabled) {
+    checkbox.checked = previous;
+    alert('开启正确率记录前必须先开启数量记录。');
+    return;
+  }
+  if (feature === 'quantity' && !next && template.accuracyEnabled) {
+    checkbox.checked = previous;
+    alert('正确率记录已开启，请先关闭正确率记录，再关闭数量记录。');
+    return;
+  }
   const enteredOrdinalUnit = document.getElementById('task_template_ordinal_unit')?.value.trim() || template.ordinalUnit || '';
   const enteredQuantityUnit = document.getElementById('task_unit')?.value.trim() || template.quantityUnit || '';
   const unit = feature === 'ordinal' ? enteredOrdinalUnit : enteredQuantityUnit;
-  if (feature !== 'ordinal' && next && !unit) {
+  if (feature === 'quantity' && next && !unit) {
     checkbox.checked = previous;
     alert('请先在当前任务表单中设置数量单位。');
     return;
@@ -1521,7 +2071,8 @@ async function taskTemplateToggleFeature(templateId, feature, checkbox) {
   const affected = getTasksForTemplate(templateId).length;
   const action = next ? '开启' : '关闭';
   const effect = next ? '恢复显示并重新纳入统计' : '隐藏但不删除历史数据，并停止相关统计';
-  if (!confirm(`${action}模板「${forecastTemplateLabel(template)}」的${feature === 'ordinal' ? '命名章节' : '数量'}记录？\n将影响 ${affected} 条关联任务：${effect}。`)) {
+  const featureLabel = feature === 'ordinal' ? '命名章节' : feature === 'accuracy' ? '正确率' : '数量';
+  if (!confirm(`${action}模板「${forecastTemplateLabel(template)}」的${featureLabel}记录？\n将影响 ${affected} 条关联任务：${effect}。`)) {
     checkbox.checked = previous;
     return;
   }
@@ -1546,18 +2097,26 @@ async function taskTemplateToggleFeature(templateId, feature, checkbox) {
 
 function refreshCurrentTaskVisibility() {
   const day = getDay(state.selectedDate);
+  const efficiencyIndex = buildTaskEfficiencyComparisonIndex();
   (day.tasks || []).forEach(task => {
     const row = document.querySelector(`#tab-entry tr[data-task-id="${task.id}"]`);
     if (!row) return;
     const nameCell = row.querySelector('.task-name-cell');
     const quantityCell = row.querySelector('.task-quantity-cell');
     const rateCell = row.querySelector('.task-rate-cell');
+    const efficiencyDeltaCell = row.querySelector('.task-efficiency-delta-cell');
+    const accuracyCell = row.querySelector('.task-accuracy-cell');
     const quantity = visibleTaskQuantity(task);
     const unit = visibleTaskQuantityUnit(task);
     const rate = quantity && Number(task.minutes) > 0 ? (quantity / Number(task.minutes)).toFixed(2) : '';
     if (nameCell) nameCell.innerHTML = `${escHtmlApp(task.name || '')}${taskOrdinalBadgeHtml(task)}`;
     if (quantityCell) quantityCell.textContent = quantity ? `${quantity}${unit ? ` ${unit}` : ''}` : '-';
     if (rateCell) rateCell.textContent = rate ? `${rate}${unit ? ` ${unit}/min` : '/min'}` : '-';
+    if (efficiencyDeltaCell) efficiencyDeltaCell.innerHTML = taskEfficiencyDeltaHtml(taskEfficiencyComparisonFor(efficiencyIndex, task, state.selectedDate));
+    if (accuracyCell) {
+      const accuracy = visibleTaskAccuracy(task);
+      accuracyCell.textContent = accuracy == null ? '-' : `${accuracy}%`;
+    }
   });
 }
 
@@ -1579,6 +2138,362 @@ function setTemplateCategoryFilter(level, value) {
 function clearTemplateCategoryFilter() {
   state._templateCategoryFilter = { level1: '', level2: '', level3: '' };
   renderTemplates();
+}
+
+function templateAuditScan() {
+  const taskTemplates = new Set(getTaskTemplates().map(template => String(template.activityType || '').trim()).filter(Boolean));
+  const taskGroups = new Map();
+  forEachStoredTask((task, dateStr) => {
+    const activityType = String(task.activityType || '').trim();
+    if (!activityType || activityType === '未分类' || taskTemplates.has(activityType)) return;
+    if (!taskGroups.has(activityType)) taskGroups.set(activityType, []);
+    taskGroups.get(activityType).push({ task, dateStr });
+  });
+  const task = [...taskGroups.entries()].map(([activityType, records]) => {
+    const sorted = records.sort((a, b) => a.dateStr.localeCompare(b.dateStr));
+    const positiveMinutes = sorted.map(record => Number(record.task.minutes)).filter(value => Number.isFinite(value) && value > 0);
+    const quantityRecords = sorted.filter(record => Number(record.task.quantity) > 0);
+    const chapterRecords = sorted.filter(record => taskNamedItemAllocations(record.task).length > 0);
+    const units = quantityRecords.map(record => String(record.task.quantityUnit || '').trim()).filter(Boolean);
+    return {
+      activityType,
+      records: sorted,
+      count: sorted.length,
+      firstDate: sorted[0]?.dateStr || '',
+      lastDate: sorted[sorted.length - 1]?.dateStr || '',
+      totalMinutes: positiveMinutes.reduce((sum, value) => sum + value, 0),
+      averageMinutes: positiveMinutes.length ? Math.round(positiveMinutes.reduce((sum, value) => sum + value, 0) / positiveMinutes.length) : null,
+      quantityCount: quantityRecords.length,
+      chapterCount: chapterRecords.length,
+      unit: units.sort((a, b) => units.filter(value => value === b).length - units.filter(value => value === a).length)[0] || '',
+    };
+  }).sort((a, b) => b.count - a.count || b.lastDate.localeCompare(a.lastDate));
+
+  const sessionTemplates = new Set(getSessionTemplates().map(template => `${normalizeSessionTemplateType(template.sessionType)}\u0000${String(template.name || '').trim()}`).filter(key => !key.endsWith('\u0000')));
+  const sessionGroups = new Map();
+  Object.entries(state.data).forEach(([dateStr, day]) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !Array.isArray(day?.sessions)) return;
+    day.sessions.forEach(sessionRecord => {
+      if (!isUnavailableSession(sessionRecord) && !isSpecialStudySession(sessionRecord)) return;
+      const name = String(sessionRecord.name || '').trim();
+      const sessionType = isSpecialStudySession(sessionRecord) ? 'special-study' : 'special';
+      const key = `${sessionType}\u0000${name}`;
+      if (!name || sessionTemplates.has(key)) return;
+      if (!sessionGroups.has(key)) sessionGroups.set(key, { name, sessionType, records: [] });
+      sessionGroups.get(key).records.push({ session: sessionRecord, dateStr });
+    });
+  });
+  const allMissingSessions = [...sessionGroups.values()].map(group => {
+    const { name, sessionType, records } = group;
+    const sorted = records.sort((a, b) => a.dateStr.localeCompare(b.dateStr));
+    return {
+      name,
+      sessionType,
+      records: sorted,
+      count: sorted.length,
+      firstDate: sorted[0]?.dateStr || '',
+      lastDate: sorted[sorted.length - 1]?.dateStr || '',
+      totalMinutes: sorted.reduce((sum, record) => sum + sessionClock(record.session), 0),
+    };
+  }).sort((a, b) => b.count - a.count || b.lastDate.localeCompare(a.lastDate));
+  const session = allMissingSessions.filter(item => item.sessionType === 'special');
+  const specialStudy = allMissingSessions.filter(item => item.sessionType === 'special-study');
+  return { task, session, specialStudy, total: task.length + session.length + specialStudy.length };
+}
+
+function toggleTemplateAudit() {
+  state.templateAuditOpen = !state.templateAuditOpen;
+  renderTemplates();
+}
+
+function templateAuditTaskDetailsHtml(item) {
+  const rows = item.records.map(record => {
+    const task = record.task;
+    const allocations = taskNamedItemAllocations(task);
+    const quantity = Number(task.quantity);
+    const unit = String(task.quantityUnit || item.unit || '').trim();
+    const encodedId = task.id ? encodeURIComponent(task.id).replace(/'/g, '%27') : '';
+    return `<tr>
+      <td><button type="button" class="template-task-date" onclick="openEntryDate('${record.dateStr}')">${formatShort(record.dateStr)}</button></td>
+      <td>${templateTaskLinkHtml(record.dateStr, task)}</td>
+      <td class="fw-mono">${fmtMin(Number(task.minutes) || 0, true)}</td>
+      <td>${allocations.length ? allocations.map(allocation => `<span class="template-audit-allocation"><b>${escHtmlApp(allocation.itemName)}</b><small>${allocation.minutes ? fmtMin(allocation.minutes, true) : '未分配时长'}${allocation.quantity != null ? ` · ${forecastDisplayMetric(allocation.quantity)} ${escHtmlApp(unit || '数量')}` : ''}${allocation.completed ? ' · 本次完成' : ''}</small></span>`).join('') : '-'}</td>
+      <td class="fw-mono">${Number.isFinite(quantity) && quantity > 0 ? `${forecastDisplayMetric(quantity)} ${escHtmlApp(unit || '数量')}` : '-'}</td>
+      <td class="template-audit-note" title="${escHtmlApp(task.note || '')}">${escHtmlApp(task.note || '-')}</td>
+      <td>${encodedId ? `<button type="button" class="btn btn-ghost btn-sm" onclick="templateOpenTask('${record.dateStr}','${encodedId}')">编辑</button>` : '<button type="button" class="btn btn-ghost btn-sm" disabled>不可编辑</button>'}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="template-audit-detail-wrap"><table class="template-audit-detail-table task"><thead><tr><th>日期</th><th>任务</th><th>时长</th><th>章节贡献</th><th>数量</th><th>备注</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function templateAuditSessionDetailsHtml(item) {
+  const rows = item.records.map(record => {
+    const sessionRecord = record.session;
+    const typeLabel = isSpecialStudySession(sessionRecord) ? '特殊学习' : '特殊时段';
+    const encodedId = sessionRecord.id ? encodeURIComponent(sessionRecord.id).replace(/'/g, '%27') : '';
+    return `<tr>
+      <td><button type="button" class="template-task-date" onclick="openEntryDate('${record.dateStr}')">${formatShort(record.dateStr)}</button></td>
+      <td>${typeLabel}</td>
+      <td class="fw-mono">${encodedId ? `<button type="button" class="template-task-link" onclick="templateAuditOpenSession('${record.dateStr}','${encodedId}')">${sessionRecord.startTime || '-'} — ${sessionRecord.endTime || '-'}</button>` : `${sessionRecord.startTime || '-'} — ${sessionRecord.endTime || '-'}`}</td>
+      <td class="fw-mono">${fmtMin(sessionClock(sessionRecord), true)}</td>
+      <td class="fw-mono c-actual">${isUnavailableSession(sessionRecord) ? '-' : fmtMin(Number(sessionRecord.actualMinutes) || 0, true)}</td>
+      <td class="template-audit-note" title="${escHtmlApp(sessionRecord.note || '')}">${escHtmlApp(sessionRecord.note || '-')}</td>
+      <td>${encodedId ? `<button type="button" class="btn btn-ghost btn-sm" onclick="templateAuditOpenSession('${record.dateStr}','${encodedId}')">编辑</button>` : '<button type="button" class="btn btn-ghost btn-sm" disabled>不可编辑</button>'}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="template-audit-detail-wrap"><table class="template-audit-detail-table session"><thead><tr><th>日期</th><th>类型</th><th>起止时间</th><th>时钟</th><th>实际</th><th>备注</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function templateAuditOpenSession(dateStr, encodedSessionId) {
+  const sessionId = decodeURIComponent(encodedSessionId || '');
+  if (!dateStr || !sessionId) return;
+  monthEditSession(dateStr, sessionId);
+}
+
+function templateAuditPanelHtml(audit) {
+  if (!state.templateAuditOpen) return '';
+  const taskRows = audit.task.map(item => {
+    const encoded = encodeURIComponent(item.activityType).replace(/'/g, '%27');
+    return `<article class="template-audit-item"><details><summary class="template-audit-row"><div class="template-audit-row-main"><i style="--audit-color:${getCategoryColor(item.activityType, 'auto')}"></i><div><b>${escHtmlApp(item.activityType)}</b><span>${item.firstDate} 至 ${item.lastDate}</span></div></div><div class="template-audit-metrics"><span>${item.count} 条任务</span><span>${fmtMin(item.totalMinutes, true)}</span>${item.chapterCount ? `<span>${item.chapterCount} 条含章节</span>` : ''}${item.quantityCount ? `<span>${item.quantityCount} 条含数量${item.unit ? ` · ${escHtmlApp(item.unit)}` : ''}</span>` : ''}</div><span class="template-audit-expand">展开明细</span></summary>${templateAuditTaskDetailsHtml(item)}</details><div class="template-audit-restore"><button type="button" class="btn btn-primary btn-sm" onclick="templateRestoreMissingTask('${encoded}')">恢复模板</button></div></article>`;
+  }).join('');
+  const sessionRows = audit.session.map(item => {
+    const encoded = encodeURIComponent(item.name).replace(/'/g, '%27');
+    return `<article class="template-audit-item"><details><summary class="template-audit-row"><div class="template-audit-row-main"><i style="--audit-color:${getSpecialSeriesColor(item.name)}"></i><div><b>${escHtmlApp(item.name)}</b><span>不可用时段 · ${item.firstDate} 至 ${item.lastDate}</span></div></div><div class="template-audit-metrics"><span>${item.count} 个时段</span><span>${fmtMin(item.totalMinutes, true)}</span></div><span class="template-audit-expand">展开明细</span></summary>${templateAuditSessionDetailsHtml(item)}</details><div class="template-audit-restore"><button type="button" class="btn btn-primary btn-sm" onclick="templateRestoreMissingSession('special','${encoded}')">恢复模板</button></div></article>`;
+  }).join('');
+  const specialStudyRows = audit.specialStudy.map(item => {
+    const encoded = encodeURIComponent(item.name).replace(/'/g, '%27');
+    return `<article class="template-audit-item"><details><summary class="template-audit-row"><div class="template-audit-row-main"><i style="--audit-color:${getSpecialSeriesColor(item.name)}"></i><div><b>${escHtmlApp(item.name)}</b><span>特殊学习时段 · ${item.firstDate} 至 ${item.lastDate}</span></div></div><div class="template-audit-metrics"><span>${item.count} 个时段</span><span>${fmtMin(item.totalMinutes, true)}</span></div><span class="template-audit-expand">展开明细</span></summary>${templateAuditSessionDetailsHtml(item)}</details><div class="template-audit-restore"><button type="button" class="btn btn-primary btn-sm" onclick="templateRestoreMissingSession('special-study','${encoded}')">恢复模板</button></div></article>`;
+  }).join('');
+  return `<section class="template-audit-panel">
+    <div class="template-audit-head"><div><div class="template-eyebrow">HISTORY AUDIT</div><h3>历史记录模板抽查</h3><p>仅列出历史记录中仍在使用、但当前模板库已经缺失的项目。</p></div><button type="button" class="btn btn-ghost btn-sm" onclick="toggleTemplateAudit()">关闭</button></div>
+    ${audit.total ? `<div class="template-audit-group"><div class="template-audit-group-title"><b>缺失的任务模板</b><span>${audit.task.length} 项</span></div>${taskRows || '<div class="template-audit-empty">没有缺失的任务模板</div>'}</div><div class="template-audit-group"><div class="template-audit-group-title"><b>缺失的不可用时段模板</b><span>${audit.session.length} 项</span></div>${sessionRows || '<div class="template-audit-empty">没有缺失的不可用时段模板</div>'}</div><div class="template-audit-group"><div class="template-audit-group-title"><b>缺失的特殊学习模板</b><span>${audit.specialStudy.length} 项</span></div>${specialStudyRows || '<div class="template-audit-empty">没有缺失的特殊学习模板</div>'}</div>` : '<div class="template-audit-success"><b>抽查完成，没有发现缺失模板</b><span>当前历史任务、不可用时段和特殊学习都能找到对应模板。</span></div>'}
+  </section>`;
+}
+
+async function templateRestoreMissingTask(encodedActivityType) {
+  const activityType = decodeURIComponent(encodedActivityType || '');
+  const item = templateAuditScan().task.find(entry => entry.activityType === activityType);
+  if (!item) { alert('该模板已经恢复，或历史记录已发生变化。'); renderTemplates(); return; }
+  const featureText = [item.chapterCount ? '命名章节' : '', item.quantityCount ? `数量记录${item.unit ? `（${item.unit}）` : ''}` : ''].filter(Boolean).join('、') || '仅时长';
+  if (!confirm(`从 ${item.count} 条历史任务恢复模板“${activityType}”？\n将恢复：${featureText}\n并把这些历史任务重新绑定到新模板。`)) return;
+  const namedItemsByName = new Map();
+  item.records.forEach(record => {
+    taskNamedItemAllocations(record.task).forEach(allocation => {
+      const key = allocation.itemName.toLocaleLowerCase();
+      if (!namedItemsByName.has(key)) namedItemsByName.set(key, { id: allocation.itemId || uid(), name: allocation.itemName, archived: false });
+    });
+  });
+  const namedItems = [...namedItemsByName.values()];
+  let accuracyEnabled = false;
+  item.records.forEach(record => {
+    const evidence = taskAccuracyEvidence(record.task, true);
+    if (!evidence) return;
+    record.task.accuracy = evidence.accuracy;
+    accuracyEnabled = true;
+  });
+  const quantityEnabled = item.quantityCount > 0 || accuracyEnabled;
+  const quantityUnit = quantityEnabled ? (item.unit || '数量') : '';
+  const template = {
+    id: uid(),
+    activityType,
+    defaultMinutes: item.averageMinutes,
+    namedItemEnabled: namedItems.length > 0,
+    namedItems,
+    ordinalEnabled: namedItems.length > 0,
+    ordinalUnit: namedItems.length > 0 ? '项' : '',
+    quantityEnabled,
+    quantityUnit,
+    accuracyEnabled,
+    note: '',
+  };
+  getTaskTemplates().push(template);
+  parseActPath(activityType).forEach((name, index) => {
+    if (!name) return;
+    const list = getCatList(index + 1);
+    if (!list.includes(name)) list.push(name);
+  });
+  item.records.forEach(record => {
+    record.task.templateId = template.id;
+    if (quantityEnabled && Number(record.task.quantity) > 0 && !String(record.task.quantityUnit || '').trim()) record.task.quantityUnit = quantityUnit;
+    if (Array.isArray(record.task.namedItemAllocations)) {
+      record.task.namedItemAllocations = record.task.namedItemAllocations.map(allocation => {
+        const restored = namedItemsByName.get(String(allocation?.itemName || '').trim().toLocaleLowerCase());
+        return restored ? { ...allocation, itemId: restored.id, itemName: restored.name } : allocation;
+      });
+    }
+  });
+  await saveAllStorage();
+  state.templateLibraryView = 'task';
+  state.templateAuditOpen = true;
+  renderTemplates();
+  showPersistentSaveNotice(`已恢复任务模板“${activityType}”`);
+}
+
+async function templateRestoreMissingSession(sessionType, encodedName) {
+  sessionType = normalizeSessionTemplateType(sessionType);
+  const name = decodeURIComponent(encodedName || '');
+  const audit = templateAuditScan();
+  const source = sessionType === 'special-study' ? audit.specialStudy : audit.session;
+  const item = source.find(entry => entry.name === name);
+  if (!item) { alert('该模板已经恢复，或历史记录已发生变化。'); renderTemplates(); return; }
+  const typeLabel = sessionType === 'special-study' ? '特殊学习' : '不可用时段';
+  if (!confirm(`从 ${item.count} 条历史记录恢复${typeLabel}模板“${name}”？`)) return;
+  getSessionTemplates().push({ id: uid(), name, note: '', sessionType });
+  await saveAllStorage();
+  state.templateLibraryView = sessionType === 'special-study' ? 'specialStudy' : 'session';
+  state.templateAuditOpen = true;
+  renderTemplates();
+  showPersistentSaveNotice(`已恢复${typeLabel}模板“${name}”`);
+}
+
+function templateHeroHtml(taskTemplates, sessionTemplates, dayTypeTemplates, audit) {
+  const chapterCount = taskTemplates.filter(template => template.namedItemEnabled ?? template.ordinalEnabled).length;
+  const quantityCount = taskTemplates.filter(template => template.quantityEnabled).length;
+  const unavailableCount = sessionTemplates.filter(template => normalizeSessionTemplateType(template.sessionType) === 'special').length;
+  const specialStudyCount = sessionTemplates.filter(template => normalizeSessionTemplateType(template.sessionType) === 'special-study').length;
+  return `<section class="template-hero">
+    <div class="template-hero-copy">
+      <div class="template-eyebrow">TEMPLATE WORKSPACE</div>
+      <h2>模板库</h2>
+      <p>集中管理任务、不可用时段、特殊学习和日期类型，录入与分析继续使用同一份模板数据。</p>
+      <button type="button" class="btn btn-ghost btn-sm template-audit-trigger" onclick="toggleTemplateAudit()">抽查缺失模板${audit.total ? ` · ${audit.total}` : ''}</button>
+    </div>
+    <div class="template-summary-strip">
+      <div><span>任务模板</span><strong>${taskTemplates.length}</strong></div>
+      <div><span>不可用时段</span><strong>${unavailableCount}</strong></div>
+      <div><span>特殊学习</span><strong>${specialStudyCount}</strong></div>
+      <div><span>日期类型</span><strong>${dayTypeTemplates.length}</strong></div>
+      <div><span>开启章节</span><strong>${chapterCount}</strong></div>
+      <div><span>开启数量</span><strong>${quantityCount}</strong></div>
+    </div>
+  </section>`;
+}
+
+function templateViewTabsHtml(taskCount, sessionCount, specialStudyCount, dayTypeCount) {
+  const active = ['task', 'session', 'specialStudy', 'dayType'].includes(state.templateLibraryView)
+    ? state.templateLibraryView
+    : 'task';
+  state.templateLibraryView = active;
+  return `<nav class="template-view-tabs" aria-label="模板类型">
+    <button type="button" data-template-view="task" class="${active === 'task' ? 'active' : ''}" onclick="switchTemplateLibraryView('task')">任务模板 <span>${taskCount}</span></button>
+    <button type="button" data-template-view="session" class="${active === 'session' ? 'active' : ''}" onclick="switchTemplateLibraryView('session')">不可用时段 <span>${sessionCount}</span></button>
+    <button type="button" data-template-view="specialStudy" class="${active === 'specialStudy' ? 'active' : ''}" onclick="switchTemplateLibraryView('specialStudy')">特殊学习 <span>${specialStudyCount}</span></button>
+    <button type="button" data-template-view="dayType" class="${active === 'dayType' ? 'active' : ''}" onclick="switchTemplateLibraryView('dayType')">日期类型 <span>${dayTypeCount}</span></button>
+  </nav>`;
+}
+
+function switchTemplateLibraryView(view) {
+  state.templateLibraryView = ['task', 'session', 'specialStudy', 'dayType'].includes(view) ? view : 'task';
+  document.querySelectorAll('[data-template-view]').forEach(button => {
+    button.classList.toggle('active', button.dataset.templateView === state.templateLibraryView);
+  });
+  document.querySelectorAll('.template-view').forEach(section => {
+    section.classList.toggle('active', section.dataset.templateView === state.templateLibraryView);
+  });
+}
+
+function templateEditorPanelHtml(title, subtitle, body, className = '') {
+  return `<section class="template-editor-panel ${className}">
+    <div class="template-editor-head">
+      <div>
+        <div class="template-eyebrow">EDITOR</div>
+        <h3>${title}</h3>
+        ${subtitle ? `<p>${subtitle}</p>` : ''}
+      </div>
+    </div>
+    <div class="template-editor-body">${body}</div>
+  </section>`;
+}
+
+function taskTemplateNewEditorHtml() {
+  const body = `<div class="template-editor-section">
+      <div class="template-editor-section-head"><b>绑定活动类别</b><span>按一级、二级、三级组成完整模板路径</span></div>
+      <div class="template-category-grid">
+        <label><span>一级</span>${catSelectorHtml(1, 'tmpl_l1', '', 'tmpl_cat_msg')}</label>
+        <label><span>二级</span>${catSelectorHtml(2, 'tmpl_l2', '', 'tmpl_cat_msg')}</label>
+        <label><span>三级</span>${catSelectorHtml(3, 'tmpl_l3', '', 'tmpl_cat_msg')}</label>
+      </div>
+      <div class="template-inline-message" id="tmpl_cat_msg"></div>
+      <div class="form-hint">＋ 保存到库 · 🗑 从库删除（不影响已有模板和记录）</div>
+    </div>
+    <div class="template-editor-section">
+      <div class="template-editor-section-head"><b>默认设置</b><span>控制录入时自动带入的模板能力</span></div>
+      <div class="template-editor-grid">
+        <div class="form-group"><label>默认时长（分钟）</label><input type="number" id="tmpl_minutes" min="1" placeholder="60"></div>
+        <div class="form-group template-unit-config">
+          <label><input type="checkbox" id="tmpl_quantity_enabled" onchange="syncTemplateAccuracyControls('tmpl_quantity_enabled','tmpl_accuracy_enabled','quantity')"> 开启数量单位</label>
+          ${unitSelectorHtml('tmpl_unit', '', 'tmpl_unit_msg')}
+          <div class="template-inline-message" id="tmpl_unit_msg"></div>
+          <div class="form-hint">关闭时保留单位文字，但不参与录入和预测。</div>
+        </div>
+        <div class="form-group template-unit-config">
+          <label><input type="checkbox" id="tmpl_ordinal_enabled"> 开启命名章节记录</label>
+          <div class="form-hint">保存模板后可在共享章节库中维护完整章节名称。</div>
+        </div>
+        <div class="form-group template-unit-config">
+          <label><input type="checkbox" id="tmpl_accuracy_enabled" disabled onchange="syncTemplateAccuracyControls('tmpl_quantity_enabled','tmpl_accuracy_enabled','accuracy')"> 开启正确率记录</label>
+          <div class="form-hint">开启后，录入任务时总数量和错误数量均为必填。</div>
+        </div>
+      </div>
+    </div>
+    <div class="template-editor-section">
+      <div class="form-group"><label>模板说明</label><textarea id="tmpl_note" rows="3" maxlength="500" placeholder="仅在模板库中显示，不会带入任务记录"></textarea></div>
+    </div>
+    <div class="template-editor-actions">
+      <button class="btn btn-success" onclick="tmplSaveNew()">✓ 保存模板</button>
+      <button class="btn btn-ghost" onclick="tmplToggleForm()">取消</button>
+      <span id="tmpl-save-msg"></span>
+    </div>`;
+  return `<section class="template-editor-panel template-new-editor" id="task-template-new-panel">
+    <button type="button" class="template-editor-toggle" onclick="tmplToggleForm()">
+      <span><b>新建任务模板</b><small>建立可在录入中一键套用的任务预设</small></span>
+      <span id="tmpl-form-toggle">展开</span>
+    </button>
+    <div class="template-editor-body" id="tmpl-form-body" style="display:none">${body}</div>
+  </section>`;
+}
+
+function taskTemplateFilterHtml(context) {
+  const { templates, filteredTemplates, filter, level1Options, level2Options, level3Options } = context;
+  if (!templates.length) return '';
+  return `<div class="template-filter-grid">
+    <label><span>一级分类</span><select onchange="setTemplateCategoryFilter(1,this.value)">
+      <option value="">全部模板</option>
+      ${level1Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level1 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
+    </select></label>
+    <label><span>二级分类</span><select onchange="setTemplateCategoryFilter(2,this.value)" ${filter.level1 ? '' : 'disabled'}>
+      <option value="">全部二级</option>
+      ${level2Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level2 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
+    </select></label>
+    <label><span>三级分类</span><select onchange="setTemplateCategoryFilter(3,this.value)" ${filter.level1 && filter.level2 ? '' : 'disabled'}>
+      <option value="">全部三级</option>
+      ${level3Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level3 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
+    </select></label>
+    <span class="template-filter-count">显示 ${filteredTemplates.length}/${templates.length}</span>
+    ${filter.level1 || filter.level2 || filter.level3 ? '<button class="btn btn-ghost btn-sm" onclick="clearTemplateCategoryFilter()">清除筛选</button>' : ''}
+  </div>`;
+}
+
+function taskTemplateViewHtml(context) {
+  const active = state.templateLibraryView === 'task' ? 'active' : '';
+  const { templates, filteredTemplates } = context;
+  return `<section class="template-view ${active}" data-template-view="task">
+    <div class="template-view-toolbar">
+      <div><div class="template-eyebrow">TASK PRESETS</div><h3>任务模板</h3><p>管理分类、默认时长、数量单位和共享章节。</p></div>
+      <button class="btn btn-primary" onclick="tmplToggleForm()">＋ 新建任务模板</button>
+    </div>
+    ${taskTemplateFilterHtml(context)}
+    ${taskTemplateNewEditorHtml()}
+    <div id="task-template-edit-host"></div>
+    ${templates.length === 0
+      ? '<div class="template-empty-state"><b>暂无任务模板</b><span>点击“新建任务模板”建立第一个预设。</span></div>'
+      : filteredTemplates.length === 0
+        ? '<div class="template-empty-state"><b>当前分类组合没有模板</b><button class="btn btn-ghost btn-sm" onclick="clearTemplateCategoryFilter()">显示全部模板</button></div>'
+        : `<div class="template-card-grid task-template-grid">
+            ${filteredTemplates.map(tmplCardHtml).join('')}
+            <div id="template-named-items-manager" class="template-card-chapter-host"></div>
+          </div>`}
+  </section>`;
 }
 
 // ── Template Management Tab ──────────────────────────────────
@@ -1620,127 +2535,21 @@ function renderTemplates() {
     )
     .map(item => item.template);
 
-  document.getElementById('tab-templates').innerHTML = `
-    <div style="max-width:900px">
-
-      <!-- 说明 -->
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-title" style="margin-bottom:6px">📋 任务模板库</div>
-        <p style="font-size:12px;color:var(--muted);line-height:1.7;margin:0">
-          在这里预定义常用任务模板，与活动类别三级联动绑定。<br>
-          · 录入任务时可一键套用，自动填充类别、时长、单位等字段。<br>
-          · 命名章节库由模板统一保存，并与完成预测共用同一份数据。<br>
-        </p>
-      </div>
-
-      <div id="template-named-items-manager"></div>
-
-      <!-- 新建模板表单 -->
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-header" style="cursor:pointer" onclick="tmplToggleForm()">
-          <div class="card-title">＋ 新建模板</div>
-          <span id="tmpl-form-toggle" style="font-size:12px;color:var(--muted)">▼ 展开</span>
-        </div>
-        <div id="tmpl-form-body" style="display:none;margin-top:14px">
-          <!-- 三级联动（模板：增强选择器） -->
-          <div class="form-group">
-            <label>绑定活动类别（可自由组合）</label>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">
-              <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:140px">
-                <span style="font-size:10px;color:var(--muted)">一级</span>
-                ${catSelectorHtml(1, 'tmpl_l1', '', 'tmpl_cat_msg')}
-              </div>
-              <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:140px">
-                <span style="font-size:10px;color:var(--muted)">二级</span>
-                ${catSelectorHtml(2, 'tmpl_l2', '', 'tmpl_cat_msg')}
-              </div>
-              <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:140px">
-                <span style="font-size:10px;color:var(--muted)">三级</span>
-                ${catSelectorHtml(3, 'tmpl_l3', '', 'tmpl_cat_msg')}
-              </div>
-            </div>
-            <div style="margin-top:2px;font-size:11px;font-family:var(--mono)" id="tmpl_cat_msg"></div>
-            <div class="form-hint" style="margin-top:2px">＋ 保存到库 · 🗑 从库删除（不影响已有模板/记录）</div>
-          </div>
-
-          <div class="form-grid" style="grid-template-columns:repeat(3,1fr)">
-            <div class="form-group">
-              <label>默认时长(分钟)</label>
-              <input type="number" id="tmpl_minutes" min="1" placeholder="60">
-            </div>
-            <div class="form-group template-unit-config">
-              <label><input type="checkbox" id="tmpl_quantity_enabled"> 开启数量单位</label>
-              ${unitSelectorHtml('tmpl_unit', '', 'tmpl_unit_msg')}
-              <div style="font-size:11px;font-family:var(--mono)" id="tmpl_unit_msg"></div>
-              <div class="form-hint">关闭时保留单位文字，但不参与录入和预测。</div>
-            </div>
-            <div class="form-group">
-              <label>备注模板</label>
-              <input type="text" id="tmpl_note" placeholder="可选默认备注">
-            </div>
-            <div class="form-group template-unit-config">
-              <label><input type="checkbox" id="tmpl_ordinal_enabled"> 开启命名章节记录</label>
-              <div class="form-hint">保存模板后可在共享章节库中提前录入完整章节名称。</div>
-            </div>
-          </div>
-
-          <div style="display:flex;gap:8px">
-            <button class="btn btn-success" onclick="tmplSaveNew()">✓ 保存模板</button>
-            <button class="btn btn-ghost btn-sm" onclick="tmplToggleForm()">取消</button>
-            <span id="tmpl-save-msg" style="font-size:12px;font-family:var(--mono);color:var(--pol)"></span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 模板列表 -->
-      <div class="card">
-        <div class="card-title" style="margin-bottom:12px">🗂 已保存的模板（${filteredTemplates.length}/${templates.length} 个）</div>
-        ${templates.length ? `<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;padding:10px;background:rgba(255,255,255,.025);border:1px solid var(--border);border-radius:7px">
-          <label style="display:flex;flex-direction:column;gap:4px;min-width:150px;font-size:10px;color:var(--muted)">
-            一级分类
-            <select onchange="setTemplateCategoryFilter(1,this.value)" style="font-size:12px">
-              <option value="">全部模板</option>
-              ${level1Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level1 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
-            </select>
-          </label>
-          <label style="display:flex;flex-direction:column;gap:4px;min-width:150px;font-size:10px;color:var(--muted)">
-            二级分类
-            <select onchange="setTemplateCategoryFilter(2,this.value)" ${filter.level1 ? '' : 'disabled'} style="font-size:12px">
-              <option value="">全部二级</option>
-              ${level2Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level2 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
-            </select>
-          </label>
-          <label style="display:flex;flex-direction:column;gap:4px;min-width:150px;font-size:10px;color:var(--muted)">
-            三级分类
-            <select onchange="setTemplateCategoryFilter(3,this.value)" ${filter.level1 && filter.level2 ? '' : 'disabled'} style="font-size:12px">
-              <option value="">全部三级</option>
-              ${level3Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level3 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
-            </select>
-          </label>
-          ${filter.level1 || filter.level2 || filter.level3
-            ? `<button class="btn btn-ghost btn-sm" onclick="clearTemplateCategoryFilter()">✕ 清除筛选</button>`
-            : ''}
-        </div>` : ''}
-        ${templates.length === 0
-      ? `<div class="empty-state"><p>暂无模板，点击上方「新建模板」开始添加</p></div>`
-      : filteredTemplates.length === 0
-        ? `<div class="empty-state"><p>当前分类组合下没有已保存模板</p><button class="btn btn-ghost btn-sm" onclick="clearTemplateCategoryFilter()">显示全部模板</button></div>`
-        : `<div style="display:grid;gap:10px">
-              ${filteredTemplates.map(t => tmplCardHtml(t)).join('')}
-            </div>`
-    }
-      </div>
-
-      <!-- ═══════════════════════════════════════════════ -->
-      <!-- ⏱ 时段模板库 -->
-      <!-- ═══════════════════════════════════════════════ -->
-      ${renderSessionTemplatesSection()}
-
-      <!-- 🗓 日期类型模板库 -->
-      <!-- ═══════════════════════════════════════════════ -->
-      ${renderDayTypeTemplatesSection()}
-    </div>
-  `;
+  const sessionTemplates = getSessionTemplates();
+  const unavailableTemplates = sessionTemplates.filter(template => normalizeSessionTemplateType(template.sessionType) === 'special');
+  const specialStudyTemplates = sessionTemplates.filter(template => normalizeSessionTemplateType(template.sessionType) === 'special-study');
+  const dayTypeTemplates = getDayTypeTemplates();
+  const audit = templateAuditScan();
+  const context = { templates, filteredTemplates, filter, level1Options, level2Options, level3Options };
+  document.getElementById('tab-templates').innerHTML = `<div class="template-page">
+    ${templateHeroHtml(templates, sessionTemplates, dayTypeTemplates, audit)}
+    ${templateAuditPanelHtml(audit)}
+    ${templateViewTabsHtml(templates.length, unavailableTemplates.length, specialStudyTemplates.length, dayTypeTemplates.length)}
+    ${taskTemplateViewHtml(context)}
+    ${renderSessionTemplatesSection('special')}
+    ${renderSessionTemplatesSection('special-study')}
+    ${renderDayTypeTemplatesSection()}
+  </div>`;
   // renderEntry 会因保存任务、恢复快照等操作重新生成表单。
   // 重绘后必须按当前状态恢复时段类型，避免界面显示“普通时段”
   // 但保存逻辑仍沿用旧的特殊时段类型。
@@ -1752,135 +2561,145 @@ function renderTemplates() {
 }
 
 // ── Session Template Section (rendered inside templates tab) ──
-function renderSessionTemplatesSection() {
-  const sTmpls = getSessionTemplates();
-  return `
-    <div style="margin-top:28px;border-top:2px solid var(--border);padding-top:20px">
-
-      <!-- 说明 -->
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-title" style="margin-bottom:6px">⏱ 特殊时段模板库</div>
-        <p style="font-size:12px;color:var(--muted);line-height:1.7;margin:0">
-          预定义特殊的时段模板（如吃饭、活动、休息等非学习时段）。<br>
-          · 特殊时段只有时钟时长（开始→结束的时间跨度），没有名义时长和实际专注。<br>
-          · 录入时可一键套用，自动切换为特殊时段模式并填充名称和备注。<br>
-        </p>
-      </div>
-
-      <!-- 新建时段模板表单 -->
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-header" style="cursor:pointer" onclick="sessTmplToggleForm()">
-          <div class="card-title">＋ 新建时段模板</div>
-          <span id="sess-tmpl-form-toggle" style="font-size:12px;color:var(--muted)">▼ 展开</span>
+function renderSessionTemplatesSection(sessionType = 'special') {
+  sessionType = normalizeSessionTemplateType(sessionType);
+  const specialStudy = sessionType === 'special-study';
+  const viewKey = specialStudy ? 'specialStudy' : 'session';
+  const slug = specialStudy ? 'special-study' : 'unavailable';
+  const title = specialStudy ? '特殊学习' : '不可用时段';
+  const sTmpls = getSessionTemplates().filter(template => normalizeSessionTemplateType(template.sessionType) === sessionType);
+  const active = state.templateLibraryView === viewKey ? 'active' : '';
+  return `<section class="template-view ${active}" data-template-view="${viewKey}">
+    <div class="template-view-toolbar">
+      <div><div class="template-eyebrow">${specialStudy ? 'SPECIAL STUDY PRESETS' : 'UNAVAILABLE PRESETS'}</div><h3>${title}</h3><p>${specialStudy ? '保存外出上课、通勤学习等包含零散专注的特殊学习名称。' : '保存吃饭、午休、通勤等完全不可学习时段的名称和默认备注。'}</p></div>
+      <button class="btn btn-primary" onclick="sessTmplToggleForm('${sessionType}')">＋ 新建${title}</button>
+    </div>
+    <section class="template-editor-panel template-new-editor" id="session-template-new-panel-${slug}">
+      <button type="button" class="template-editor-toggle" onclick="sessTmplToggleForm('${sessionType}')">
+        <span><b>新建${title}模板</b><small>录入时会自动切换到正确的时段类型</small></span>
+        <span id="sess-tmpl-form-toggle-${slug}">展开</span>
+      </button>
+      <div class="template-editor-body" id="sess-tmpl-form-body-${slug}" style="display:none">
+        <div class="template-editor-grid compact">
+          <div class="form-group"><label>模板名称</label><input type="text" id="sess_tmpl_name_${slug}" placeholder="${specialStudy ? '例：外出上课、通勤学习' : '例：午饭、通勤、午休'}"></div>
+          <div class="form-group"><label>备注模板</label><input type="text" id="sess_tmpl_note_${slug}" placeholder="可选默认备注"></div>
         </div>
-        <div id="sess-tmpl-form-body" style="display:none;margin-top:14px">
-          <div class="form-grid" style="grid-template-columns:1fr 1fr">
-            <div class="form-group" style="grid-column:span 2">
-              <label>模板名称 <span style="font-size:10px;color:var(--muted)">（如"午饭"、"社团活动"、"午休"）</span></label>
-              <input type="text" id="sess_tmpl_name" placeholder="例：午饭">
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label>备注模板</label>
-            <input type="text" id="sess_tmpl_note" placeholder="可选默认备注">
-          </div>
-
-          <div style="display:flex;gap:8px">
-            <button class="btn btn-success" onclick="sessTmplSaveNew()">✓ 保存时段模板</button>
-            <button class="btn btn-ghost btn-sm" onclick="sessTmplToggleForm()">取消</button>
-            <span id="sess-tmpl-save-msg" style="font-size:12px;font-family:var(--mono);color:var(--pol)"></span>
-          </div>
+        <div class="template-editor-actions">
+          <button class="btn btn-success" onclick="sessTmplSaveNew('${sessionType}')">✓ 保存${title}模板</button>
+          <button class="btn btn-ghost" onclick="sessTmplToggleForm('${sessionType}')">取消</button>
+          <span id="sess-tmpl-save-msg-${slug}"></span>
         </div>
       </div>
-
-      <!-- 时段模板列表 -->
-      <div class="card">
-        <div class="card-title" style="margin-bottom:12px">🗂 已保存的时段模板（${sTmpls.length} 个）</div>
-        ${sTmpls.length === 0
-      ? `<div class="empty-state"><p>暂无时段模板，点击上方「新建时段模板」开始添加</p></div>`
-      : `<div style="display:grid;gap:10px">
-            ${sTmpls.map(t => sessTmplCardHtml(t)).join('')}
-          </div>`}
-      </div>
-    </div>`;
+    </section>
+    <div id="session-template-edit-host-${slug}"></div>
+    ${sTmpls.length === 0
+      ? `<div class="template-empty-state"><b>暂无${title}模板</b><span>建立常用模板后，录入时可以直接套用。</span></div>`
+      : `<div class="template-card-grid simple-template-grid">${sTmpls.map(t => sessTmplCardHtml(t)).join('')}</div>`}
+  </section>`;
 }
 
-function sessTmplToggleForm() {
-  const body = document.getElementById('sess-tmpl-form-body');
-  const tog = document.getElementById('sess-tmpl-form-toggle');
+function sessTmplToggleForm(sessionType = 'special') {
+  sessionType = normalizeSessionTemplateType(sessionType);
+  const slug = sessionType === 'special-study' ? 'special-study' : 'unavailable';
+  const body = document.getElementById(`sess-tmpl-form-body-${slug}`);
+  const tog = document.getElementById(`sess-tmpl-form-toggle-${slug}`);
+  const panel = document.getElementById(`session-template-new-panel-${slug}`);
+  if (!body) return;
   const open = body.style.display === 'none';
   body.style.display = open ? 'block' : 'none';
-  if (tog) tog.textContent = open ? '▲ 收起' : '▼ 展开';
+  panel?.classList.toggle('open', open);
+  if (open) {
+    const editHost = document.getElementById(`session-template-edit-host-${slug}`);
+    if (editHost) editHost.innerHTML = '';
+  }
+  if (tog) tog.textContent = open ? '收起' : '展开';
 }
 
-async function sessTmplSaveNew() {
-  const name = document.getElementById('sess_tmpl_name').value.trim();
+async function sessTmplSaveNew(sessionType = 'special') {
+  sessionType = normalizeSessionTemplateType(sessionType);
+  const slug = sessionType === 'special-study' ? 'special-study' : 'unavailable';
+  const name = document.getElementById(`sess_tmpl_name_${slug}`).value.trim();
   if (!name) { alert('请填写模板名称'); return; }
+  if (getSessionTemplates().some(template => normalizeSessionTemplateType(template.sessionType) === sessionType && template.name === name)) {
+    alert('当前时段类型中已经存在同名模板。');
+    return;
+  }
   const tmpl = {
     name,
-    note: document.getElementById('sess_tmpl_note').value.trim(),
+    note: document.getElementById(`sess_tmpl_note_${slug}`).value.trim(),
+    sessionType,
   };
   await addSessionTemplate(tmpl);
-  const msg = document.getElementById('sess-tmpl-save-msg');
+  const msg = document.getElementById(`sess-tmpl-save-msg-${slug}`);
   if (msg) { msg.textContent = `✅ 已保存「${name}」`; setTimeout(() => msg.textContent = '', 2500); }
   renderTemplates();
   if (tmpl.note) showPersistentSaveNotice('时段模板备注已保存');
 }
 
 function sessTmplCardHtml(t) {
-  return `
-    <div id="sess-tmpl-card-${t.id}" style="border:1px solid var(--border);border-radius:8px;padding:12px;background:rgba(255,255,255,.015)">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px">
-        <div>
-          <span style="font-weight:600;font-size:14px">⏱ ${escHtmlApp(t.name)}</span>
-        </div>
-        <div style="display:flex;gap:6px">
-          <button class="btn btn-ghost btn-sm" onclick="sessTmplStartEdit('${t.id}')">✏️ 编辑</button>
-          <button class="btn btn-danger btn-sm" onclick="sessTmplDelete('${t.id}')">删除</button>
-        </div>
-      </div>
-      <div style="margin-top:6px;font-size:11px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap">
-        ${t.note ? `<span>📝 ${escHtmlApp(t.note)}</span>` : ''}
-      </div>
-      <div id="sess-tmpl-edit-${t.id}" style="display:none;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
-        ${sessTmplEditFormHtml(t)}
-      </div>
-    </div>`;
+  const color = getSpecialSeriesColor(t.name);
+  const specialStudy = normalizeSessionTemplateType(t.sessionType) === 'special-study';
+  return `<article class="template-card simple-template-card session" id="sess-tmpl-card-${t.id}" style="--template-color:${color}">
+    <div class="template-card-head">
+      <div class="template-card-title"><i></i><div><b>${escHtmlApp(t.name)}</b><small>${specialStudy ? '特殊学习模板' : '不可用时段模板'}</small></div></div>
+    </div>
+    <p class="template-card-note ${t.note ? '' : 'muted'}">${t.note ? escHtmlApp(t.note) : '未填写默认备注'}</p>
+    <div class="template-card-actions">
+      <button class="btn btn-ghost btn-sm" onclick="sessTmplStartEdit('${t.id}')">编辑</button>
+      <button class="btn btn-danger btn-sm" onclick="sessTmplDelete('${t.id}')">删除</button>
+    </div>
+  </article>`;
 }
 
 function sessTmplEditFormHtml(t) {
-  return `
-    <div class="form-group">
-      <label>模板名称</label>
-      <input type="text" id="sess-tmpl-edit-name-${t.id}" value="${escHtmlApp(t.name)}">
-    </div>
-    <div class="form-group">
-      <label>备注模板</label>
-      <input type="text" id="sess-tmpl-edit-note-${t.id}" value="${escHtmlApp(t.note || '')}">
-    </div>
-    <div style="display:flex;gap:8px">
+  return `<div class="template-editor-grid compact">
+    <div class="form-group"><label>模板名称</label><input type="text" id="sess-tmpl-edit-name-${t.id}" value="${escHtmlApp(t.name)}"></div>
+    <div class="form-group"><label>备注模板</label><input type="text" id="sess-tmpl-edit-note-${t.id}" value="${escHtmlApp(t.note || '')}"></div>
+    <div class="form-group"><label>时段类型</label><select id="sess-tmpl-edit-type-${t.id}"><option value="special" ${normalizeSessionTemplateType(t.sessionType) === 'special' ? 'selected' : ''}>不可用时段</option><option value="special-study" ${normalizeSessionTemplateType(t.sessionType) === 'special-study' ? 'selected' : ''}>特殊学习时段</option></select></div>
+  </div>
+    <div class="template-editor-actions">
       <button class="btn btn-success btn-sm" onclick="sessTmplSaveEdit('${t.id}')">✓ 保存修改</button>
       <button class="btn btn-ghost btn-sm" onclick="sessTmplCancelEdit('${t.id}')">取消</button>
     </div>`;
 }
 
 function sessTmplStartEdit(id) {
-  document.getElementById(`sess-tmpl-edit-${id}`).style.display = 'block';
+  const template = getSessionTemplates().find(item => item.id === id);
+  const sessionType = normalizeSessionTemplateType(template?.sessionType);
+  const slug = sessionType === 'special-study' ? 'special-study' : 'unavailable';
+  const host = document.getElementById(`session-template-edit-host-${slug}`);
+  if (!template || !host) return;
+  const newBody = document.getElementById(`sess-tmpl-form-body-${slug}`);
+  if (newBody) newBody.style.display = 'none';
+  document.getElementById(`session-template-new-panel-${slug}`)?.classList.remove('open');
+  const toggle = document.getElementById(`sess-tmpl-form-toggle-${slug}`);
+  if (toggle) toggle.textContent = '展开';
+  host.innerHTML = templateEditorPanelHtml(`编辑${sessionType === 'special-study' ? '特殊学习' : '不可用时段'} · ${escHtmlApp(template.name)}`, '修改名称、类型和默认备注，不影响已有时段记录。', sessTmplEditFormHtml(template), 'session-template-editor');
+  host.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 function sessTmplCancelEdit(id) {
-  document.getElementById(`sess-tmpl-edit-${id}`).style.display = 'none';
+  const template = getSessionTemplates().find(item => item.id === id);
+  const slug = normalizeSessionTemplateType(template?.sessionType) === 'special-study' ? 'special-study' : 'unavailable';
+  const host = document.getElementById(`session-template-edit-host-${slug}`);
+  if (host) host.innerHTML = '';
 }
 
 async function sessTmplSaveEdit(id) {
   const previous = getSessionTemplates().find(template => template.id === id);
   const name = document.getElementById(`sess-tmpl-edit-name-${id}`).value.trim();
   if (!name) { alert('请填写模板名称'); return; }
+  const sessionType = normalizeSessionTemplateType(document.getElementById(`sess-tmpl-edit-type-${id}`)?.value);
+  if (getSessionTemplates().some(template => template.id !== id && normalizeSessionTemplateType(template.sessionType) === sessionType && template.name === name)) {
+    alert('目标时段类型中已经存在同名模板。');
+    return;
+  }
   const tmpl = {
     id, name,
     note: document.getElementById(`sess-tmpl-edit-note-${id}`).value.trim(),
+    sessionType,
   };
   await saveSessionTemplate(tmpl);
+  state.templateLibraryView = sessionType === 'special-study' ? 'specialStudy' : 'session';
   renderTemplates();
   if (tmpl.note || previous?.note) showPersistentSaveNotice('时段模板备注已保存');
 }
@@ -1888,67 +2707,66 @@ async function sessTmplSaveEdit(id) {
 async function sessTmplDelete(id) {
   const tmpl = getSessionTemplates().find(t => t.id === id);
   if (!tmpl) return;
-  if (!confirm(`删除时段模板「${tmpl.name}」？`)) return;
+  if (!confirm(`删除${normalizeSessionTemplateType(tmpl.sessionType) === 'special-study' ? '特殊学习' : '不可用时段'}模板「${tmpl.name}」？`)) return;
   await deleteSessionTemplate(id);
   renderTemplates();
 }
 
 function renderDayTypeTemplatesSection() {
   const templates = getDayTypeTemplates();
-  return `
-    <div style="margin-top:28px;border-top:2px solid var(--border);padding-top:20px">
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-title" style="margin-bottom:6px">🗓 日期类型模板库</div>
-        <p style="font-size:12px;color:var(--muted);line-height:1.7;margin:0">
-          · 模板决定是否标记特殊天、是否不参与评分，结果先进入待审核草稿。
-        </p>
-      </div>
-
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-header" style="cursor:pointer" onclick="dayTypeTmplToggleForm()">
-          <div class="card-title">＋ 新建日期类型模板</div>
-          <span id="day-type-tmpl-form-toggle" style="font-size:12px;color:var(--muted)">▼ 展开</span>
-        </div>
-        <div id="day-type-tmpl-form-body" style="display:none;margin-top:14px">
-          <div class="form-group">
-            <label>类型名称</label>
-            <input type="text" id="day_type_tmpl_name" placeholder="例：旅行日、生病休息日、考试日">
-          </div>
-          <div class="day-type-template-flags">
-            <label><input type="checkbox" id="day_type_tmpl_special"> 标记为特殊天</label>
-            <label><input type="checkbox" id="day_type_tmpl_exclude"> 不参与评分</label>
-          </div>
-          <div style="display:flex;gap:8px;margin-top:12px">
-            <button class="btn btn-success" onclick="dayTypeTmplSaveNew()">✓ 保存日期类型</button>
-            <button class="btn btn-ghost btn-sm" onclick="dayTypeTmplToggleForm()">取消</button>
-            <span id="day-type-tmpl-save-msg" style="font-size:12px;font-family:var(--mono);color:var(--pol)"></span>
+  const active = state.templateLibraryView === 'dayType' ? 'active' : '';
+  return `<section class="template-view ${active}" data-template-view="dayType">
+    <div class="template-view-toolbar">
+      <div><div class="template-eyebrow">DAY PRESETS</div><h3>日期类型</h3><p>预设日期类型、识别符号和评分默认规则，具体日期仍可覆盖评分设置。</p></div>
+      <button class="btn btn-primary" onclick="dayTypeTmplToggleForm()">＋ 新建日期类型</button>
+    </div>
+    <section class="template-editor-panel template-new-editor" id="day-type-template-new-panel">
+      <button type="button" class="template-editor-toggle" onclick="dayTypeTmplToggleForm()">
+        <span><b>新建日期类型模板</b><small>定义类型符号以及是否默认计入评分</small></span>
+        <span id="day-type-tmpl-form-toggle">展开</span>
+      </button>
+      <div class="template-editor-body" id="day-type-tmpl-form-body" style="display:none">
+        <div class="template-editor-grid compact">
+          <div class="form-group"><label>类型名称</label><input type="text" id="day_type_tmpl_name" placeholder="例：旅行日、生病休息日、考试日"></div>
+          <div class="form-group"><label>日期类型符号</label><select id="day_type_tmpl_symbol">${dayTypeSymbolOptionsHtml(nextAvailableDayTypeSymbol())}</select></div>
+          <div class="template-option-panel">
+            <label><input type="checkbox" id="day_type_tmpl_exclude"> 默认不参与评分（排除范围汇总）</label>
           </div>
         </div>
+        <div class="template-editor-actions">
+          <button class="btn btn-success" onclick="dayTypeTmplSaveNew()">✓ 保存日期类型</button>
+          <button class="btn btn-ghost" onclick="dayTypeTmplToggleForm()">取消</button>
+          <span id="day-type-tmpl-save-msg"></span>
+        </div>
       </div>
-
-      <div class="card">
-        <div class="card-title" style="margin-bottom:12px">🗂 已保存的日期类型（${templates.length} 个）</div>
-        ${templates.length === 0
-      ? '<div class="empty-state"><p>暂无日期类型模板</p></div>'
-      : `<div style="display:grid;gap:10px">${templates.map(dayTypeTmplCardHtml).join('')}</div>`}
-      </div>
-    </div>`;
+    </section>
+    <div id="day-type-template-edit-host"></div>
+    ${templates.length === 0
+      ? '<div class="template-empty-state"><b>暂无日期类型模板</b><span>建立旅行、考试或休息等日期预设。</span></div>'
+      : `<div class="template-card-grid simple-template-grid">${templates.map(dayTypeTmplCardHtml).join('')}</div>`}
+  </section>`;
 }
 
 function dayTypeTmplToggleForm() {
   const body = document.getElementById('day-type-tmpl-form-body');
   const toggle = document.getElementById('day-type-tmpl-form-toggle');
+  const panel = document.getElementById('day-type-template-new-panel');
   if (!body) return;
   const open = body.style.display === 'none';
   body.style.display = open ? 'block' : 'none';
-  if (toggle) toggle.textContent = open ? '▲ 收起' : '▼ 展开';
+  panel?.classList.toggle('open', open);
+  if (open) {
+    const editHost = document.getElementById('day-type-template-edit-host');
+    if (editHost) editHost.innerHTML = '';
+  }
+  if (toggle) toggle.textContent = open ? '收起' : '展开';
 }
 
 function readDayTypeTemplateForm(prefix) {
   const name = document.getElementById(`${prefix}name`)?.value.trim() || '';
   return {
     name,
-    specialDay: Boolean(document.getElementById(`${prefix}special`)?.checked),
+    symbolKey: document.getElementById(`${prefix}symbol`)?.value || '',
     excludeFromRating: Boolean(document.getElementById(`${prefix}exclude`)?.checked),
   };
 }
@@ -1959,6 +2777,7 @@ async function dayTypeTmplSaveNew() {
     alert('请填写日期类型名称');
     return;
   }
+  if (!validateDayTypeTemplate(tmpl)) return;
   await addDayTypeTemplate(tmpl);
   const msg = document.getElementById('day-type-tmpl-save-msg');
   if (msg) {
@@ -1969,49 +2788,51 @@ async function dayTypeTmplSaveNew() {
 }
 
 function dayTypeTmplCardHtml(t) {
-  return `
-    <div id="day-type-tmpl-card-${t.id}" style="border:1px solid var(--border);border-radius:8px;padding:12px;background:rgba(255,255,255,.015)">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
-        <div>
-          <b>${escHtmlApp(t.name || '未命名类型')}</b>
-          <span class="day-type-flag ${t.specialDay ? 'active' : ''}">特殊天：${t.specialDay ? '是' : '否'}</span>
-          <span class="day-type-flag ${t.excludeFromRating ? 'active' : ''}">不评分：${t.excludeFromRating ? '是' : '否'}</span>
-        </div>
-        <div style="display:flex;gap:6px">
-          <button class="btn btn-ghost btn-sm" onclick="dayTypeTmplStartEdit('${t.id}')">✏️ 编辑</button>
-          <button class="btn btn-danger btn-sm" onclick="dayTypeTmplDelete('${t.id}')">删除</button>
-        </div>
-      </div>
-      <div id="day-type-tmpl-edit-${t.id}" style="display:none;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
-        ${dayTypeTmplEditFormHtml(t)}
-      </div>
-    </div>`;
+  const color = dayTypeDisplayMeta(t.name).color;
+  const symbol = dayTypeSymbolMeta(t.symbolKey).glyph;
+  return `<article class="template-card simple-template-card day-type" id="day-type-tmpl-card-${t.id}" style="--template-color:${color}">
+    <div class="template-card-head">
+      <div class="template-card-title"><i></i><div><b><span class="day-type-template-symbol">${symbol}</span>${escHtmlApp(t.name || '未命名类型')}</b><small>日期类型模板</small></div></div>
+    </div>
+    <div class="template-status-list">
+      <span class="${t.excludeFromRating ? 'active warning' : 'muted'}">${t.excludeFromRating ? '不参与评分' : '参与评分'}</span>
+    </div>
+    <div class="template-card-actions">
+      <button class="btn btn-ghost btn-sm" onclick="dayTypeTmplStartEdit('${t.id}')">编辑</button>
+      <button class="btn btn-danger btn-sm" onclick="dayTypeTmplDelete('${t.id}')">删除</button>
+    </div>
+  </article>`;
 }
 
 function dayTypeTmplEditFormHtml(t) {
-  return `
-    <div class="form-group">
-      <label>类型名称</label>
-      <input type="text" id="day-type-tmpl-edit-${t.id}-name" value="${escHtmlApp(t.name || '')}">
-    </div>
-    <div class="day-type-template-flags">
-      <label><input type="checkbox" id="day-type-tmpl-edit-${t.id}-special" ${t.specialDay ? 'checked' : ''}> 标记为特殊天</label>
-      <label><input type="checkbox" id="day-type-tmpl-edit-${t.id}-exclude" ${t.excludeFromRating ? 'checked' : ''}> 不参与评分</label>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:10px">
+  return `<div class="template-editor-grid compact">
+    <div class="form-group"><label>类型名称</label><input type="text" id="day-type-tmpl-edit-${t.id}-name" value="${escHtmlApp(t.name || '')}"></div>
+    <div class="form-group"><label>日期类型符号</label><select id="day-type-tmpl-edit-${t.id}-symbol">${dayTypeSymbolOptionsHtml(t.symbolKey || nextAvailableDayTypeSymbol(t.id), t.id)}</select></div>
+    <div class="template-option-panel">
+      <label><input type="checkbox" id="day-type-tmpl-edit-${t.id}-exclude" ${t.excludeFromRating ? 'checked' : ''}> 默认不参与评分（排除范围汇总）</label>
+    </div></div>
+    <div class="template-editor-actions">
       <button class="btn btn-success btn-sm" onclick="dayTypeTmplSaveEdit('${t.id}')">✓ 保存修改</button>
       <button class="btn btn-ghost btn-sm" onclick="dayTypeTmplCancelEdit('${t.id}')">取消</button>
     </div>`;
 }
 
 function dayTypeTmplStartEdit(id) {
-  const el = document.getElementById(`day-type-tmpl-edit-${id}`);
-  if (el) el.style.display = 'block';
+  const template = getDayTypeTemplates().find(item => item.id === id);
+  const host = document.getElementById('day-type-template-edit-host');
+  if (!template || !host) return;
+  const newBody = document.getElementById('day-type-tmpl-form-body');
+  if (newBody) newBody.style.display = 'none';
+  document.getElementById('day-type-template-new-panel')?.classList.remove('open');
+  const toggle = document.getElementById('day-type-tmpl-form-toggle');
+  if (toggle) toggle.textContent = '展开';
+  host.innerHTML = templateEditorPanelHtml(`编辑日期类型 · ${escHtmlApp(template.name || '未命名类型')}`, '修改日期类型符号和评分默认规则。', dayTypeTmplEditFormHtml(template), 'day-type-template-editor');
+  host.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function dayTypeTmplCancelEdit(id) {
-  const el = document.getElementById(`day-type-tmpl-edit-${id}`);
-  if (el) el.style.display = 'none';
+  const host = document.getElementById('day-type-template-edit-host');
+  if (host) host.innerHTML = '';
 }
 
 async function dayTypeTmplSaveEdit(id) {
@@ -2020,6 +2841,7 @@ async function dayTypeTmplSaveEdit(id) {
     alert('请填写日期类型名称');
     return;
   }
+  if (!validateDayTypeTemplate(tmpl, id)) return;
   await saveDayTypeTemplate(tmpl);
   renderTemplates();
 }
@@ -2032,50 +2854,172 @@ async function dayTypeTmplDelete(id) {
   renderTemplates();
 }
 
+function templateQuantityProgress(template) {
+  const unit = String(template?.quantityUnit || '').trim();
+  let totalQuantity = 0;
+  let totalMinutes = 0;
+  let excluded = 0;
+  const records = getForecastTaskEntries()
+    .filter(({ task }) => resolveTaskTemplateId(task) === template?.id)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .reduce((list, { date, task }) => {
+      const quantity = Number(task.quantity);
+      const taskUnit = String(task.quantityUnit || unit || '').trim();
+      if (!Number.isFinite(quantity) || quantity <= 0) return list;
+      if (unit && taskUnit && taskUnit !== unit) {
+        excluded += 1;
+        return list;
+      }
+      const minutes = Number(task.minutes) || 0;
+      totalQuantity += quantity;
+      totalMinutes += minutes;
+      list.push({
+        date,
+        taskId: task.id || '',
+        taskName: task.name || '未命名任务',
+        activityType: task.activityType || '',
+        minutes,
+        quantity,
+        cumulative: totalQuantity,
+        unit: taskUnit || unit || '数量',
+        accuracy: visibleTaskAccuracy(task),
+        wrong: visibleTaskWrongCount(task),
+        note: task.note || '',
+      });
+      return list;
+    }, []);
+  return {
+    unit: unit || '数量',
+    totalQuantity,
+    totalMinutes,
+    averageRate: totalMinutes > 0 ? totalQuantity / totalMinutes : null,
+    records,
+    excluded,
+  };
+}
+
+function templateOpenTask(dateStr, encodedTaskId) {
+  const taskId = decodeURIComponent(encodedTaskId || '');
+  if (!dateStr || !taskId) return;
+  monthEditTask(dateStr, taskId);
+}
+
+function templateTaskLinkHtml(dateStr, task) {
+  const taskName = escHtmlApp(task?.name || '未命名任务');
+  if (!task?.id) return `<span class="template-task-link disabled" title="该历史任务缺少ID，无法编辑">${taskName}</span>`;
+  const encodedId = encodeURIComponent(task.id).replace(/'/g, '%27');
+  return `<button type="button" class="template-task-link" onclick="templateOpenTask('${dateStr}','${encodedId}')">${taskName}</button>`;
+}
+
+function templateTaskHistoryHtml(template) {
+  const chapterEnabled = Boolean(template.namedItemEnabled ?? template.ordinalEnabled);
+  const quantityEnabled = Boolean(template.quantityEnabled);
+  const templateUnit = String(template.quantityUnit || '').trim();
+  let cumulativeQuantity = 0;
+  const records = getTasksForTemplate(template.id)
+    .map((record, sourceOrder) => ({ ...record, sourceOrder }))
+    .sort((a, b) => a.dateStr.localeCompare(b.dateStr) || a.sourceOrder - b.sourceOrder)
+    .map(record => {
+      const task = record.task;
+      const minutes = Math.max(0, Number(task.minutes) || 0);
+      const quantity = Number(task.quantity);
+      const taskUnit = String(task.quantityUnit || templateUnit || '').trim();
+      const validQuantity = quantityEnabled && Number.isFinite(quantity) && quantity > 0 && (!templateUnit || !taskUnit || taskUnit === templateUnit);
+      if (validQuantity) cumulativeQuantity += quantity;
+      return {
+        ...record,
+        minutes,
+        quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : null,
+        taskUnit: taskUnit || templateUnit || '数量',
+        validQuantity,
+        cumulativeQuantity: validQuantity ? cumulativeQuantity : null,
+        allocations: chapterEnabled ? taskNamedItemAllocations(task) : [],
+      };
+    });
+  const totalMinutes = records.reduce((sum, record) => sum + record.minutes, 0);
+  const columnCount = 4 + (chapterEnabled ? 1 : 0) + (quantityEnabled ? 3 : 0);
+  const rows = records.map(record => {
+    const encodedId = record.task.id ? encodeURIComponent(record.task.id).replace(/'/g, '%27') : '';
+    const chapterHtml = chapterEnabled
+      ? `<td class="template-task-chapters">${record.allocations.length ? record.allocations.map(allocation => `<span><b>${escHtmlApp(allocation.itemName)}</b><small>${allocation.minutes > 0 ? fmtMin(allocation.minutes, true) : '未分配时长'}${quantityEnabled && allocation.quantity != null ? ` · +${forecastDisplayMetric(allocation.quantity)} ${escHtmlApp(record.taskUnit)}` : ''}${allocation.completed ? ' · 本次完成' : ''}</small></span>`).join('') : '<span class="c-muted">未关联章节</span>'}</td>`
+      : '';
+    const quantityHtml = quantityEnabled
+      ? `<td class="fw-mono">${record.quantity == null ? '-' : `+${forecastDisplayMetric(record.quantity)} ${escHtmlApp(record.taskUnit)}`}${record.quantity != null && !record.validQuantity ? '<small class="template-task-warning">单位不匹配，未累计</small>' : ''}</td><td class="fw-mono c-actual">${record.cumulativeQuantity == null ? '-' : `${forecastDisplayMetric(record.cumulativeQuantity)} ${escHtmlApp(record.taskUnit)}`}</td><td class="fw-mono">${record.validQuantity && record.minutes > 0 ? `${(record.quantity / record.minutes).toFixed(2)} ${escHtmlApp(record.taskUnit)}/min` : '-'}</td>`
+      : '';
+    return `<tr>
+      <td><button type="button" class="template-task-date" onclick="openEntryDate('${record.dateStr}')">${formatShort(record.dateStr)}</button></td>
+      <td>${templateTaskLinkHtml(record.dateStr, record.task)}</td>
+      <td class="fw-mono">${fmtMin(record.minutes, true)}</td>
+      ${chapterHtml}${quantityHtml}
+      <td>${encodedId ? `<button type="button" class="btn btn-ghost btn-sm" onclick="templateOpenTask('${record.dateStr}','${encodedId}')">编辑</button>` : '<button type="button" class="btn btn-ghost btn-sm" disabled>不可编辑</button>'}</td>
+    </tr>`;
+  }).join('');
+  return `<details class="template-detail-panel template-task-history">
+    <summary>关联任务明细 <span>${records.length} 条 · ${fmtMin(totalMinutes, true)}${quantityEnabled && cumulativeQuantity > 0 ? ` · ${forecastDisplayMetric(cumulativeQuantity)} ${escHtmlApp(templateUnit || '数量')}` : ''}</span></summary>
+    <div class="template-task-ledger-wrap"><table class="template-task-ledger ${chapterEnabled ? 'has-chapters' : ''} ${quantityEnabled ? 'has-quantity' : ''}">
+      <colgroup><col class="template-ledger-date"><col class="template-ledger-name"><col class="template-ledger-duration">${chapterEnabled ? '<col class="template-ledger-chapters">' : ''}${quantityEnabled ? '<col class="template-ledger-quantity"><col class="template-ledger-cumulative"><col class="template-ledger-efficiency">' : ''}<col class="template-ledger-action"></colgroup>
+      <thead><tr><th>日期</th><th>任务</th><th>时长</th>${chapterEnabled ? '<th>章节贡献</th>' : ''}${quantityEnabled ? '<th>本次数量</th><th>累计数量</th><th>效率</th>' : ''}<th>操作</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="${columnCount}" class="template-task-empty">该模板目前没有关联任务。</td></tr>`}</tbody>
+    </table></div>
+  </details>`;
+}
+
+function templateCardMetricsHtml(t, libraryProgress, quantityProgress) {
+  const chapterEnabled = Boolean(t.namedItemEnabled ?? t.ordinalEnabled);
+  const activeItemCount = (t.namedItems || []).filter(item => !item.archived).length;
+  return `<div class="template-metric-grid">
+    <div><span>默认时长</span><strong>${t.defaultMinutes ? fmtMin(Number(t.defaultMinutes), true) : '-'}</strong><small>录入时自动带入</small></div>
+    <div><span>章节进度</span><strong>${chapterEnabled ? `${libraryProgress.completedActive}/${activeItemCount}` : '-'}</strong><small>${chapterEnabled ? `${activeItemCount} 个活动章节` : '未开启命名章节'}</small></div>
+    <div><span>数量累计</span><strong>${t.quantityEnabled ? `${forecastDisplayMetric(quantityProgress.totalQuantity)} ${escHtmlApp(quantityProgress.unit)}` : '-'}</strong><small>${t.quantityEnabled ? `${quantityProgress.records.length} 条任务记录` : '未开启数量记录'}</small></div>
+  </div>`;
+}
+
+function templateCardActionsHtml(t) {
+  const chapterEnabled = Boolean(t.namedItemEnabled ?? t.ordinalEnabled);
+  return `<div class="template-card-actions">
+    ${chapterEnabled ? `<button class="btn btn-primary btn-sm" onclick="tmplManageNamedItems('${t.id}')">章节库</button>` : ''}
+    <button class="btn btn-ghost btn-sm" onclick="tmplStartEdit('${t.id}')">编辑</button>
+    <details class="template-more-menu">
+      <summary class="btn btn-ghost btn-sm">更多操作</summary>
+      <div>
+        <button type="button" onclick="tmplClearHistoricalDimension('${t.id}','ordinal')">清除章节历史数据</button>
+        <button type="button" onclick="tmplClearHistoricalDimension('${t.id}','quantity')">清除数量历史数据</button>
+        <button type="button" class="danger" onclick="tmplDelete('${t.id}')">删除模板</button>
+      </div>
+    </details>
+  </div>`;
+}
+
 function tmplCardHtml(t) {
   const actColor = getActColor(t.activityType || '');
   const libraryProgress = namedItemLibraryProgress(t.id);
+  const quantityProgress = t.quantityEnabled ? templateQuantityProgress(t) : null;
   const activeItemCount = (t.namedItems || []).filter(item => !item.archived).length;
-  return `
-    <div id="tmpl-card-${t.id}" style="border:1px solid var(--border);border-radius:8px;padding:12px;background:rgba(255,255,255,.015)">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px">
-        <div>
-          <span style="font-weight:600;font-size:14px">${escHtmlApp(t.activityType || '未分类模板')}</span>
-          <span class="badge" style="margin-left:8px;background:${actColor.color}22;color:${actColor.color};border:1px solid ${actColor.color}44">
-            ${escHtmlApp(t.activityType || '—')}
-          </span>
-        </div>
-        <div style="display:flex;gap:6px">
-          ${(t.namedItemEnabled ?? t.ordinalEnabled) ? `<button class="btn btn-ghost btn-sm" onclick="tmplManageNamedItems('${t.id}')">📚 章节库</button>` : ''}
-          <button class="btn btn-ghost btn-sm" onclick="tmplStartEdit('${t.id}')">✏️ 编辑</button>
-          <button class="btn btn-ghost btn-sm" onclick="tmplClearHistoricalDimension('${t.id}','ordinal')" title="永久删除该模板全部历史序数数据">清除序数</button>
-          <button class="btn btn-ghost btn-sm" onclick="tmplClearHistoricalDimension('${t.id}','quantity')" title="永久删除该模板全部历史数量数据">清除数量</button>
-          <button class="btn btn-danger btn-sm" onclick="tmplDelete('${t.id}')">删除</button>
-        </div>
+  const chapterEnabled = Boolean(t.namedItemEnabled ?? t.ordinalEnabled);
+  return `<article class="template-card task-template-card" id="tmpl-card-${t.id}" style="--template-color:${actColor.color}">
+    <div class="template-card-head">
+      <div class="template-card-title"><i></i><div><b>${escHtmlApp(t.activityType || '未分类模板')}</b><small>任务模板</small></div></div>
+      <div class="template-status-list">
+        <span class="${chapterEnabled ? 'active' : 'muted'}">${chapterEnabled ? '命名章节' : '章节关闭'}</span>
+        <span class="${t.quantityEnabled ? 'active' : 'muted'}">${t.quantityEnabled ? `数量 · ${escHtmlApp(t.quantityUnit || '未设置单位')}` : '数量关闭'}</span>
+        <span class="${t.accuracyEnabled ? 'active' : 'muted'}">${t.accuracyEnabled ? '正确率开启' : '正确率关闭'}</span>
+        ${!chapterEnabled && !t.quantityEnabled ? '<span class="muted">不参与预测</span>' : ''}
       </div>
-      <div style="margin-top:6px;font-size:11px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap">
-        ${t.defaultMinutes ? `<span>⏱ 默认 ${t.defaultMinutes} 分钟</span>` : ''}
-        ${(t.namedItemEnabled ?? t.ordinalEnabled) ? `<span>📚 命名章节：${activeItemCount} 项 · 完成 ${libraryProgress.completedActive}/${activeItemCount}${t.quantityEnabled ? ` · 已录入 ${forecastDisplayMetric(libraryProgress.totalQuantity)} ${escHtmlApp(t.quantityUnit || '数量')}` : ''}</span>` : '<span>📚 命名章节已关闭</span>'}
-        ${t.quantityEnabled ? `<span>📏 数量：${escHtmlApp(t.quantityUnit)}</span>` : `<span>📏 数量已关闭${t.quantityUnit ? `（${escHtmlApp(t.quantityUnit)}数据隐藏）` : ''}</span>`}
-        ${!(t.namedItemEnabled ?? t.ordinalEnabled) && !t.quantityEnabled ? '<span>📅 不参与预测</span>' : ''}
-      </div>
-      <details style="margin-top:9px;border:1px solid var(--border);border-radius:7px;background:rgba(255,255,255,.01)">
-        <summary style="cursor:pointer;padding:8px 10px;font-size:11px;color:var(--muted)">
-          📝 模板备注${t.note ? ` · ${escHtmlApp(String(t.note).slice(0, 45))}${String(t.note).length > 45 ? '…' : ''}` : ' · 未填写'}
-        </summary>
-        <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end;padding:0 10px 10px">
-          <label style="margin:0"><span class="form-hint">备注内容</span>
-            <textarea id="tmpl-inline-note-${t.id}" rows="3" maxlength="500" placeholder="填写这个模板的用途、范围或其他说明"
-              onkeydown="if(event.ctrlKey&&event.key==='Enter'){event.preventDefault();tmplSaveInlineNote('${t.id}')}">${escHtmlApp(t.note || '')}</textarea>
-          </label>
+    </div>
+    ${templateCardMetricsHtml(t, libraryProgress, quantityProgress || { totalQuantity: 0, unit: t.quantityUnit || '数量', records: [] })}
+    <p class="template-card-note ${t.note ? '' : 'muted'}">${t.note ? escHtmlApp(t.note) : '未填写模板说明'}</p>
+    ${templateCardActionsHtml(t)}
+    <div class="template-card-details">
+      ${templateTaskHistoryHtml(t)}
+      <details class="template-detail-panel">
+        <summary>模板说明 <span>${t.note ? '已填写' : '未填写'}</span></summary>
+        <div class="template-note-editor">
+          <label><span class="form-hint">说明仅在模板库中显示</span><textarea id="tmpl-inline-note-${t.id}" rows="3" maxlength="500" placeholder="填写用途、范围或其他说明">${escHtmlApp(t.note || '')}</textarea></label>
           <button type="button" class="btn btn-ghost btn-sm" onclick="tmplSaveInlineNote('${t.id}')">保存备注</button>
         </div>
       </details>
-      <!-- 编辑内嵌区 -->
-      <div id="tmpl-edit-${t.id}" style="display:none;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
-        ${tmplEditFormHtml(t)}
-      </div>
-  </div>`;
+    </div>
+  </article>`;
 }
 
 async function tmplSaveInlineNote(id) {
@@ -2090,41 +3034,35 @@ async function tmplSaveInlineNote(id) {
 
 function tmplEditFormHtml(t) {
   const [l1, l2, l3] = parseActPath(t.activityType || '');
-  return `
-    <div class="form-group">
-      <label>绑定活动类别（可自由组合）</label>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
-        <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:120px">
-          <span style="font-size:10px;color:var(--muted)">一级</span>
-          ${catSelectorHtml(1, 'tmpl-edit-l1-' + t.id, l1, 'tmpl-edit-cat-msg-' + t.id)}
-        </div>
-        <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:120px">
-          <span style="font-size:10px;color:var(--muted)">二级</span>
-          ${catSelectorHtml(2, 'tmpl-edit-l2-' + t.id, l2, 'tmpl-edit-cat-msg-' + t.id)}
-        </div>
-        <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:120px">
-          <span style="font-size:10px;color:var(--muted)">三级</span>
-          ${catSelectorHtml(3, 'tmpl-edit-l3-' + t.id, l3, 'tmpl-edit-cat-msg-' + t.id)}
-        </div>
-      </div>
-      <div style="margin-top:2px;font-size:11px;font-family:var(--mono)" id="tmpl-edit-cat-msg-${t.id}"></div>
-      <div class="form-hint" style="margin-top:2px">＋ 保存到库 · 🗑 从库删除（不影响已有模板/记录）</div>
+  return `<div class="template-editor-section">
+    <div class="template-editor-section-head"><b>绑定活动类别</b><span>修改完整分类路径</span></div>
+    <div class="template-category-grid">
+      <label><span>一级</span>${catSelectorHtml(1, 'tmpl-edit-l1-' + t.id, l1, 'tmpl-edit-cat-msg-' + t.id)}</label>
+      <label><span>二级</span>${catSelectorHtml(2, 'tmpl-edit-l2-' + t.id, l2, 'tmpl-edit-cat-msg-' + t.id)}</label>
+      <label><span>三级</span>${catSelectorHtml(3, 'tmpl-edit-l3-' + t.id, l3, 'tmpl-edit-cat-msg-' + t.id)}</label>
     </div>
-    <div class="form-grid" style="grid-template-columns:repeat(3,1fr)">
+    <div class="template-inline-message" id="tmpl-edit-cat-msg-${t.id}"></div>
+  </div>
+  <div class="template-editor-section">
+    <div class="template-editor-section-head"><b>默认设置</b><span>控制录入和预测使用的模板能力</span></div>
+    <div class="template-editor-grid">
       <div class="form-group"><label>默认时长(分钟)</label>
         <input type="number" id="tmpl-edit-min-${t.id}" value="${t.defaultMinutes || ''}"></div>
       <div class="form-group template-unit-config"><label>
-        <input type="checkbox" id="tmpl-edit-quantity-enabled-${t.id}" ${t.quantityEnabled ? 'checked' : ''}> 开启数量单位</label>
+        <input type="checkbox" id="tmpl-edit-quantity-enabled-${t.id}" ${t.quantityEnabled ? 'checked' : ''} onchange="syncTemplateAccuracyControls('tmpl-edit-quantity-enabled-${t.id}','tmpl-edit-accuracy-enabled-${t.id}','quantity')"> 开启数量单位</label>
         ${unitSelectorHtml('tmpl-edit-unit-' + t.id, t.quantityUnit || '', 'tmpl-edit-unit-msg-' + t.id)}
         <div style="font-size:11px;font-family:var(--mono)" id="tmpl-edit-unit-msg-${t.id}"></div>
         <div class="form-hint">关闭时保留单位文字，但不参与录入和预测。</div></div>
-      <div class="form-group"><label>备注模板</label>
-        <input type="text" id="tmpl-edit-note-${t.id}" value="${escHtmlApp(t.note || '')}"></div>
+      <div class="form-group"><label>模板说明（不会带入任务记录）</label>
+        <textarea id="tmpl-edit-note-${t.id}" rows="3" maxlength="500">${escHtmlApp(t.note || '')}</textarea></div>
       <div class="form-group template-unit-config"><label>
         <input type="checkbox" id="tmpl-edit-ordinal-enabled-${t.id}" ${(t.namedItemEnabled ?? t.ordinalEnabled) ? 'checked' : ''}> 开启命名章节记录</label>
         <div class="form-hint">章节名称在共享章节库中维护，不再使用“第N单位”。</div></div>
-    </div>
-    <div style="display:flex;gap:8px">
+      <div class="form-group template-unit-config"><label>
+        <input type="checkbox" id="tmpl-edit-accuracy-enabled-${t.id}" ${t.accuracyEnabled ? 'checked' : ''} ${t.quantityEnabled ? '' : 'disabled'} onchange="syncTemplateAccuracyControls('tmpl-edit-quantity-enabled-${t.id}','tmpl-edit-accuracy-enabled-${t.id}','accuracy')"> 开启正确率记录</label>
+        <div class="form-hint">开启后，总数量和错误数量在任务录入时均为必填。</div></div>
+    </div></div>
+    <div class="template-editor-actions">
       <button class="btn btn-success btn-sm" onclick="tmplSaveEdit('${t.id}')">✓ 保存修改</button>
       <button class="btn btn-ghost btn-sm" onclick="tmplCancelEdit('${t.id}')">取消</button>
     </div>`;
@@ -2134,9 +3072,16 @@ function tmplEditFormHtml(t) {
 function tmplToggleForm() {
   const body = document.getElementById('tmpl-form-body');
   const tog = document.getElementById('tmpl-form-toggle');
+  const panel = document.getElementById('task-template-new-panel');
+  if (!body) return;
   const open = body.style.display === 'none';
   body.style.display = open ? 'block' : 'none';
-  if (tog) tog.textContent = open ? '▲ 收起' : '▼ 展开';
+  panel?.classList.toggle('open', open);
+  if (open) {
+    const editHost = document.getElementById('task-template-edit-host');
+    if (editHost) editHost.innerHTML = '';
+  }
+  if (tog) tog.textContent = open ? '收起' : '展开';
 }
 
 function _showCatMsg(msgId, text, color) {
@@ -2202,10 +3147,15 @@ async function tmplSaveNew() {
     ordinalEnabled: namedItemEnabled,
     ordinalUnit: namedItemEnabled ? '项' : '',
     quantityEnabled: document.getElementById('tmpl_quantity_enabled').checked,
+    accuracyEnabled: document.getElementById('tmpl_accuracy_enabled').checked,
     note: document.getElementById('tmpl_note').value.trim(),
   };
   if (tmpl.quantityEnabled && !tmpl.quantityUnit) {
     alert('开启数量单位后必须填写数量单位。');
+    return;
+  }
+  if (tmpl.accuracyEnabled && !tmpl.quantityEnabled) {
+    alert('开启正确率记录前必须先开启数量记录。');
     return;
   }
   await addTaskTemplate(tmpl);
@@ -2257,48 +3207,88 @@ async function tmplClearHistoricalDimension(id, dimension) {
 }
 
 function tmplStartEdit(id) {
-  document.getElementById(`tmpl-edit-${id}`).style.display = 'block';
+  const template = getTaskTemplateById(id);
+  const host = document.getElementById('task-template-edit-host');
+  if (!template || !host) return;
+  const newBody = document.getElementById('tmpl-form-body');
+  if (newBody) newBody.style.display = 'none';
+  document.getElementById('task-template-new-panel')?.classList.remove('open');
+  const toggle = document.getElementById('tmpl-form-toggle');
+  if (toggle) toggle.textContent = '展开';
+  const color = getActColor(template.activityType || '').color;
+  host.innerHTML = templateEditorPanelHtml(`编辑任务模板 · ${escHtmlApp(template.activityType || '未分类模板')}`, '修改分类、默认时长、数量单位和章节能力。', tmplEditFormHtml(template), 'task-template-editor');
+  host.firstElementChild?.style.setProperty('--template-color', color);
+  host.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 function tmplCancelEdit(id) {
-  document.getElementById(`tmpl-edit-${id}`).style.display = 'none';
+  const host = document.getElementById('task-template-edit-host');
+  if (host) host.innerHTML = '';
 }
 
-function tmplManageNamedItems(id) {
+function tmplPositionNamedItemsManager(id) {
+  const host = document.getElementById('template-named-items-manager');
+  const card = document.getElementById(`tmpl-card-${id}`);
+  const grid = card?.closest('.task-template-grid');
+  if (!host || !card || !grid) return false;
+  const cards = [...grid.children].filter(child => child.classList.contains('task-template-card'));
+  const cardIndex = cards.indexOf(card);
+  if (cardIndex < 0) return false;
+  const columnCount = Math.max(1, getComputedStyle(grid).gridTemplateColumns.split(/\s+/).filter(Boolean).length);
+  const rowEndIndex = Math.min(cards.length - 1, Math.floor(cardIndex / columnCount) * columnCount + columnCount - 1);
+  cards[rowEndIndex].insertAdjacentElement('afterend', host);
+  return true;
+}
+
+function tmplManageNamedItems(id, options = {}) {
   const template = getTaskTemplateById(id);
   const host = document.getElementById('template-named-items-manager');
   if (!template || !host) return;
+  if (!tmplPositionNamedItemsManager(id)) return;
+  document.querySelectorAll('.task-template-card.chapter-open').forEach(card => card.classList.remove('chapter-open'));
+  document.getElementById(`tmpl-card-${id}`)?.classList.add('chapter-open');
+  state._templateNamedItemsOpenId = id;
   const forecastTab = document.getElementById('tab-forecast');
   if (forecastTab) forecastTab.innerHTML = '';
-  host.innerHTML = `<div class="card" style="margin-bottom:16px;border-color:rgba(79,195,247,.35)">
-    <div class="card-header">
+  const libraryProgress = namedItemLibraryProgress(template.id);
+  const activeCount = (template.namedItems || []).filter(item => !item.archived).length;
+  const color = getActColor(template.activityType || '').color;
+  host.innerHTML = `<section class="template-chapter-workspace" style="--template-color:${color}">
+    <div class="template-chapter-head">
       <div>
-        <div class="card-title">📚 共享章节库 · ${escHtmlApp(forecastTemplateLabel(template))}</div>
-        <div class="card-sub">这里保存的章节会同步用于完成预测和任务录入。</div>
+        <div class="template-eyebrow">SHARED CHAPTER LIBRARY</div>
+        <h3>${escHtmlApp(forecastTemplateLabel(template))}</h3>
+        <p>章节顺序、归档状态和完成进度会同步到任务录入与完成预测。</p>
       </div>
-      <button class="btn btn-ghost btn-sm" onclick="tmplCloseNamedItemsManager()">关闭</button>
+      <button class="btn btn-ghost btn-sm" onclick="tmplCloseNamedItemsManager('${id}')">关闭章节库</button>
+    </div>
+    <div class="template-chapter-summary">
+      <div><span>活动章节</span><strong>${activeCount}</strong></div>
+      <div><span>已完成</span><strong>${libraryProgress.completedActive}/${activeCount}</strong></div>
+      <div><span>已录入数量</span><strong>${template.quantityEnabled ? `${forecastDisplayMetric(libraryProgress.totalQuantity)} ${escHtmlApp(template.quantityUnit || '数量')}` : '-'}</strong></div>
     </div>
     ${forecastNamedItemsEditorHtml(template.namedItems || [], template.id)}
-    <div style="display:flex;gap:8px;margin-top:12px">
+    <div class="template-chapter-actions">
       <button class="btn btn-success" onclick="tmplSaveNamedItems('${id}')">✓ 保存共享章节库</button>
-      <button class="btn btn-ghost" onclick="tmplCloseNamedItemsManager()">取消</button>
+      <button class="btn btn-ghost" onclick="tmplCloseNamedItemsManager('${id}')">取消</button>
     </div>
     ${tmplNamedItemsTransferPanelHtml(template)}
-  </div>`;
-  host.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  </section>`;
+  host.classList.add('open');
+  if (options.scroll !== false) host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 function tmplNamedItemsTransferPanelHtml(sourceTemplate) {
   const targets = getTaskTemplates().filter(template => template.id !== sourceTemplate.id);
   const activeCount = (sourceTemplate.namedItems || []).filter(item => !item.archived).length;
-  return `<details style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
-    <summary style="cursor:pointer;font-weight:600">📤 复制／覆盖章节库到其他模板</summary>
-    <div style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,.015)">
-      <div class="form-hint" style="margin-bottom:10px">
+  return `<details class="template-transfer-panel">
+    <summary>复制或覆盖章节库到其他模板</summary>
+    <div class="template-transfer-body">
+      <div class="form-hint template-transfer-note">
         源模板：${escHtmlApp(forecastTemplateLabel(sourceTemplate))} · ${activeCount} 个活动章节。只复制活动章节，不复制归档项目和完成进度。
       </div>
       <div class="form-group">
         <label>操作方式</label>
-        <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div class="template-choice-row">
           <label><input type="radio" name="tmpl_named_items_transfer_mode" value="merge" checked> 合并复制</label>
           <label><input type="radio" name="tmpl_named_items_transfer_mode" value="overwrite"> 覆盖活动章节</label>
         </div>
@@ -2307,11 +3297,11 @@ function tmplNamedItemsTransferPanelHtml(sourceTemplate) {
       <div class="form-group">
         <label>目标模板（可多选）</label>
         ${targets.length
-          ? `<div style="display:grid;gap:7px;max-height:220px;overflow-y:auto;padding:8px;border:1px solid var(--border);border-radius:7px">
-              ${targets.map(target => `<label style="display:flex;gap:8px;align-items:center">
+          ? `<div class="template-transfer-targets">
+              ${targets.map(target => `<label>
                 <input type="checkbox" class="tmpl-named-items-transfer-target" value="${escHtmlApp(target.id)}">
                 <span>${escHtmlApp(forecastTemplateLabel(target))}</span>
-                <span class="c-muted" style="font-size:11px">（${(target.namedItems || []).filter(item => !item.archived).length} 个活动章节）</span>
+                <small>${(target.namedItems || []).filter(item => !item.archived).length} 个活动章节</small>
               </label>`).join('')}
             </div>`
           : '<div class="form-hint">没有可选择的其他任务模板。</div>'}
@@ -2323,10 +3313,24 @@ function tmplNamedItemsTransferPanelHtml(sourceTemplate) {
   </details>`;
 }
 
-function tmplCloseNamedItemsManager() {
+function tmplCloseNamedItemsManager(id = state._templateNamedItemsOpenId) {
   const host = document.getElementById('template-named-items-manager');
-  if (host) host.innerHTML = '';
+  if (host) {
+    host.innerHTML = '';
+    host.classList.remove('open');
+  }
+  if (id) document.getElementById(`tmpl-card-${id}`)?.classList.remove('chapter-open');
+  state._templateNamedItemsOpenId = null;
 }
+
+let templateNamedItemsResizeTimer = null;
+window.addEventListener('resize', () => {
+  if (!state._templateNamedItemsOpenId) return;
+  clearTimeout(templateNamedItemsResizeTimer);
+  templateNamedItemsResizeTimer = setTimeout(() => {
+    tmplPositionNamedItemsManager(state._templateNamedItemsOpenId);
+  }, 120);
+});
 
 function tmplCanonicalNamedItems(items) {
   const normalized = (Array.isArray(items) ? items : []).map((item, index) => ({
@@ -2458,7 +3462,7 @@ async function tmplTransferNamedItems(sourceId) {
   await saveAllStorage();
   alert(`已将章节库${modeLabel}到 ${targets.length} 个目标模板。`);
   renderTemplates();
-  if (tmpl.note) showPersistentSaveNotice('任务模板备注已保存');
+  tmplManageNamedItems(sourceId, { scroll: false });
 }
 
 async function tmplSaveNamedItems(id) {
@@ -2479,6 +3483,8 @@ async function tmplSaveNamedItems(id) {
   template.ordinalEnabled = true;
   await saveAllStorage();
   renderTemplates();
+  tmplManageNamedItems(id, { scroll: false });
+  showPersistentSaveNotice('共享章节库已保存');
 }
 
 async function tmplSaveEdit(id) {
@@ -2506,15 +3512,21 @@ async function tmplSaveEdit(id) {
     ordinalEnabled: namedItemEnabled,
     ordinalUnit: previous?.ordinalUnit || (namedItemEnabled ? '项' : ''),
     quantityEnabled: document.getElementById(`tmpl-edit-quantity-enabled-${id}`).checked,
+    accuracyEnabled: document.getElementById(`tmpl-edit-accuracy-enabled-${id}`).checked,
     note: document.getElementById(`tmpl-edit-note-${id}`).value.trim(),
   };
   if (tmpl.quantityEnabled && !tmpl.quantityUnit) {
     alert('开启数量单位后必须填写数量单位。');
     return;
   }
+  if (tmpl.accuracyEnabled && !tmpl.quantityEnabled) {
+    alert('开启正确率记录前必须先开启数量记录。');
+    return;
+  }
   const changed = [];
   if (previous && Boolean(previous.namedItemEnabled ?? previous.ordinalEnabled) !== tmpl.namedItemEnabled) changed.push(`命名章节记录${tmpl.namedItemEnabled ? '开启' : '关闭'}`);
   if (previous && previous.quantityEnabled !== tmpl.quantityEnabled) changed.push(`数量记录${tmpl.quantityEnabled ? '开启' : '关闭'}`);
+  if (previous && Boolean(previous.accuracyEnabled) !== tmpl.accuracyEnabled) changed.push(`正确率记录${tmpl.accuracyEnabled ? '开启' : '关闭'}`);
   if (previous && previous.quantityUnit !== tmpl.quantityUnit) changed.push(`数量单位改为“${tmpl.quantityUnit || '空'}”`);
   if (changed.length) {
     const affected = getTasksForTemplate(id).length;
@@ -2637,9 +3649,6 @@ function catSelPick(inputId, value) {
     if (wrongLabel) wrongLabel.textContent = value ? `错误数量（${value}，可选）` : '错误数量（可选）';
     autoCalcRate();
   }
-  if (inputId === 'task_template_ordinal_unit' || inputId === 'task_new_ordinal_unit') {
-    taskUpdateOrdinalUnitPreview(value);
-  }
   if (/^task_l[123]$/.test(inputId)) {
     updateTaskCategorySequenceUi();
     setTimeout(taskTemplateMonitor, 0);
@@ -2710,12 +3719,240 @@ const ACT_COLORS = [
   { color: '#ffd54f', cls: 'wake' },
 ];
 
+const VISUAL_COLOR_PALETTE = [
+  '#69f0ae', '#4fc3f7', '#ce93d8', '#ffb74d', '#ef9a9a',
+  '#80deea', '#ffd54f', '#a5d6a7', '#f48fb1', '#90caf9',
+  '#b39ddb', '#ffcc80', '#80cbc4', '#e6ee9c', '#bcaaa4',
+];
+
+const VISUAL_SPECIAL_PALETTE = [
+  '#ffb74d', '#ffcc80', '#ef9a9a', '#f48fb1', '#bcaaa4', '#e6ee9c',
+];
+
+const VISUAL_SYSTEM_DEFAULTS = {
+  unclassified: '#78909c',
+  specialDefault: '#ffb74d',
+  taskTotal: '#69f0ae',
+  specialTotal: '#ffb74d',
+  rest: '#b388ff',
+  distract: '#ef5350',
+  idle: '#78909c',
+  awake: '#ffd54f',
+};
+
+const VISUAL_CHART_DEFAULTS = {
+  clock: '#80deea',
+  effectiveClock: '#38d7ff',
+  nominal: '#4fc3f7',
+  actual: '#69f0ae',
+  taskDuration: '#ce93d8',
+  bedtime: '#b388ff',
+  wake: '#ffd54f',
+  sleepBand: '#80deea',
+  unavailable: '#ffb74d',
+  chapterDuration: '#4fc3f7',
+  chapterEfficiency: '#69f0ae',
+  archived: '#9e9e9e',
+  workbookQuestions: '#4fc3f7',
+  workbookCumulativeQuestions: '#69f0ae',
+  workbookErrorRate: '#ef9a9a',
+  workbookCumulativeErrorRate: '#ffb74d',
+  workbookAverageErrorRate: '#ffd54f',
+  distribution1: '#80deea',
+  distribution2: '#4fc3f7',
+  distribution3: '#78909c',
+  distribution4: '#b388ff',
+  distribution5: '#ce93d8',
+  distribution6: '#ffb74d',
+  distribution7: '#69f0ae',
+  distribution8: '#ef9a9a',
+};
+
+function isVisualHexColor(value) {
+  return /^#[0-9a-f]{6}$/i.test(String(value || ''));
+}
+
+function visualColorHash(value) {
+  let hash = 2166136261;
+  const text = String(value || '');
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash >>> 0);
+}
+
+function visualDefaultColor(scope, name, index = null) {
+  if (scope === 'special') {
+    if (name === '特殊时段') return VISUAL_SYSTEM_DEFAULTS.specialDefault;
+    return VISUAL_SPECIAL_PALETTE[visualColorHash(`special:${name}`) % VISUAL_SPECIAL_PALETTE.length];
+  }
+  if (scope === 'level1' && Number.isInteger(index) && index >= 0) {
+    return VISUAL_COLOR_PALETTE[index % VISUAL_COLOR_PALETTE.length];
+  }
+  return VISUAL_COLOR_PALETTE[visualColorHash(`${scope}:${name}`) % VISUAL_COLOR_PALETTE.length];
+}
+
+function visualColorBaseConfig() {
+  return {
+    version: 3,
+    task: { level1: {}, level2: {}, level3: {} },
+    special: {},
+    system: { ...VISUAL_SYSTEM_DEFAULTS },
+    chart: { ...VISUAL_CHART_DEFAULTS },
+  };
+}
+
+function getVisualColorConfig() {
+  const current = state.data.__visualColors__;
+  const config = current && typeof current === 'object' ? current : visualColorBaseConfig();
+  if (!config.task || typeof config.task !== 'object') config.task = {};
+  ['level1', 'level2', 'level3'].forEach(group => {
+    if (!config.task[group] || typeof config.task[group] !== 'object') config.task[group] = {};
+  });
+  if (!config.special || typeof config.special !== 'object') config.special = {};
+  if (!config.system || typeof config.system !== 'object') config.system = {};
+  if (!config.chart || typeof config.chart !== 'object') config.chart = {};
+  Object.entries(VISUAL_SYSTEM_DEFAULTS).forEach(([key, color]) => {
+    if (!isVisualHexColor(config.system[key])) config.system[key] = color;
+  });
+  Object.entries(VISUAL_CHART_DEFAULTS).forEach(([key, color]) => {
+    if (!isVisualHexColor(config.chart[key])) config.chart[key] = color;
+  });
+  if (!Number.isFinite(Number(config.version))) config.version = 1;
+  state.data.__visualColors__ = config;
+  return config;
+}
+
+function visualColorRecordDays() {
+  return Object.entries(state.data)
+    .filter(([key, day]) => /^\d{4}-\d{2}-\d{2}$/.test(key) && day && typeof day === 'object')
+    .map(([, day]) => day);
+}
+
+function collectVisualTaskPathSources(level) {
+  const sources = new Map();
+  const addPath = (activityType, source) => {
+    const parts = parseActPath(activityType || '').slice(0, level);
+    if (parts.length < level || parts.some(part => !part || part === '未分类')) return;
+    const path = parts.join(' > ');
+    if (!sources.has(path)) sources.set(path, { library: false, template: false, history: false });
+    sources.get(path)[source] = true;
+  };
+  if (level === 1) getCatList(1).forEach(name => addPath(name, 'library'));
+  getTaskTemplates().forEach(template => addPath(template.activityType, 'template'));
+  visualColorRecordDays().forEach(day => {
+    (day.tasks || []).forEach(task => addPath(task.activityType, 'history'));
+  });
+  return sources;
+}
+
+function collectVisualTaskPaths(level) {
+  return [...collectVisualTaskPathSources(level).keys()];
+}
+
+function normalizeSpecialColorName(name) {
+  return String(name || '')
+    .replace(/^[🔸🧩]\s*/, '')
+    .replace(/（不可用部分）$/, '')
+    .trim() || '特殊时段';
+}
+
+function collectVisualSpecialNames() {
+  const names = new Set(getSessionTemplates().map(template => normalizeSpecialColorName(template.name)));
+  visualColorRecordDays().forEach(day => {
+    (day.sessions || []).forEach(session => {
+      if (isUnavailableSession(session) || isSpecialStudySession(session)) {
+        names.add(normalizeSpecialColorName(session.name || (isSpecialStudySession(session) ? '特殊学习' : '特殊时段')));
+      }
+    });
+  });
+  return [...names].filter(Boolean);
+}
+
+function ensureVisualCategoryColor(level, name, index = null, config = getVisualColorConfig()) {
+  const group = `level${level}`;
+  if (level !== 1 || !name || !config.task[group]) return;
+  if (!isVisualHexColor(config.task[group][name])) {
+    config.task[group][name] = visualDefaultColor(group, name, index);
+  }
+}
+
+function migrateVisualColors() {
+  const config = getVisualColorConfig();
+  const level1Library = getCatList(1);
+  collectVisualTaskPaths(1).forEach((name, index) => {
+    if (isVisualHexColor(config.task.level1[name])) return;
+    const libraryIndex = level1Library.indexOf(name);
+    config.task.level1[name] = libraryIndex >= 0 && isVisualHexColor(SETTINGS.actColors?.[libraryIndex]?.color)
+      ? SETTINGS.actColors[libraryIndex].color
+      : visualDefaultColor('level1', name, libraryIndex >= 0 ? libraryIndex : index);
+  });
+  [2, 3].forEach(level => {
+    const group = `level${level}`;
+    const previous = { ...(config.task[group] || {}) };
+    const migrated = {};
+    Object.entries(previous).forEach(([key, color]) => {
+      if (key.includes(' > ') && isVisualHexColor(color)) migrated[key] = color;
+    });
+    collectVisualTaskPaths(level).forEach(path => {
+      if (isVisualHexColor(migrated[path])) return;
+      const leaf = parseActPath(path)[level - 1];
+      migrated[path] = isVisualHexColor(previous[leaf])
+        ? previous[leaf]
+        : visualDefaultColor(group, path);
+    });
+    config.task[group] = migrated;
+  });
+  collectVisualSpecialNames().forEach(name => {
+    if (!isVisualHexColor(config.special[name])) {
+      config.special[name] = name === '特殊时段'
+        ? config.system.specialDefault
+        : visualDefaultColor('special', name);
+    }
+  });
+  config.version = 3;
+  return config;
+}
+
+function getCategoryColor(path, level = 'auto') {
+  if (!String(path || '').trim() || String(path).trim() === '未分类') {
+    return getSystemSeriesColor('unclassified');
+  }
+  const parts = parseActPath(path);
+  const config = getVisualColorConfig();
+  const availableLevel = parts[2] ? 3 : parts[1] ? 2 : parts[0] ? 1 : 0;
+  const targetLevel = level === 'auto'
+    ? (parts[2] ? 3 : parts[1] ? 2 : parts[0] ? 1 : 0)
+    : Math.min(availableLevel, Math.max(1, Math.min(3, Number(level) || 1)));
+  if (!targetLevel) return config.system.unclassified;
+  const key = parts.slice(0, targetLevel).join(' > ');
+  const color = config.task[`level${targetLevel}`]?.[key];
+  return isVisualHexColor(color) ? color : visualDefaultColor(`level${targetLevel}`, key);
+}
+
+function getSpecialSeriesColor(name) {
+  const normalized = normalizeSpecialColorName(name);
+  const config = getVisualColorConfig();
+  return isVisualHexColor(config.special[normalized])
+    ? config.special[normalized]
+    : normalized === '特殊时段'
+      ? config.system.specialDefault
+      : visualDefaultColor('special', normalized);
+}
+
+function getSystemSeriesColor(key) {
+  const config = getVisualColorConfig();
+  return isVisualHexColor(config.system[key]) ? config.system[key] : VISUAL_SYSTEM_DEFAULTS[key] || '#78909c';
+}
+
+function getChartSeriesColor(key) {
+  const config = getVisualColorConfig();
+  return isVisualHexColor(config.chart[key]) ? config.chart[key] : VISUAL_CHART_DEFAULTS[key] || '#78909c';
+}
+
 function getActColor(actName) {
-  const l1 = getActL1(actName);
-  const types = getLevel1Names();
-  const idx = types.indexOf(l1);
-  if (idx >= 0) return ACT_COLORS[idx % ACT_COLORS.length];
-  return ACT_COLORS[5]; // default grey
+  return { color: getCategoryColor(actName), cls: 'custom' };
 }
 
 // ============================================================
@@ -2793,7 +4030,7 @@ function computeDay(dateStr) {
 
 function computeRange(dateStrs) {
   const days = dateStrs.map(d => ({ dateStr: d, ...computeDay(d) }));
-  const daysWithData = days.filter(d => d.clockMin > 0 || d.actualMin > 0 || d.taskMin > 0);
+  const daysWithData = days.filter(d => isEffectiveRecordDay(d.dateStr));
   const n = daysWithData.length || 1;
   const totals = {
     clockMin: days.reduce((s, d) => s + d.clockMin, 0),
@@ -2821,11 +4058,584 @@ function computeRange(dateStrs) {
   return { days, totals };
 }
 
+function isEffectiveRecordDay(dateStr) {
+  const day = state.data[dateStr];
+  if (!day) return false;
+  return Boolean(
+    (Array.isArray(day.sessions) && day.sessions.length > 0) ||
+    (Array.isArray(day.tasks) && day.tasks.length > 0) ||
+    day.wakeTime ||
+    day.sleepTime ||
+    day.dayType ||
+    day.excludeFromRating
+  );
+}
+
+function hasAnyRecordedContent(dateStr) {
+  const day = state.data[dateStr];
+  if (!day || typeof day !== 'object') return false;
+  return Boolean(
+    (Array.isArray(day.sessions) && day.sessions.length > 0) ||
+    (Array.isArray(day.tasks) && day.tasks.length > 0) ||
+    day.wakeTime ||
+    day.sleepTime ||
+    String(day.wakeNote || '').trim() ||
+    String(day.sleepNote || '').trim() ||
+    day.dayType ||
+    day.excludeFromRating ||
+    String(day.dayNote || '').trim()
+  );
+}
+
+function getAllChartRecordDates() {
+  return Object.keys(state.data)
+    .filter(dateStr => /^\d{4}-\d{2}-\d{2}$/.test(dateStr) && hasAnyRecordedContent(dateStr))
+    .sort();
+}
+
+function chartDateStatus(dateStr) {
+  if (hasAnyRecordedContent(dateStr)) return 'recorded';
+  return dateStr > getTodayStr() ? 'future' : 'missing';
+}
+
+function chartMaskRecordedValues(dateStrs, values) {
+  return (values || []).map((value, index) => chartDateStatus(dateStrs[index]) === 'recorded' ? value : null);
+}
+
+function noRecordRegionPlugin(dateStrs = []) {
+  const statuses = dateStrs.map(chartDateStatus);
+  return {
+    id: 'noRecordRegions',
+    beforeDatasetsDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      const xScale = scales?.x;
+      if (!ctx || !chartArea || !xScale || !statuses.length) return;
+      const xAt = index => xScale.getPixelForValue(index);
+      let start = 0;
+      while (start < statuses.length) {
+        const status = statuses[start];
+        if (status === 'recorded') { start += 1; continue; }
+        let end = start;
+        while (end + 1 < statuses.length && statuses[end + 1] === status) end += 1;
+        const startX = xAt(start);
+        const endX = xAt(end);
+        const left = start === 0 ? chartArea.left : (xAt(start - 1) + startX) / 2;
+        const right = end === statuses.length - 1 ? chartArea.right : (endX + xAt(end + 1)) / 2;
+        if (Number.isFinite(left) && Number.isFinite(right) && right > left) {
+          ctx.save();
+          ctx.fillStyle = status === 'future' ? 'rgba(120,144,156,.055)' : 'rgba(120,144,156,.12)';
+          ctx.fillRect(left, chartArea.top, right - left, chartArea.bottom - chartArea.top);
+          ctx.beginPath();
+          ctx.rect(left, chartArea.top, right - left, chartArea.bottom - chartArea.top);
+          ctx.clip();
+          ctx.strokeStyle = status === 'future' ? 'rgba(120,144,156,.10)' : 'rgba(120,144,156,.22)';
+          ctx.lineWidth = 1;
+          const height = chartArea.bottom - chartArea.top;
+          for (let x = left - height; x < right + height; x += 12) {
+            ctx.beginPath();
+            ctx.moveTo(x, chartArea.bottom);
+            ctx.lineTo(x + height, chartArea.top);
+            ctx.stroke();
+          }
+          ctx.restore();
+          ctx.save();
+          ctx.setLineDash([4, 4]);
+          ctx.strokeStyle = status === 'future' ? 'rgba(120,144,156,.26)' : 'rgba(120,144,156,.48)';
+          ctx.beginPath();
+          ctx.moveTo(left, chartArea.top);
+          ctx.lineTo(left, chartArea.bottom);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = status === 'future' ? 'rgba(168,181,208,.62)' : 'rgba(168,181,208,.9)';
+          ctx.font = '600 10px "Noto Sans SC", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillText(status === 'future' ? '尚未到达' : '无记录', (left + right) / 2, chartArea.top + 7, Math.max(18, right - left - 6));
+          ctx.restore();
+        }
+        start = end + 1;
+      }
+    },
+  };
+}
+
+function calcRangeKpiStats(values) {
+  const vals = values.map(Number).filter(value => Number.isFinite(value));
+  const n = vals.length;
+  if (!n) return { n: 0, mean: 0, stdDev: 0, cv: null };
+  const mean = vals.reduce((sum, value) => sum + value, 0) / n;
+  const variance = vals.reduce((sum, value) => sum + (value - mean) ** 2, 0) / n;
+  const stdDev = Math.sqrt(variance);
+  return { n, mean, stdDev, cv: mean > 0 ? stdDev / mean : null };
+}
+
+function rangeKpiDurationSub(total, count, stats) {
+  if (!count) return '日均 - · σ - · CV -';
+  return `日均 ${fmtMin(Math.round(total / count), true)} · σ ${fmtMin(Math.round(stats.stdDev), true)} · CV ${fmtCV(stats.cv)}`;
+}
+
+function rangeKpiPercentSub(values) {
+  const stats = calcRangeKpiStats(values);
+  if (!stats.n) return '日均 - · σ - · CV -';
+  return `日均 ${Math.round(stats.mean)}% · σ ${Math.round(stats.stdDev)}pp · CV ${fmtCV(stats.cv)}`;
+}
+
+function rangeKpiCountSub(values) {
+  const stats = calcRangeKpiStats(values);
+  if (!stats.n) return '日均 - · σ - · CV -';
+  return `日均 ${stats.mean.toFixed(1)} · σ ${stats.stdDev.toFixed(1)} · CV ${fmtCV(stats.cv)}`;
+}
+
+function rangeKpiCardHtml({ group, label, value, sub = '', valueClass = '', valueStyle = '' }) {
+  const styleAttr = valueStyle ? ` style="${valueStyle}"` : '';
+  return `<div class="mini-card range-kpi-card range-kpi-${group}">
+    <div class="lbl">${label}</div>
+    <div class="val ${valueClass}"${styleAttr}>${value}</div>
+    ${sub ? `<div class="sub">${sub}</div>` : ''}
+  </div>`;
+}
+
+function countDayTypes(dateStrs) {
+  const effectiveDates = dateStrs.filter(dateStr => isEffectiveRecordDay(dateStr));
+  const typedCount = effectiveDates.filter(dateStr => Boolean(String((state.data[dateStr] || {}).dayType || '').trim())).length;
+  const excludedCount = effectiveDates.filter(dateStr => Boolean((state.data[dateStr] || {}).excludeFromRating)).length;
+  return {
+    total: effectiveDates.length,
+    normal: effectiveDates.length - typedCount,
+    typed: typedCount,
+    excluded: excludedCount,
+  };
+}
+
+function renderRangeKpiStatus(dayStats, options = {}) {
+  const totalDays = options.totalDays ?? dayStats.length;
+  const allEffectiveDays = dayStats.filter(day => isEffectiveRecordDay(day.dateStr));
+  const dayTypeCounts = countDayTypes(allEffectiveDays.map(day => day.dateStr));
+  const effectiveDays = options.excludeFromRating
+    ? allEffectiveDays.filter(day => !state.data[day.dateStr]?.excludeFromRating)
+    : allEffectiveDays;
+  const effectiveCount = effectiveDays.length;
+  const durationCard = ({ group = 'study', label, tip, key, valueClass = '', valueStyle = '' }) => {
+    const values = effectiveDays.map(day => Math.max(0, Number(day[key]) || 0));
+    const total = values.reduce((sum, value) => sum + value, 0);
+    return rangeKpiCardHtml({
+      group,
+      label: `${label}${tip ? tipIcon(tip) : ''}`,
+      value: fmtHrs(total),
+      sub: rangeKpiDurationSub(total, effectiveCount, calcRangeKpiStats(values)),
+      valueClass,
+      valueStyle,
+    });
+  };
+  const countCard = ({ label, values, valueClass = '', valueStyle = '' }) => {
+    const total = values.reduce((sum, value) => sum + value, 0);
+    return rangeKpiCardHtml({
+      group: 'count',
+      label,
+      value: String(total),
+      sub: rangeKpiCountSub(values),
+      valueClass,
+      valueStyle,
+    });
+  };
+  const focusDays = effectiveDays.filter(day => Number(day.effectiveClockMin) > 0 && day.focusEfficiency != null);
+  const focusActual = focusDays.reduce((sum, day) => sum + (Number(day.actualMin) || 0), 0);
+  const focusClock = focusDays.reduce((sum, day) => sum + (Number(day.effectiveClockMin) || 0), 0);
+  const focusPct = focusClock > 0 ? Math.round(focusActual / focusClock * 100) : null;
+  const utilDays = effectiveDays.filter(day => Number(day.awakeMin) > 0 && day.utilPct != null);
+  const utilUnavailable = utilDays.reduce((sum, day) => sum + (Number(day.unavailableMin) || 0), 0);
+  const utilAwake = utilDays.reduce((sum, day) => sum + (Number(day.awakeMin) || 0), 0);
+  const utilPct = utilAwake > 0 ? Math.round(utilUnavailable / utilAwake * 100) : null;
+  const awakeDays = effectiveDays.filter(day => day.awakeMin != null);
+  const disposableDays = effectiveDays.filter(day => day.disposableMin != null);
+  const awakeValues = awakeDays.map(day => Math.max(0, Number(day.awakeMin) || 0));
+  const disposableValues = disposableDays.map(day => Math.max(0, Number(day.disposableMin) || 0));
+  const totalAwake = awakeValues.reduce((sum, value) => sum + value, 0);
+  const totalDisposable = disposableValues.reduce((sum, value) => sum + value, 0);
+  const sessionCounts = effectiveDays.map(day => (day.sessions || []).length);
+  const taskCounts = effectiveDays.map(day => (day.tasks || []).length);
+  const taskActualDeviationValues = effectiveDays
+    .filter(day => Number(day.actualMin) > 0)
+    .map(day => ((Number(day.taskMin) || 0) - Number(day.actualMin)) / Number(day.actualMin) * 100);
+  const taskActualDeviationStats = calcRangeKpiStats(taskActualDeviationValues);
+  taskActualDeviationStats.cv = Math.abs(taskActualDeviationStats.mean) > Number.EPSILON
+    ? taskActualDeviationStats.stdDev / Math.abs(taskActualDeviationStats.mean)
+    : null;
+  return `<div class="mini-grid range-kpi-grid ${options.className || ''}">
+    ${rangeKpiCardHtml({
+    group: 'days',
+    label: '有效天数',
+    value: `${effectiveCount}<span style="font-size:12px;opacity:.6">/${totalDays}天</span>`,
+    sub: options.dayTypeFilterName
+      ? `仅统计 ${escHtmlApp(options.dayTypeFilterName)} · 包含不评分日期`
+      : options.includeAllDayTypes
+        ? `完全统计 · 普通 ${dayTypeCounts.normal} · 类型日 ${dayTypeCounts.typed} · 含不评分 ${dayTypeCounts.excluded}`
+      : options.excludedShellCount != null
+        ? `计入统计 ${effectiveCount} · 不评分日期壳 ${options.excludedShellCount} · 类型日 ${dayTypeCounts.typed}`
+        : options.excludeFromRating
+          ? `计入汇总 ${effectiveCount} · 排除 ${dayTypeCounts.excluded} · 类型日 ${dayTypeCounts.typed}`
+          : `普通 ${dayTypeCounts.normal} · 类型日 ${dayTypeCounts.typed}`,
+    valueStyle: 'color:var(--hp)',
+  })}
+    ${durationCard({ label: '总时钟', tip: 'clock', key: 'clockMin', valueClass: 'c-clock' })}
+    ${durationCard({ label: '总有效时钟', tip: 'effectiveClock', key: 'effectiveClockMin', valueClass: 'c-clock' })}
+    ${durationCard({ label: '总名义', tip: 'nominal', key: 'nominalMin', valueClass: 'c-nominal' })}
+    ${durationCard({ label: '总实际专注', tip: 'actual', key: 'actualMin', valueClass: 'c-actual' })}
+    ${rangeKpiCardHtml({
+    group: 'study',
+    label: `任务/实际误差${tipIcon('taskActualDeviation')}`,
+    value: taskActualDeviationStats.n ? devStr(Math.round(taskActualDeviationStats.mean)) : '-',
+    sub: taskActualDeviationStats.n
+      ? `${taskActualDeviationStats.n} 个有效日 · σ ${Math.round(taskActualDeviationStats.stdDev)}pp · CV ${fmtCV(taskActualDeviationStats.cv)}`
+      : '平均误差 - · σ - · CV -',
+    valueStyle: `color:${taskActualDeviationStats.n ? (taskActualDeviationStats.mean > 0 ? 'var(--thesis)' : taskActualDeviationStats.mean < 0 ? 'var(--red)' : 'var(--actual)') : 'var(--muted)'}`,
+  })}
+    ${durationCard({ label: '休息时间', tip: 'rest', key: 'restMin', valueStyle: 'color:var(--sleep)' })}
+    ${durationCard({ label: '分心时间', tip: 'distract', key: 'distractMin', valueStyle: 'color:var(--red)' })}
+    ${rangeKpiCardHtml({
+    group: 'study',
+    label: `专注率${tipIcon('efficiency')}`,
+    value: focusPct != null ? `${focusPct}%` : '-',
+    sub: rangeKpiPercentSub(focusDays.map(day => day.focusEfficiency)),
+    valueStyle: `color:${focusPct == null ? 'var(--muted)' : 'var(--actual)'}`,
+  })}
+    ${rangeKpiCardHtml({
+    group: 'life',
+    label: `清醒时长${tipIcon('awake')}`,
+    value: fmtHrs(totalAwake),
+    sub: rangeKpiDurationSub(totalAwake, awakeValues.length, calcRangeKpiStats(awakeValues)),
+    valueStyle: 'color:var(--wake)',
+  })}
+    ${rangeKpiCardHtml({
+    group: 'life',
+    label: '可支配时长',
+    value: fmtHrs(totalDisposable),
+    sub: rangeKpiDurationSub(totalDisposable, disposableValues.length, calcRangeKpiStats(disposableValues)),
+    valueClass: 'c-clock',
+  })}
+    ${rangeKpiCardHtml({
+    group: 'life',
+    label: `不可用时间占比${tipIcon('util')}`,
+    value: utilPct != null ? `${utilPct}%` : '-',
+    sub: rangeKpiPercentSub(utilDays.map(day => day.utilPct)),
+    valueStyle: `color:${utilPct == null ? 'var(--muted)' : 'var(--thesis)'}`,
+  })}
+    ${countCard({ label: '时段数量', values: sessionCounts, valueStyle: 'color:var(--hp)' })}
+    ${countCard({ label: '任务数量', values: taskCounts, valueStyle: 'color:var(--pol)' })}
+  </div>`;
+}
+
+const DAY_TYPE_COLORS = ['#b388ff', '#ffb74d', '#69f0ae', '#4fc3f7', '#ef9a9a', '#ce93d8', '#80deea', '#ffd54f'];
+
+function dayTypeName(day) {
+  return String(day?.dayType || '').trim();
+}
+
+function dayTypeStableIndex(value, length) {
+  let hash = 0;
+  for (const char of String(value || '')) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
+  return Math.abs(hash) % Math.max(1, length);
+}
+
+function dayTypeDisplayMeta(dayOrType) {
+  const day = typeof dayOrType === 'string' ? { dayType: dayOrType } : dayOrType;
+  const name = dayTypeName(day);
+  if (!name) return { name: '', symbol: '', color: '', historical: false, excluded: false };
+  const template = getDayTypeTemplates().find(item => item.name === name);
+  const fallbackSymbol = DAY_TYPE_SYMBOLS[dayTypeStableIndex(name, DAY_TYPE_SYMBOLS.length)];
+  return {
+    name,
+    symbol: dayTypeSymbolMeta(template?.symbolKey || fallbackSymbol.key).glyph,
+    color: DAY_TYPE_COLORS[dayTypeStableIndex(name, DAY_TYPE_COLORS.length)],
+    historical: !template,
+    excluded: Boolean(day?.excludeFromRating),
+  };
+}
+
+function dayTypeBadgeHtml(day, emptyText = '-') {
+  const meta = dayTypeDisplayMeta(day);
+  if (!meta.name) return emptyText;
+  const notes = [meta.historical ? '历史' : '', meta.excluded ? '不评分' : '评分'].filter(Boolean).join(' · ');
+  return `<span class="day-type-flag active" style="--day-type-color:${meta.color}" title="日期类型：${escHtmlApp(meta.name)}${meta.historical ? '（历史类型）' : ''} · ${meta.excluded ? '不评分' : '评分'}"><i>${meta.symbol}</i>${escHtmlApp(meta.name)}<small>${notes}</small></span>`;
+}
+
+function dayTypeFilterOptions() {
+  const options = new Map();
+  getDayTypeTemplates().filter(template => template.name).forEach(template => {
+    options.set(template.name, { ...dayTypeDisplayMeta(template.name), historical: false });
+  });
+  Object.keys(state.data).filter(dateStr => !dateStr.startsWith('__')).forEach(dateStr => {
+    const day = state.data[dateStr];
+    const name = dayTypeName(day);
+    if (name && !options.has(name)) options.set(name, dayTypeDisplayMeta(day));
+  });
+  return [...options.values()].sort((a, b) => Number(a.historical) - Number(b.historical) || a.name.localeCompare(b.name, 'zh-Hans'));
+}
+
+const DAY_TYPE_ALL_FILTER = '__all_day_types__';
+
+function dayTypeRangeContext(baseDates, selectedType = '') {
+  const options = dayTypeFilterOptions();
+  if (selectedType === DAY_TYPE_ALL_FILTER) {
+    return {
+      baseDates,
+      analysisDates: baseDates,
+      displayDates: baseDates,
+      shellDates: [],
+      selection: DAY_TYPE_ALL_FILTER,
+      selectedType: '',
+      filtered: false,
+      complete: true,
+      includeExcluded: true,
+      options,
+    };
+  }
+  const validType = options.some(option => option.name === selectedType) ? selectedType : '';
+  if (validType) {
+    const analysisDates = baseDates.filter(dateStr => dayTypeName(state.data[dateStr]) === validType);
+    return { baseDates, analysisDates, displayDates: analysisDates, shellDates: [], selection: validType, selectedType: validType, filtered: true, complete: false, includeExcluded: true, options };
+  }
+  const shellDates = baseDates.filter(dateStr => Boolean(dayTypeName(state.data[dateStr]) && state.data[dateStr]?.excludeFromRating));
+  const shellSet = new Set(shellDates);
+  return {
+    baseDates,
+    analysisDates: baseDates.filter(dateStr => !shellSet.has(dateStr)),
+    displayDates: baseDates,
+    shellDates,
+    selection: '',
+    selectedType: '',
+    filtered: false,
+    complete: false,
+    includeExcluded: false,
+    options,
+  };
+}
+
+const ANALYSIS_RANGE_SCOPES = ['overview', 'stacked', 'session', 'task', 'sleep'];
+
+function analysisRangeState(scope) {
+  if (!ANALYSIS_RANGE_SCOPES.includes(scope)) return null;
+  if (!state.analysisRanges) state.analysisRanges = {};
+  if (!state.analysisRanges[scope]) {
+    state.analysisRanges[scope] = {
+      mode: '30d', start: '', end: '', dayTypeFilter: '', pickerOpen: false,
+      hierarchyLevel: 'year', hierarchyYear: new Date().getFullYear(),
+      hierarchyMonth: new Date().getMonth(), hierarchyWeekStart: '', hierarchyLabel: '',
+    };
+  }
+  return state.analysisRanges[scope];
+}
+
+function analysisRangeRecordDates(scope) {
+  return Object.keys(state.data).filter(dateStr => {
+    if (dateStr.startsWith('__')) return false;
+    const day = state.data[dateStr] || {};
+    if (scope === 'overview') return hasAnyRecordedContent(dateStr);
+    if (scope === 'session') return Array.isArray(day.sessions) && day.sessions.length > 0;
+    if (scope === 'task') return Array.isArray(day.tasks) && day.tasks.length > 0;
+    if (scope === 'sleep') return Boolean(day.wakeTime || day.sleepTime || String(day.wakeNote || '').trim() || String(day.sleepNote || '').trim());
+    if (scope === 'stacked') {
+      const breakdown = computeDayBreakdown(dateStr);
+      return breakdown.awakeMin != null || breakdown.totalTaskMin > 0 || breakdown.totalSpecialMin > 0 ||
+        breakdown.focusRestMin > 0 || breakdown.focusDistractMin > 0;
+    }
+    return false;
+  }).sort();
+}
+
+function analysisRangeBaseDates(scope) {
+  const range = analysisRangeState(scope);
+  const today = getTodayStr();
+  const records = analysisRangeRecordDates(scope);
+  let start = addDays(today, -29);
+  let end = today;
+  if (range.mode === '7d') start = addDays(today, -6);
+  else if (range.mode === '90d') start = addDays(today, -89);
+  else if (range.mode === 'year') start = `${today.slice(0, 4)}-01-01`;
+  else if (range.mode === 'all') start = records[0] || '';
+  else if (range.mode === 'custom' || range.mode === 'hierarchy') {
+    start = range.start;
+    end = range.end;
+  }
+  return start && end ? overviewCalendarDates(start, end) : [];
+}
+
+function analysisRangeModeLabel(range) {
+  return ({ '7d': '近7天', '30d': '近30天', '90d': '近90天', year: '本年度', all: '全部历史', custom: '自定义', hierarchy: range.hierarchyLabel || '层级选择' })[range.mode] || '近30天';
+}
+
+function analysisRangeMeta(scope) {
+  const range = analysisRangeState(scope);
+  const baseDates = analysisRangeBaseDates(scope);
+  const context = dayTypeRangeContext(baseDates, range.dayTypeFilter);
+  range.dayTypeFilter = context.selection;
+  const relevantSet = new Set(analysisRangeRecordDates(scope));
+  const recordedCount = context.analysisDates.filter(dateStr => relevantSet.has(dateStr)).length;
+  const first = baseDates[0] || '';
+  const last = baseDates[baseDates.length - 1] || '';
+  return {
+    scope, range, baseDates, context,
+    analysisDates: context.analysisDates,
+    displayDates: context.displayDates,
+    start: first, end: last,
+    label: `${analysisRangeModeLabel(range)}${first && last ? ` · ${formatShort(first)} — ${formatShort(last)}` : ' · 暂无相关记录'}`,
+    recordedCount,
+  };
+}
+
+function analysisRangeRender(scope) {
+  const renderers = { overview: renderOverallOverview, stacked: renderStackedArea, session: renderSessAnalysis, task: renderTaskAnalysis, sleep: renderSleep };
+  renderers[scope]?.();
+}
+
+function analysisRangeSetMode(scope, mode) {
+  if (!['7d', '30d', '90d', 'year', 'all', 'custom'].includes(mode)) return;
+  const range = analysisRangeState(scope);
+  const today = getTodayStr();
+  if (mode === 'custom' && (!range.start || !range.end)) {
+    range.start = addDays(today, -29);
+    range.end = today;
+  }
+  range.mode = mode;
+  range.pickerOpen = false;
+  analysisRangeRender(scope);
+}
+
+function analysisRangeApplyCustom(scope) {
+  const range = analysisRangeState(scope);
+  const start = document.getElementById(`analysis_range_${scope}_start`)?.value || '';
+  const end = document.getElementById(`analysis_range_${scope}_end`)?.value || '';
+  if (!start || !end) return alert('请选择自定义范围的开始日期和结束日期。');
+  if (start > end) return alert('自定义范围的开始日期不能晚于结束日期。');
+  if (start === end) return alert('自定义范围至少需要包含两天，开始日期不能等于结束日期。');
+  range.start = start;
+  range.end = end;
+  range.mode = 'custom';
+  analysisRangeRender(scope);
+}
+
+function analysisRangeSetDayType(scope, value) {
+  const range = analysisRangeState(scope);
+  if (!range) return;
+  range.dayTypeFilter = value || '';
+  analysisRangeRender(scope);
+}
+
+function analysisRangeTogglePicker(scope) {
+  const range = analysisRangeState(scope);
+  range.pickerOpen = !range.pickerOpen;
+  if (range.pickerOpen && !['year', 'month', 'week', 'day'].includes(range.hierarchyLevel)) range.hierarchyLevel = 'year';
+  if (range.pickerOpen && scope !== 'overview' && range.hierarchyLevel === 'day') range.hierarchyLevel = 'week';
+  analysisRangeRender(scope);
+}
+
+function analysisRangeDrill(scope, level, year, month = 0, weekStart = '') {
+  if (scope !== 'overview' && level === 'day') return;
+  const range = analysisRangeState(scope);
+  range.pickerOpen = true;
+  range.hierarchyLevel = level;
+  range.hierarchyYear = Number(year);
+  range.hierarchyMonth = Number(month);
+  range.hierarchyWeekStart = weekStart || '';
+  analysisRangeRender(scope);
+}
+
+function analysisRangeChoose(scope, start, end, encodedLabel) {
+  if (scope === 'overview' && start === end) {
+    const range = analysisRangeState(scope);
+    range.pickerOpen = false;
+    state.selectedDate = start;
+    showTab('day');
+    return;
+  }
+  if (start === end) return alert('分析范围至少需要包含两天；请改选整周或更长范围。');
+  const range = analysisRangeState(scope);
+  range.mode = 'hierarchy';
+  range.start = start;
+  range.end = end;
+  range.hierarchyLabel = decodeURIComponent(encodedLabel || '') || '层级选择';
+  range.pickerOpen = false;
+  analysisRangeRender(scope);
+}
+
+function analysisRangeChooseButton(scope, start, end, label, text = '选择') {
+  return `<button type="button" class="btn btn-primary btn-sm" onclick="analysisRangeChoose('${scope}','${start}','${end}','${encodeURIComponent(label)}')">${text}</button>`;
+}
+
+function analysisRangePickerHtml(scope, meta) {
+  const range = meta.range;
+  if (!range.pickerOpen) return '';
+  if (!['year', 'month', 'week', 'day'].includes(range.hierarchyLevel)) range.hierarchyLevel = 'year';
+  if (scope !== 'overview' && range.hierarchyLevel === 'day') range.hierarchyLevel = 'week';
+  const records = analysisRangeRecordDates(scope);
+  const currentYear = new Date().getFullYear();
+  const firstYear = records.length ? Number(records[0].slice(0, 4)) : currentYear;
+  const years = Array.from({ length: Math.max(1, currentYear - firstYear + 1) }, (_, index) => currentYear - index);
+  const year = Number(range.hierarchyYear) || currentYear;
+  const month = Math.min(11, Math.max(0, Number(range.hierarchyMonth) || 0));
+  const breadcrumbs = [`<button type="button" onclick="analysisRangeDrill('${scope}','year',${year})">年份</button>`];
+  if (range.hierarchyLevel !== 'year') breadcrumbs.push(`<button type="button" onclick="analysisRangeDrill('${scope}','month',${year})">${year}年</button>`);
+  if (['week', 'day'].includes(range.hierarchyLevel)) breadcrumbs.push(`<button type="button" onclick="analysisRangeDrill('${scope}','week',${year},${month})">${month + 1}月</button>`);
+  if (range.hierarchyLevel === 'day') breadcrumbs.push(`<span>${formatShort(range.hierarchyWeekStart)} 起</span>`);
+
+  let cards = '';
+  if (range.hierarchyLevel === 'year') {
+    cards = years.map(value => {
+      const start = `${value}-01-01`, end = `${value}-12-31`, label = `${value}年`;
+      return `<article class="analysis-range-card"><b>${label}</b><small>${value === currentYear ? '当前年份 · 保留未来日期' : '自然年度'}</small><div>${analysisRangeChooseButton(scope, start, end, label, '选择全年')}<button type="button" class="btn btn-ghost btn-sm" onclick="analysisRangeDrill('${scope}','month',${value})">查看月份 →</button></div></article>`;
+    }).join('');
+  } else if (range.hierarchyLevel === 'month') {
+    cards = Array.from({ length: 12 }, (_, value) => {
+      const start = `${year}-${String(value + 1).padStart(2, '0')}-01`;
+      const end = dateToStr(new Date(year, value + 1, 0));
+      const label = `${year}年${value + 1}月`;
+      return `<article class="analysis-range-card"><b>${value + 1}月</b><small>${formatShort(start)} — ${formatShort(end)}</small><div>${analysisRangeChooseButton(scope, start, end, label, '选择整月')}<button type="button" class="btn btn-ghost btn-sm" onclick="analysisRangeDrill('${scope}','week',${year},${value})">查看周次 →</button></div></article>`;
+    }).join('');
+  } else if (range.hierarchyLevel === 'week') {
+    const monthStart = `${year}-${String(month + 1).padStart(2, '0')}-01`;
+    const monthEnd = dateToStr(new Date(year, month + 1, 0));
+    const firstMonday = getMondayOfDate(strToDate(monthStart));
+    const weeks = [];
+    for (let monday = firstMonday; monday <= monthEnd; monday = addDays(monday, 7)) weeks.push(monday);
+    cards = weeks.map((monday, index) => {
+      const sunday = addDays(monday, 6);
+      const label = `${year}年${month + 1}月第${index + 1}周`;
+      const dayButton = scope === 'overview' ? `<button type="button" class="btn btn-ghost btn-sm" onclick="analysisRangeDrill('${scope}','day',${year},${month},'${monday}')">查看日期 →</button>` : '';
+      return `<article class="analysis-range-card"><b>第${index + 1}周</b><small>${formatShort(monday)} — ${formatShort(sunday)}${monday < monthStart || sunday > monthEnd ? ' · 跨月' : ''}</small><div>${analysisRangeChooseButton(scope, monday, sunday, label, '选择整周')}${dayButton}</div></article>`;
+    }).join('');
+  } else {
+    const monday = range.hierarchyWeekStart || getMondayOfDate(new Date());
+    cards = getWeekDays(monday).map(dateStr => {
+      const date = strToDate(dateStr);
+      const label = `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+      return `<article class="analysis-range-card analysis-range-day"><b>${formatDisplay(dateStr)}</b><small>${dateStr}</small>${analysisRangeChooseButton(scope, dateStr, dateStr, label, scope === 'overview' ? '进入日览' : '选择这一天')}</article>`;
+    }).join('');
+  }
+  return `<div class="analysis-range-picker"><div class="analysis-range-picker-head"><div class="analysis-range-breadcrumbs">${breadcrumbs.join('<i>›</i>')}</div><button type="button" class="btn btn-ghost btn-sm" onclick="analysisRangeTogglePicker('${scope}')">收起</button></div><div class="analysis-range-grid">${cards}</div></div>`;
+}
+
+function analysisRangePlannerHtml(scope, meta) {
+  const range = meta.range;
+  const options = [['7d', '7天'], ['30d', '30天'], ['90d', '90天'], ['year', '本年度'], ['all', '全部历史'], ['custom', '自定义']];
+  const selectedMeta = meta.context.selectedType ? dayTypeDisplayMeta(meta.context.selectedType) : null;
+  return `<section class="analysis-range-planner" data-range-scope="${scope}">
+    <div class="analysis-range-main"><div class="analysis-range-presets">${options.map(([value, label]) => `<button type="button" class="${range.mode === value ? 'active' : ''}" onclick="analysisRangeSetMode('${scope}','${value}')">${label}</button>`).join('')}<button type="button" class="${range.mode === 'hierarchy' || range.pickerOpen ? 'active' : ''}" onclick="analysisRangeTogglePicker('${scope}')">层级选择</button></div><div class="analysis-range-summary"><span>当前范围</span><b>${escHtmlApp(meta.label)}</b><small>${meta.recordedCount} 个相关记录日 · 共 ${meta.baseDates.length} 天</small></div></div>
+    ${range.mode === 'custom' ? `<div class="analysis-range-custom"><label><span>开始日期</span><input type="date" id="analysis_range_${scope}_start" value="${escHtmlApp(range.start)}"></label><label><span>结束日期</span><input type="date" id="analysis_range_${scope}_end" value="${escHtmlApp(range.end)}"></label><button type="button" class="btn btn-primary btn-sm" onclick="analysisRangeApplyCustom('${scope}')">应用范围</button></div>` : ''}
+    <div class="analysis-range-filter-row"><label><span>日期类型筛选</span><select onchange="analysisRangeSetDayType('${scope}',this.value)"><option value="">常规统计（排除不评分数据）</option><option value="${DAY_TYPE_ALL_FILTER}" ${meta.context.complete ? 'selected' : ''}>完全统计（包含全部日期）</option>${meta.context.options.map(option => `<option value="${escHtmlApp(option.name)}" ${meta.context.selectedType === option.name ? 'selected' : ''}>${option.symbol} ${escHtmlApp(option.name)}${option.historical ? ' · 历史类型' : ''}</option>`).join('')}</select><small>${selectedMeta ? `仅显示 ${selectedMeta.symbol} ${escHtmlApp(selectedMeta.name)}` : meta.context.complete ? '全部日期均纳入统计' : `${meta.context.shellDates.length} 个不评分日期仅保留日期位置`}</small></label></div>
+    ${analysisRangePickerHtml(scope, meta)}
+  </section>`;
+}
+
+function dayTypeShellRowHtml(day, columnCount, filtered = false, sortValues = null, origin = 0) {
+  const meta = dayTypeDisplayMeta(day);
+  const sortAttrs = sortValues ? ` ${sortableTableRowAttrs(sortValues, origin)}` : '';
+  return `<tr class="day-type-shell-row range-summary-clickable"${sortAttrs} onclick="openEntryDate('${day.dateStr || ''}')"><td class="fw-mono">${formatShort(day.dateStr || '')}<br>${dayTypeBadgeHtml(day)}</td><td colspan="${Math.max(1, columnCount - 1)}"><span class="day-type-shell-status">${escHtmlApp(meta.name)} · ${filtered ? '不评分 · 当前类型筛选中已纳入' : '不评分 · 已从统计数据排除'}</span></td></tr>`;
+}
+
 function getAllDates() {
   return Object.keys(state.data).filter(k => {
     if (k.startsWith('__')) return false;
-    const d = state.data[k];
-    return (d.sessions && d.sessions.length > 0) || (d.tasks && d.tasks.length > 0) || d.wakeTime;
+    return isEffectiveRecordDay(k);
   }).sort();
 }
 
@@ -2850,6 +4660,176 @@ function chartDefaults() {
   Chart.defaults.font.family = "'Noto Sans SC', sans-serif";
 }
 
+function cumulativePositiveAverage(values, dateStrs = []) {
+  let total = 0;
+  let count = 0;
+  return values.map((value, index) => {
+    if (dateStrs.length && chartDateStatus(dateStrs[index]) !== 'recorded') return null;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      total += numeric;
+      count++;
+    }
+    return count ? Number((total / count).toFixed(2)) : null;
+  });
+}
+
+function rangeChartView(scope, chartKey) {
+  const value = state.rangeChartViews?.[scope]?.[chartKey];
+  return value === 'cumulativeAverage' ? value : 'daily';
+}
+
+function rangeChartViewTabsHtml(scope, chartKey) {
+  const view = rangeChartView(scope, chartKey);
+  return `<div class="task-analysis-view-tabs range-chart-view-tabs"><button type="button" class="${view === 'daily' ? 'active' : ''}" onclick="setRangeChartView('${scope}','${chartKey}','daily')">每日趋势</button><button type="button" class="${view === 'cumulativeAverage' ? 'active' : ''}" onclick="setRangeChartView('${scope}','${chartKey}','cumulativeAverage')">累计平均</button></div>`;
+}
+
+function setRangeChartView(scope, chartKey, view) {
+  if (scope !== 'overview' || !['time', 'task'].includes(chartKey) || !['daily', 'cumulativeAverage'].includes(view)) return;
+  if (!state.rangeChartViews[scope]) state.rangeChartViews[scope] = { time: 'daily', task: 'daily' };
+  state.rangeChartViews[scope][chartKey] = view;
+  renderOverallOverview();
+}
+
+function threeDimTrendDatasets(items, view = 'daily') {
+  const dateStrs = items.map(item => item.dateStr);
+  const makePoints = (baseColor, baseRadius) => ({
+    pointRadius: baseRadius,
+    pointHoverRadius: baseRadius + 2,
+    pointStyle: 'circle',
+    pointBackgroundColor: baseColor,
+    pointBorderColor: baseColor,
+    pointBorderWidth: 1,
+  });
+  const series = [
+    { label: '时钟', key: 'clockMin', color: getChartSeriesColor('clock'), alpha: .08, width: 1.4, dash: [6, 5], radius: 1.8, fill: false },
+    { label: '有效时钟', key: 'effectiveClockMin', color: getChartSeriesColor('effectiveClock'), alpha: .1, width: 1.8, radius: 2.3, fill: 'origin' },
+    { label: '名义', key: 'nominalMin', color: getChartSeriesColor('nominal'), alpha: .08, width: 1.8, radius: 2.3, fill: false },
+    { label: '实际', key: 'actualMin', color: getChartSeriesColor('actual'), alpha: .16, width: 2.8, radius: 3, fill: 'origin' },
+  ];
+  return series.map(item => {
+    const rawDailyData = items.map(row => +((Number(row[item.key]) || 0) / 60).toFixed(2));
+    const dailyData = chartMaskRecordedValues(dateStrs, rawDailyData);
+    return {
+    label: view === 'cumulativeAverage' ? `累计平均${item.label}` : item.label,
+    data: view === 'cumulativeAverage' ? cumulativePositiveAverage(rawDailyData, dateStrs) : dailyData,
+    borderColor: item.color,
+    backgroundColor: hexRgba(item.color, item.alpha),
+    borderWidth: item.width,
+    borderDash: item.dash || [],
+    tension: .34,
+    fill: item.fill,
+    spanGaps: false,
+    cubicInterpolationMode: 'monotone',
+    ...makePoints(item.color, item.radius),
+  };
+  });
+}
+
+function threeDimStatusMarkerPlugin(items) {
+  const metas = items.map(item => dayTypeDisplayMeta(state.data[item.dateStr]));
+  return {
+    id: 'threeDimStatusMarkers',
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      const xScale = scales?.x;
+      if (!ctx || !chartArea || !xScale) return;
+
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = '700 11px "Noto Sans SC", sans-serif';
+
+      metas.forEach((meta, index) => {
+        if (!meta.symbol) return;
+
+        const x = xScale.getPixelForValue(index);
+        if (!Number.isFinite(x) || x < chartArea.left || x > chartArea.right) return;
+        const y = chartArea.bottom - 10;
+
+        ctx.fillStyle = 'rgba(10,16,30,.76)';
+        ctx.beginPath();
+        ctx.arc(x, y, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(220,232,255,.16)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = meta.color;
+        ctx.fillText(meta.symbol, x, y + .5);
+      });
+
+      ctx.restore();
+    },
+  };
+}
+
+function threeDimTrendOptions(items, labels, mode = '') {
+  const dayTypeMetas = items.map(item => dayTypeDisplayMeta(state.data[item.dateStr]));
+  const xMaxRotation = items.length > 12 ? 45 : 0;
+  return {
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: {
+        labels: { color: '#9fb0d6', boxWidth: 10, padding: 14, usePointStyle: true },
+      },
+      filler: { propagate: false },
+      tooltip: {
+        backgroundColor: 'rgba(10,16,30,.94)',
+        borderColor: 'rgba(128,222,234,.32)',
+        borderWidth: 1,
+        titleColor: '#dce8ff',
+        bodyColor: '#c8d4f0',
+        callbacks: {
+          title: tooltipItems => {
+            if (!tooltipItems.length) return '';
+            const index = tooltipItems[0].dataIndex;
+            const meta = dayTypeMetas[index];
+            if (!meta?.name) return labels[index];
+            const status = meta.excluded ? (items[index]?._dayTypeFilterActive ? '不评分 · 筛选中纳入' : '不评分') : '评分';
+            return `${labels[index]} · ${meta.symbol} ${meta.name} · ${status}`;
+          },
+          label: context => `${context.dataset.label}: ${fmtMin(Math.round(context.parsed.y * 60), true)}`,
+        },
+      },
+    },
+    scales: {
+      x: {
+        ticks: {
+          color: '#7f8fb3',
+          callback: function (value) {
+            const index = Number(value);
+            const label = labels[index] || this.getLabelForValue(value);
+            return label;
+          },
+          autoSkip: true,
+          maxTicksLimit: mode === 'overview' ? 24 : 14,
+          maxRotation: xMaxRotation,
+        },
+        grid: { color: 'rgba(79,195,247,.08)' },
+      },
+      y: {
+        min: 0,
+        ticks: { color: '#7f8fb3', callback: value => `${value}h` },
+        grid: { color: 'rgba(30,36,56,.85)' },
+        title: { display: true, text: '小时', color: '#7f8fb3' },
+      },
+    },
+  };
+}
+
+function renderThreeDimTrendChart(chartId, items, labelFn, mode = '') {
+  const labels = items.map((item, index) => labelFn ? labelFn(item, index) : formatShort(item.dateStr));
+  const view = rangeChartView(mode, 'time');
+  const dateStrs = items.map(item => item.dateStr);
+  return mkChart(chartId, {
+    type: 'line',
+    data: { labels, datasets: threeDimTrendDatasets(items, view) },
+    options: threeDimTrendOptions(items, labels, mode),
+    plugins: [noRecordRegionPlugin(dateStrs), threeDimStatusMarkerPlugin(items)],
+  });
+}
+
 // ============================================================
 // GLOBAL HEADER / STATS BAR
 // ============================================================
@@ -2860,24 +4840,32 @@ function renderHeader() {
     document.getElementById('headerPeriod').textContent = '暂无数据';
     return;
   }
-  const all = computeRange(dates);
-  const t = all.totals;
   const today = getTodayStr();
   const todayStats = computeDay(today);
+  const dayTypeCounts = countDayTypes(dates);
 
   document.getElementById('headerPeriod').textContent =
     `${formatShort(dates[0])} — ${formatShort(dates[dates.length - 1])}`;
 
   const cards = [
-    { label: '记录天数', value: dates.length, unit: '天', sub: '有数据', color: 'var(--hp)' },
+    { label: '有效天数', value: dayTypeCounts.total, unit: '天', sub: `普通 ${dayTypeCounts.normal} · 类型日 ${dayTypeCounts.typed} · 不评分 ${dayTypeCounts.excluded}`, color: 'var(--hp)' },
     { label: `今日·时钟${tipIcon('clock')}`, value: fmtHrs(todayStats.clockMin), unit: '', sub: `有效${fmtMin(todayStats.effectiveClockMin)} · 休息${fmtMin(todayStats.restMin)}`, color: 'var(--clock)' },
     { label: `今日·名义${tipIcon('nominal')}`, value: fmtHrs(todayStats.nominalMin), unit: '', sub: '今日名义时长', color: 'var(--nominal)' },
     { label: `今日·实际${tipIcon('actual')}`, value: fmtHrs(todayStats.actualMin), unit: '', sub: '今日实际专注', color: 'var(--actual)' },
-    { label: `总·实际专注${tipIcon('actual')}`, value: fmtHrs(t.actualMin), unit: '', sub: '所有记录日', color: 'var(--pol)' },
-    { label: `总·时钟${tipIcon('clock')}`, value: fmtHrs(t.clockMin), unit: '', sub: `有效${fmtHrs(t.effectiveClockMin)} · 休息${fmtHrs(t.restMin)}`, color: 'var(--clock)' },
+    { label: `今日·休息${tipIcon('rest')}`, value: fmtHrs(todayStats.restMin), unit: '', sub: '普通专注时段休息', color: 'var(--sleep)' },
+    { label: `今日·分心${tipIcon('distract')}`, value: fmtHrs(todayStats.distractMin), unit: '', sub: '时钟−实际−休息', color: 'var(--red)' },
+    {
+      label: `今日·专注率${tipIcon('efficiency')}`, value: todayStats.focusEfficiency != null ? todayStats.focusEfficiency + '%' : '-', unit: '', sub: '实际/有效时钟',
+      color: todayStats.focusEfficiency == null ? 'var(--muted)' : 'var(--actual)'
+    },
+    { label: `今日·清醒${tipIcon('awake')}`, value: todayStats.awakeMin != null ? fmtHrs(todayStats.awakeMin) : '-', unit: '', sub: `${getDay(today).wakeTime || '?'} → ${getDay(today).sleepTime || '?'}`, color: 'var(--wake)' },
+    { label: '今日·可支配', value: todayStats.disposableMin != null ? fmtHrs(todayStats.disposableMin) : '-', unit: '', sub: `清醒−不可用 ${fmtMin(todayStats.unavailableMin)}`, color: 'var(--clock)' },
+    { label: '今日·不可用', value: fmtHrs(todayStats.unavailableMin), unit: '', sub: todayStats.utilPct != null ? `占清醒 ${todayStats.utilPct}%` : '缺少完整作息', color: todayStats.utilPct == null ? 'var(--muted)' : 'var(--thesis)' },
+    { label: '今日·时段数量', value: todayStats.sessions.length, unit: '段', sub: `时钟 ${fmtHrs(todayStats.clockMin)}`, color: 'var(--hp)' },
+    { label: `今日·任务量${tipIcon('taskMin')}`, value: todayStats.tasks.length, unit: '条', sub: `任务时长 ${fmtHrs(todayStats.taskMin)}`, color: 'var(--word)' },
     {
       label: `今日不可用占比${tipIcon('util')}`, value: todayStats.utilPct != null ? todayStats.utilPct + '%' : '-', unit: '', sub: `不可用${fmtMin(todayStats.unavailableMin)} / 清醒${fmtMin(todayStats.awakeMin)}`,
-      color: todayStats.utilPct == null ? 'var(--muted)' : todayStats.utilPct <= 30 ? 'var(--green)' : todayStats.utilPct <= 50 ? 'var(--wake)' : 'var(--red)'
+      color: todayStats.utilPct == null ? 'var(--muted)' : 'var(--thesis)'
     },
   ];
 
@@ -2893,22 +4881,56 @@ function renderHeader() {
 // ============================================================
 // TAB SWITCHING
 // ============================================================
+const TAB_DEFINITIONS = [
+  ['entry', '✏️ 录入'], ['calendar', '📆 日历'], ['day', '📊 日览'], ['overview', '🌐 总览'], ['stacked', '📊 堆积图'],
+  ['sessAnalysis', '⏱️ 时段分析'], ['taskAnalysis', '📝 任务分析'], ['sleep', '🌙 作息'],
+  ['export', '💾 导出'], ['templates', '📋 模板库'], ['forecast', '📅 完成预测'],
+  ['workbookReview', '📚 整册复盘'], ['settings', '⚙️ 设置'],
+];
+
+let primaryTabsResizeObserver = null;
+
+function updatePrimaryNavigationMode() {
+  const wrapper = document.getElementById('primaryTabs');
+  const list = document.getElementById('primaryTabsList');
+  if (!wrapper || !list) return;
+  wrapper.classList.toggle('is-compact', list.scrollWidth > Math.max(0, wrapper.clientWidth - 48));
+}
+
+function setupPrimaryNavigation() {
+  const wrapper = document.getElementById('primaryTabs');
+  if (!wrapper) return;
+  wrapper.innerHTML = `<div class="tabs-list" id="primaryTabsList">${TAB_DEFINITIONS.map(([id, label]) =>
+    `<button type="button" class="tab" data-tab-id="${id}" onclick="showTab('${id}')">${label}</button>`).join('')}</div>
+    <label class="compact-tab-control"><span>当前页面</span><select id="compactTabSelect" onchange="showTab(this.value)">${TAB_DEFINITIONS.map(([id, label]) =>
+      `<option value="${id}">${label}</option>`).join('')}</select></label>`;
+  primaryTabsResizeObserver?.disconnect();
+  primaryTabsResizeObserver = new ResizeObserver(() => requestAnimationFrame(updatePrimaryNavigationMode));
+  primaryTabsResizeObserver.observe(wrapper);
+  requestAnimationFrame(updatePrimaryNavigationMode);
+}
+
 function showTab(id) {
+  if (id === 'week' || id === 'month') id = 'overview';
   if (state.tab === 'entry' && id !== 'entry' && document.getElementById('taskForm')) {
     saveDraft(state.selectedDate, collectEntryDraft());
   }
   destroyAll();
   state.tab = id;
-  document.querySelectorAll('.tab').forEach((t, i) => {
-    const ids = ['entry', 'calendar', 'day', 'week', 'month', 'stacked', 'sessAnalysis', 'taskAnalysis', 'sleep', 'export', 'templates', 'forecast', 'workbookReview', 'settings'];
-    t.classList.toggle('active', ids[i] === id);
+  document.querySelectorAll('.tab[data-tab-id]').forEach(t => {
+    const active = t.dataset.tabId === id;
+    t.classList.toggle('active', active);
+    if (active) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current');
   });
+  const compactSelect = document.getElementById('compactTabSelect');
+  if (compactSelect) compactSelect.value = id;
   document.querySelectorAll('.tab-content').forEach(c => {
     c.classList.toggle('active', c.id === 'tab-' + id);
   });
   const renders = {
     entry: renderEntry, calendar: renderCalendar, day: renderDayOverview,
-    week: renderWeekOverview, month: renderMonthOverview, stacked: renderStackedArea,
+    overview: renderOverallOverview,
+    stacked: renderStackedArea,
     sessAnalysis: renderSessAnalysis, taskAnalysis: renderTaskAnalysis,
     sleep: renderSleep,
     export: renderExport, templates: renderTemplates,
@@ -2926,9 +4948,9 @@ function showTab(id) {
 // ============================================================
 function dayMigrationPanelHtml(dateStr, day, sessions, tasks) {
   const scalarItems = [
-    day.wakeTime ? `<label><input type="checkbox" class="day-move-item" data-kind="wakeTime"> ☀️ 起床时间：${escHtmlApp(day.wakeTime)}</label>` : '',
+    day.wakeTime || day.wakeNote ? `<label><input type="checkbox" class="day-move-item" data-kind="wakeTime"> ☀️ 起床记录：${escHtmlApp(day.wakeTime || '无时间')}${day.wakeNote ? ` · ${escHtmlApp(String(day.wakeNote).slice(0, 36))}` : ''}</label>` : '',
     day.dayNote ? `<label><input type="checkbox" class="day-move-item" data-kind="dayNote"> 📝 今日备注：${escHtmlApp(String(day.dayNote).slice(0, 60))}</label>` : '',
-    day.sleepTime ? `<label><input type="checkbox" class="day-move-item" data-kind="sleepTime"> 🌙 睡觉时间：${escHtmlApp(day.sleepTime)}</label>` : '',
+    day.sleepTime || day.sleepNote ? `<label><input type="checkbox" class="day-move-item" data-kind="sleepTime"> 🌙 睡觉记录：${escHtmlApp(day.sleepTime || '无时间')}${day.sleepNote ? ` · ${escHtmlApp(String(day.sleepNote).slice(0, 36))}` : ''}</label>` : '',
   ].filter(Boolean);
   const sessionItems = sessions.map((session, index) => `<label>
     <input type="checkbox" class="day-move-item" data-kind="session" data-id="${escHtmlApp(session.id)}">
@@ -2967,127 +4989,180 @@ function renderEntry() {
   const stats = computeDay(dateStr);
   const sessions = sortSessionsByStart(day.sessions || []);
   const tasks = day.tasks || [];
+  const taskEfficiencyIndex = buildTaskEfficiencyComparisonIndex();
+  const dayTypeTemplates = getDayTypeTemplates();
+  const entryDayTypeMeta = dayTypeDisplayMeta(day);
+  const hasDayType = Boolean(entryDayTypeMeta.name);
+  const dayStatus = hasDayType
+    ? day.excludeFromRating
+      ? { cls: 'excluded', symbol: entryDayTypeMeta.symbol, label: entryDayTypeMeta.name }
+      : { cls: 'special', symbol: entryDayTypeMeta.symbol, label: entryDayTypeMeta.name }
+    : { cls: 'normal', symbol: '', label: '普通日期' };
+  const focusText = stats.focusEfficiency != null ? `${stats.focusEfficiency}%` : '-';
+  const focusTone = stats.focusEfficiency == null ? 'muted' : 'actual';
+  const utilText = stats.utilPct != null ? `${stats.utilPct}%` : '-';
+  const utilTone = stats.utilPct == null ? 'muted' : 'clock';
 
   document.getElementById('tab-entry').innerHTML = `
-    <div class="date-nav">
-      <button class="btn btn-ghost btn-sm" onclick="changeDate(-1)">← 前一天</button>
-      <span class="date-display">${formatDisplay(dateStr)}</span>
-      <button class="btn btn-ghost btn-sm" onclick="changeDate(1)">后一天 →</button>
-      <div style="margin-left:8px">${editableDateInputHtml('entry_date', dateStr, "jumpDate(document.getElementById('entry_date').value)")}</div>
-      <button class="btn btn-ghost btn-sm" onclick="jumpDate('${getTodayStr()}')">今天</button>
-      <button class="btn btn-primary btn-sm" onclick="toggleForm('dayMovePanel')">⇄ 迁移本日数据</button>
-    </div>
-
-    ${dayMigrationPanelHtml(dateStr, day, sessions, tasks)}
-
-    <div class="three-time">
-      <div class="time-block clock"><div class="label">⏱ 时钟时长${tipIcon('clock')}</div><div class="value">${fmtMin(stats.clockMin, true)}</div><div class="sub">有效${tipIcon('effectiveClock')} ${fmtMin(stats.effectiveClockMin)} · 休息 ${fmtMin(stats.restMin)}</div></div>
-      <div class="time-block nominal"><div class="label">📋 名义时长${tipIcon('nominal')}</div><div class="value">${fmtMin(stats.nominalMin, true)}</div><div class="sub">计划专注时长 <span class="c-muted">${devStr(stats.clockVsNominal)}</span></div></div>
-      <div class="time-block actual"><div class="label">✅ 实际专注${tipIcon('actual')}</div><div class="value">${fmtMin(stats.actualMin, true)}</div><div class="sub">真实专注 <span class="${devClass(stats.actualVsNominal)}">${devStr(stats.actualVsNominal)}</span></div></div>
-    </div>
-
-    <!-- ☀️ WAKE TIME (top) -->
-    <div class="card entry-wake-card">
-      <div class="card-header"><div><div class="card-title">☀️ 起床时间</div></div></div>
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        ${timeInputHtml('wakeInput', day.wakeTime || '')}
-        <button class="btn btn-success btn-sm" onclick="saveSleep('${dateStr}')">保存</button>
-        ${day.wakeTime ? `<button class="btn btn-danger btn-sm" onclick="clearSavedSleepTime('${dateStr}','wake')">删除起床时间</button>` : ''}
-        ${day.wakeTime ? `<span class="fw-mono" style="font-size:12px;color:var(--wake)">${day.wakeTime}</span>` : ''}
+    <div class="entry-workbench">
+      <div class="entry-hero">
+        <div class="entry-toolbar">
+          <button class="btn btn-ghost btn-sm" onclick="changeDate(-1)">← 前一天</button>
+          <div class="entry-date-picker">${editableDateInputHtml('entry_date', dateStr, "jumpDate(document.getElementById('entry_date').value)")}</div>
+          <button class="btn btn-ghost btn-sm" onclick="changeDate(1)">后一天 →</button>
+          <button class="btn btn-ghost btn-sm" onclick="jumpDate('${getTodayStr()}')">今天</button>
+          <button class="btn btn-primary btn-sm" onclick="toggleForm('dayMovePanel')">⇄ 迁移本日数据</button>
+        </div>
+        <div class="entry-hero-main">
+          <div class="entry-date-stack">
+            <div class="entry-eyebrow">每日记录工作台</div>
+            <div class="entry-date-line">
+              <span class="date-display">${formatDisplay(dateStr)}</span>
+              <span class="entry-day-status ${dayStatus.cls}">${dayStatus.symbol ? `${dayStatus.symbol} ` : ''}${dayStatus.label}</span>
+              ${hasDayType ? `<span class="entry-day-type-mini">${day.excludeFromRating ? '不评分' : '评分'}</span>` : ''}
+            </div>
+            <div class="entry-date-sub">时段 ${sessions.length} 段 · 任务 ${tasks.length} 条 · 任务时长 ${fmtMin(stats.taskMin, true)}</div>
+          </div>
+          <div class="entry-kpi-strip">
+            <div class="entry-kpi-card clock"><span>时钟${tipIcon('clock')}</span><strong>${fmtMin(stats.clockMin, true)}</strong><small>全时段累计</small></div>
+            <div class="entry-kpi-card clock"><span>有效${tipIcon('effectiveClock')}</span><strong>${fmtMin(stats.effectiveClockMin, true)}</strong><small>时钟 - 休息</small></div>
+            <div class="entry-kpi-card nominal"><span>名义${tipIcon('nominal')}</span><strong>${fmtMin(stats.nominalMin, true)}</strong><small>${devStr(stats.clockVsNominal)}</small></div>
+            <div class="entry-kpi-card actual"><span>实际${tipIcon('actual')}</span><strong>${fmtMin(stats.actualMin, true)}</strong><small class="${devClass(stats.actualVsNominal)}">${devStr(stats.actualVsNominal)}</small></div>
+            <div class="entry-kpi-card rest"><span>休息${tipIcon('rest')}</span><strong>${fmtMin(stats.restMin, true)}</strong><small>普通时段休息</small></div>
+            <div class="entry-kpi-card distract"><span>分心${tipIcon('distract')}</span><strong>${fmtMin(stats.distractMin, true)}</strong><small>时钟-实际-休息</small></div>
+            <div class="entry-kpi-card ${focusTone}"><span>专注率${tipIcon('efficiency')}</span><strong>${focusText}</strong><small>实际 / 有效时钟</small></div>
+            <div class="entry-kpi-card ${utilTone}"><span>清醒/可支配${tipIcon('awake')}</span><strong>${stats.awakeMin != null ? fmtMin(stats.awakeMin) : '-'}</strong><small>可支配 ${stats.disposableMin != null ? fmtMin(stats.disposableMin) : '-'}</small></div>
+          </div>
+        </div>
       </div>
-    </div>
 
-    <!-- 🏷️ SPECIAL DAY -->
-    <div class="card" style="margin-bottom:0;${day.specialDay ? 'border-color:rgba(255,183,77,.4);background:rgba(255,183,77,.04)' : ''}">
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
-          日期类型
-          <input id="dayTypeInput" list="dayTypeOptions" value="${escHtmlApp(day.dayType || '')}"
-            placeholder="可选" onchange="applyDayTypeTemplateToEntry(this.value)"
-            style="min-width:140px;background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:5px">
-          <datalist id="dayTypeOptions">
-            ${getDayTypeTemplates().map(t => `<option value="${escHtmlApp(t.name || '')}">`).join('')}
-          </datalist>
-        </label>
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;user-select:none">
-          <input type="checkbox" id="specialDayCheck" ${day.specialDay ? 'checked' : ''} style="width:18px;height:18px;accent-color:var(--thesis);cursor:pointer">
-          <span style="color:${day.specialDay ? 'var(--thesis)' : 'var(--muted)'}">🏷️ 标记为特殊天</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--muted)">
-          <input type="checkbox" id="excludeFromRatingCheck" ${day.excludeFromRating ? 'checked' : ''} style="accent-color:var(--thesis)">
-          不参与评分
-        </label>
-        <span style="font-size:11px;color:var(--dim)">特殊日仍可记录学习内容；是否参与评分单独控制</span>
-      </div>
-    </div>
+      ${dayMigrationPanelHtml(dateStr, day, sessions, tasks)}
 
-    <!-- 📝 DAY NOTE -->
-    <div class="card" style="margin-bottom:0">
-      <div class="card-header"><div><div class="card-title">📝 今日备注</div><div class="card-sub">对一整天的总结、感受、计划等</div></div></div>
-      <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
-        <textarea id="dayNoteInput" placeholder="可选：记���今天的整体感受、总结或备忘…"
-          style="flex:1;min-height:60px;resize:vertical;background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;line-height:1.6;font-family:var(--mono);box-sizing:border-box"
-        >${escHtmlApp(day.dayNote || '')}</textarea>
-        <button class="btn btn-success btn-sm" onclick="saveDayNote('${dateStr}')">保存</button>
+      <div class="card entry-section entry-foundation-card">
+        <div class="card-header entry-section-head">
+          <div><div class="card-title">今日基础信息</div><div class="card-sub">作息、日期类型和整日备注</div></div>
+        </div>
+        <div class="entry-foundation-grid">
+          <div class="entry-inline-panel wake">
+            <div class="entry-panel-title">起床时间</div>
+            <div class="entry-action-row">
+              ${timeInputHtml('wakeInput', day.wakeTime || '')}
+              <button class="btn btn-success btn-sm" onclick="saveSleep('${dateStr}')">保存</button>
+              ${day.wakeTime ? `<button class="btn btn-danger btn-sm" onclick="clearSavedSleepTime('${dateStr}','wake')">删除起床时间</button>` : ''}
+            </div>
+            <textarea id="wakeNoteInput" class="entry-sleep-note" placeholder="可选：记录起床状态、感受或相关情况……">${escHtmlApp(day.wakeNote || '')}</textarea>
+            <div class="entry-panel-meta">${day.wakeTime ? `<span class="fw-mono c-wake">${day.wakeTime}</span>` : '<span class="c-muted">尚未记录</span>'}</div>
+          </div>
+
+          <div class="entry-inline-panel sleep">
+            <div class="entry-panel-title">睡觉时间</div>
+            <div class="entry-action-row">
+              ${timeInputHtml('sleepInput', day.sleepTime || '')}
+              <button class="btn btn-success btn-sm" onclick="saveSleep('${dateStr}')">保存</button>
+              ${day.sleepTime ? `<button class="btn btn-danger btn-sm" onclick="clearSavedSleepTime('${dateStr}','sleep')">删除睡觉时间</button>` : ''}
+            </div>
+            <textarea id="sleepNoteInput" class="entry-sleep-note" placeholder="可选：记录入睡状态、睡前情况或相关原因……">${escHtmlApp(day.sleepNote || '')}</textarea>
+            <div class="entry-panel-meta">${day.sleepTime ? `<span class="fw-mono c-sleep">${day.sleepTime}</span>` : '<span class="c-muted">填次日凌晨时间如 00:30</span>'}</div>
+          </div>
+
+          <div class="entry-inline-panel entry-day-type-panel ${hasDayType ? 'has-type' : ''}">
+            <div class="entry-panel-title">日期类型</div>
+            <div class="entry-day-type-row">
+              <label class="entry-field-compact">
+                <span>日期类型模板</span>
+                <select id="dayTypeInput" onchange="applyDayTypeTemplateToEntry(this.value)">
+                  <option value="">普通日期（无日期类型）</option>
+                  ${day.dayType && !dayTypeTemplates.some(template => template.name === day.dayType) ? `<option value="${escHtmlApp(day.dayType)}" selected disabled>历史类型 · ${escHtmlApp(day.dayType)}（请改选）</option>` : ''}
+                  ${dayTypeTemplates.map(template => `<option value="${escHtmlApp(template.name || '')}" ${day.dayType === template.name ? 'selected' : ''}>${dayTypeSymbolMeta(template.symbolKey).glyph} ${escHtmlApp(template.name || '')}</option>`).join('')}
+                </select>
+              </label>
+              <label class="entry-toggle">
+                <input type="checkbox" id="excludeFromRatingCheck" ${hasDayType && day.excludeFromRating ? 'checked' : ''} ${hasDayType ? '' : 'disabled'}>
+                <span><b>不参与评分</b><small>不计入周、月、总览顶部汇总</small></span>
+              </label>
+              <button class="btn btn-success btn-sm" onclick="saveDayType('${dateStr}')">保存日期类型</button>
+            </div>
+            <div class="entry-panel-meta">选择日期类型后自动应用评分默认值，并可在当天覆盖。当前：${hasDayType ? dayTypeBadgeHtml(day) : '<span class="c-muted">普通日期（无日期类型）</span>'}</div>
+          </div>
+
+          <div class="entry-inline-panel entry-note-panel">
+            <div class="entry-panel-title">今日备注</div>
+            <div class="entry-note-row">
+              <textarea id="dayNoteInput" class="entry-note-input" placeholder="可选：记录今天的整体感受、总结或备忘...">${escHtmlApp(day.dayNote || '')}</textarea>
+              <button class="btn btn-success btn-sm" onclick="saveDayNote('${dateStr}')">保存</button>
+            </div>
+            ${day.wakeTime && day.sleepTime ? `
+              <div class="entry-panel-meta">
+                清醒${tipIcon('awake')} <span class="c-text">${fmtMin(stats.awakeMin)}</span>
+                ${stats.unavailableMin ? ` · 不可用 <span class="c-muted">${fmtMin(stats.unavailableMin)}</span>` : ''}
+                ${stats.specialStudyActualMin ? ` · 特殊学习 <span class="c-clock">${fmtMin(stats.specialStudyActualMin)}</span>` : ''}
+                · 可支配 <span class="c-text">${fmtMin(stats.disposableMin)}</span>
+                · 不可用占比${tipIcon('util')} <span class="c-muted">${utilText}</span>
+              </div>` : ''}
+          </div>
+        </div>
       </div>
-    </div>
 
     <!-- ⏱ SESSIONS TABLE -->
-    <div class="card entry-table-card">
+    <div class="card entry-section entry-table-card entry-main-panel">
       <div class="card-header">
-        <div><div class="card-title">⏱ 专注时段${state._editingSessionId ? ' <span style="color:var(--wake);font-size:12px">✏️ 编辑中</span>' : ''}</div><div class="card-sub">记录时钟/名义/实际三维时间</div></div>
+        <div><div class="card-title">专注时段${state._editingSessionId ? ' <span class="entry-editing-pill">编辑中</span>' : ''}</div><div class="card-sub">记录时钟 / 名义 / 实际三维时间</div></div>
         <button class="btn btn-primary btn-sm" onclick="state._editingSessionId=null;toggleForm('sessionForm')">+ 添加时段</button>
       </div>
       <div class="form-panel" id="sessionForm">
-        <!-- 时段类型切换 -->
-        <div class="form-group" style="margin-bottom:12px">
+        <div class="entry-form-block">
+        <div class="entry-form-block-title">类型与模板</div>
+        <div class="form-group">
           <label>时段类型</label>
-          <div style="display:flex;gap:8px">
-            <button class="btn btn-sm" id="sessTypeNormal" onclick="switchSessionType('normal')" style="background:var(--pol);color:#000;font-weight:600">📋 普通时段</button>
-            <button class="btn btn-ghost btn-sm" id="sessTypeSpecial" onclick="switchSessionType('special')">⏱ 不可用时段</button>
-            <button class="btn btn-ghost btn-sm" id="sessTypeSpecialStudy" onclick="switchSessionType('special-study')">🧩 特殊学习时段</button>
+          <div class="entry-segmented">
+            <button class="btn btn-sm" id="sessTypeNormal" onclick="switchSessionType('normal')" style="background:var(--pol);color:#000;font-weight:600">普通时段</button>
+            <button class="btn btn-ghost btn-sm" id="sessTypeSpecial" onclick="switchSessionType('special')">不可用时段</button>
+            <button class="btn btn-ghost btn-sm" id="sessTypeSpecialStudy" onclick="switchSessionType('special-study')">特殊学习时段</button>
           </div>
           <div class="form-hint">普通时段：连续专注 · 不可用时段：吃饭、午睡、通勤等完全无法学习 · 特殊学习时段：长时间外出，但其中包含零散学习</div>
         </div>
-        <!-- 特殊时段名称（仅特殊时段显示） -->
-        <div class="form-group" id="sessNameGroup" style="display:none;margin-bottom:10px">
-          <label>时段名称 <span style="color:var(--red)">*</span> <span style="font-size:10px;color:var(--muted)">（如“午饭”、“回学校”、“外出上课”）</span></label>
+        <div class="form-group" id="sessNameGroup" style="display:none">
+          <label>时段名称 <span style="color:var(--red)">*</span> <span class="entry-label-note">如“午饭”、“回学校”、“外出上课”</span></label>
           <input type="text" id="sess_name" placeholder="输入时段名称">
         </div>
-        <!-- 套用时段模板 -->
         ${(function () {
       const sTmpls = getSessionTemplates();
       if (!sTmpls.length) return `<div class="form-group" style="margin-bottom:10px">
-            <label>⏱ 套用时段模板 <span style="font-size:10px;color:var(--muted)">（<a href="#" onclick="showTab('templates');return false" style="color:var(--hp)">前往模板库</a>添加后可快速填充）</span></label>
+            <label>套用时段模板 <span class="entry-label-note">（<a href="#" onclick="showTab('templates');return false" style="color:var(--hp)">前往模板库</a>添加后可快速填充）</span></label>
             <span style="font-size:11px;color:var(--dim)">暂无时段模板</span>
           </div>`;
       return `<div class="form-group" style="margin-bottom:10px">
-            <label>⏱ 套用时段模板 <span style="font-size:10px;color:var(--muted)">（选择后自动切换为特殊时段并填充名称/备注）</span></label>
-            <div style="display:flex;gap:8px;align-items:center">
+            <label>套用时段模板 <span class="entry-label-note">（选择后自动切换为对应类型并填充名称/备注）</span></label>
+            <div class="entry-action-row">
               <select onchange="applySessionTemplate(this.value)" style="flex:1">
                 <option value="">-- 不套用 --</option>
-                ${sTmpls.map(t => `<option value="${t.id}">⏱ ${escHtmlApp(t.name)}</option>`).join('')}
+                <optgroup label="不可用时段">${sTmpls.filter(t => normalizeSessionTemplateType(t.sessionType) === 'special').map(t => `<option value="${t.id}">${escHtmlApp(t.name)}</option>`).join('')}</optgroup>
+                <optgroup label="特殊学习时段">${sTmpls.filter(t => normalizeSessionTemplateType(t.sessionType) === 'special-study').map(t => `<option value="${t.id}">${escHtmlApp(t.name)}</option>`).join('')}</optgroup>
               </select>
               <a href="#" onclick="showTab('templates');return false" class="btn btn-ghost btn-sm" style="white-space:nowrap">管理模板</a>
             </div>
           </div>`;
     })()}
-        <div class="form-grid">
+        </div>
+        <div class="entry-form-block">
+        <div class="entry-form-block-title">时间与时长</div>
+        <div class="form-grid entry-session-grid">
           <div class="form-group"><label>开始时间</label>${timeInputHtml('sess_start', '')}</div>
           <div class="form-group"><label>结束时间</label>${timeInputHtml('sess_end', '')}</div>
           <div class="form-group" id="sessNominalGroup"><label>名义时长(分钟)${tipIcon('nominal')}</label><input type="number" id="sess_nominal" min="1"><div class="form-hint">计划专注多少分钟</div></div>
           <div class="form-group" id="sessActualGroup"><label>实际专注(分钟)${tipIcon('actual')}</label><input type="number" id="sess_actual" min="1"><div class="form-hint">真正专注的分钟数</div></div>
           <div class="form-group" id="sessRestGroup"><label>休息时间(分钟)${tipIcon('rest')}</label><input type="number" id="sess_rest" min="0"><div class="form-hint">名义时长 + 休息时间不能超过时钟时长</div></div>
-          <div class="form-group" style="grid-column:span 2"><label>备注</label><input type="text" id="sess_note" placeholder="可选备注"></div>
+          <div class="form-group entry-wide"><label>备注</label><input type="text" id="sess_note" placeholder="可选备注"></div>
         </div>
-        <div style="display:flex;gap:8px">
+        </div>
+        <div class="entry-form-actions">
           <button class="btn btn-success" id="sessFormSaveBtn" onclick="saveSession('${dateStr}')">${state._editingSessionId ? '✓ 更新时段' : '✓ 保存时段'}</button>
           <button class="btn btn-ghost btn-sm" onclick="cancelSessionForm()">${state._editingSessionId ? '取消编辑' : '取消'}</button>
         </div>
       </div>
       ${sessions.length === 0
       ? '<div class="empty-state"><p>暂无时段记录</p></div>'
-      : `<div class="table-wrap"><table>
+      : `<div class="table-wrap entry-table-wrap"><table class="entry-data-table">
           <thead><tr><th>#</th><th>开始</th><th>结束</th><th class="c-clock">时钟${tipIcon('clock')}</th><th class="c-nominal">名义${tipIcon('nominal')}</th><th class="c-actual">实际${tipIcon('actual')}</th><th>休息${tipIcon('rest')}</th><th>专注率${tipIcon('sessRate')}</th><th>备注</th><th>操作</th></tr></thead>
           <tbody>${sessions.map((s, i) => {
         const cl = sessionClock(s);
@@ -3095,33 +5170,38 @@ function renderEntry() {
         const isSpecialStudy = isSpecialStudySession(s);
         const typeMeta = sessionTypeMeta(s);
         const rest = Number(s.restMinutes) || 0;
-        const eff = (!isSpec && !isSpecialStudy && (cl - rest) > 0) ? Math.round((Number(s.actualMinutes) || 0) / (cl - rest) * 100) : null;
+        const actual = Number(s.actualMinutes) || 0;
+        const eff = isSpec ? null : isSpecialStudy ? (actual > 0 ? 100 : null) : ((cl - rest) > 0 ? Math.round(actual / (cl - rest) * 100) : null);
+        const effCell = isSpecialStudy && eff != null
+          ? `${eff}%<br><span class="c-muted" style="font-size:9px">只计实际</span>`
+          : eff != null ? eff + '%' : '-';
         const isEditing = state._editingSessionId === s.id;
-        return `<tr${isEditing ? ' style="background:rgba(255,213,79,.1);outline:1px solid rgba(255,213,79,.3)"' : typeMeta.bg ? ` style="background:${typeMeta.bg}"` : ''}>
+        return `<tr class="${isEditing ? 'is-editing' : isSpec ? 'is-unavailable' : isSpecialStudy ? 'is-special-study' : ''}">
           <td class="fw-mono c-muted">${i + 1}${typeMeta.short ? `<br><span style="font-size:9px;background:${typeMeta.color}22;color:${typeMeta.color};padding:1px 4px;border-radius:3px">${typeMeta.short}</span>` : ''}</td>
           <td class="fw-mono">${s.type !== 'normal' && s.name ? `<span style="color:${typeMeta.color};font-weight:600">${escHtmlApp(s.name)}</span><br>` : ''}${s.startTime || '-'}</td><td class="fw-mono">${s.endTime || '-'}</td>
           <td class="fw-mono c-clock">${fmtMin(cl, true)}</td>
           <td class="fw-mono c-nominal">${isSpec || isSpecialStudy ? '<span class="c-muted">-</span>' : fmtMin(Number(s.nominalMinutes) || 0, true)}</td>
-          <td class="fw-mono c-actual">${isSpec ? '<span class="c-muted">-</span>' : fmtMin(Number(s.actualMinutes) || 0, true)}</td>
+          <td class="fw-mono c-actual">${isSpec ? '<span class="c-muted">-</span>' : fmtMin(actual, true)}</td>
           <td class="fw-mono">${isSpec || isSpecialStudy ? '-' : fmtMin(rest, true)}</td>
-          <td class="fw-mono ${eff >= 80 ? 'c-green' : eff >= 60 ? 'c-wake' : eff != null ? 'c-red' : ''}">${eff != null ? eff + '%' : '-'}</td>
+          <td class="fw-mono c-actual">${effCell}</td>
           <td class="c-muted" style="font-size:11px">${s.note || ''}</td>
           <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="editSession('${dateStr}','${s.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="deleteSession('${dateStr}','${s.id}')">删除</button></td>
         </tr>`;
       }).join('')}</tbody>
-          <tfoot><tr><td colspan="3">合计</td><td class="c-clock">${fmtMin(stats.clockMin, true)}</td><td class="c-nominal">${fmtMin(stats.nominalMin, true)}</td><td class="c-actual">${fmtMin(stats.actualMin, true)}</td><td>${fmtMin(stats.restMin, true)}</td><td class="${devClass(stats.actualVsNominal)}">${devStr(stats.actualVsNominal)}</td><td></td><td></td></tr></tfoot>
+          <tfoot><tr><td colspan="3">合计</td><td class="c-clock">${fmtMin(stats.clockMin, true)}</td><td class="c-nominal">${fmtMin(stats.nominalMin, true)}</td><td class="c-actual">${fmtMin(stats.actualMin, true)}</td><td>${fmtMin(stats.restMin, true)}</td><td class="c-actual">${stats.focusEfficiency != null ? stats.focusEfficiency + '%' : '-'}</td><td></td><td></td></tr></tfoot>
         </table></div>`}
     </div>
 
-    <!-- 📝 TASKS TABLE -->
-    <div class="card entry-table-card" id="entry-task-records">
+    <div class="card entry-section entry-table-card entry-main-panel" id="entry-task-records">
       <div class="card-header">
-        <div><div class="card-title">📝 任务记录${state._editingTaskId ? ' <span style="color:var(--wake);font-size:12px">✏️ 编辑中</span>' : ''}</div><div class="card-sub">每项具体学习内容 · 效率自动计算</div></div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <div><div class="card-title">任务记录${state._editingTaskId ? ' <span class="entry-editing-pill">编辑中</span>' : ''}</div><div class="card-sub">每项具体学习内容 · 效率自动计算</div></div>
+        <div class="entry-action-row">
           <button class="btn btn-primary btn-sm" onclick="state._editingTaskId=null;toggleForm('taskForm')">+ 添加任务</button>
         </div>
       </div>
       <div class="form-panel" id="taskForm">
+        <div class="entry-form-block">
+          <div class="entry-form-block-title">任务与模板</div>
         <div class="task-form-grid">
           <div class="form-group full-row"><label>任务名称</label><input type="text" id="task_name" placeholder="任务名称"></div>
 
@@ -3129,12 +5209,12 @@ function renderEntry() {
           ${(function () {
       const tmpls = getTaskTemplates();
       if (!tmpls.length) return `<div class="form-group full-row">
-              <label>🗂 套用模板 <span style="font-size:10px;color:var(--muted)">（<a href="#" onclick="showTab('templates');return false" style="color:var(--hp)">前往模板库</a>添加模板后可快速填充）</span></label>
+              <label>套用模板 <span class="entry-label-note">（<a href="#" onclick="showTab('templates');return false" style="color:var(--hp)">前往模板库</a>添加模板后可快速填充）</span></label>
               <span style="font-size:11px;color:var(--dim)">暂无模板</span>
             </div>`;
       return `<div class="form-group full-row">
-              <label>🗂 套用模板 <span style="font-size:10px;color:var(--muted)">（选择后自动填充类别/时长/单位）</span></label>
-              <div style="display:flex;gap:8px;align-items:center">
+              <label>套用模板 <span class="entry-label-note">（选择后自动填充类别/时长/单位）</span></label>
+              <div class="entry-action-row">
                 <select id="task_tmpl" onchange="applyTemplate(this.value)" style="flex:1">
                   <option value="">-- 不套用 --</option>
                   ${tmpls.map(t => `<option value="${t.id}">${escHtmlApp(t.activityType || '未分类模板')}</option>`).join('')}
@@ -3148,7 +5228,12 @@ function renderEntry() {
           <div id="task_forecast_fields" class="form-group full-row">
             ${taskDimensionPanelHtml('', {})}
           </div>
+        </div>
+        </div>
 
+        <div class="entry-form-block">
+          <div class="entry-form-block-title">类别</div>
+          <div class="task-form-grid">
           <div class="form-group full-row">
             <label>活动类别（一级必填，按顺序填写）*</label>
             <div class="cat-three-cols">
@@ -3168,7 +5253,12 @@ function renderEntry() {
             <div style="margin-top:6px;font-size:11px;font-family:var(--mono)" id="entry_cat_msg"></div>
             <div class="form-hint" style="margin-top:2px">一级类别必填；填写二级后才能填写三级。＋ 保存到库 · 🗑 从库删除（不影响已有记录）</div>
           </div>
+          </div>
+        </div>
 
+        <div class="entry-form-block">
+          <div class="entry-form-block-title">计量与备注</div>
+          <div class="task-form-grid entry-task-metric-grid">
           <div class="form-group"><label>时长(分钟)</label><input type="number" id="task_min" min="1" oninput="autoCalcRate()"></div>
           <div class="form-group" id="task_qty_group" style="display:none"><label id="task_qty_label">数量（可选）</label><input type="number" id="task_qty" min="0" step="1" oninput="autoCalcRate()"></div>
           <div class="form-group" id="task_unit_group" style="display:none"><label id="task_unit_label">新模板数量单位</label>${unitSelectorHtml('task_unit', '', 'entry_unit_msg')}<div style="font-size:11px;font-family:var(--mono)" id="entry_unit_msg"></div></div>
@@ -3176,8 +5266,9 @@ function renderEntry() {
           <div class="form-group" id="task_wrong_group" style="display:none"><label id="task_wrong_label">错误数量（可选）</label><input type="number" id="task_wrong" min="0" step="1" oninput="autoCalcRate()"><div class="form-hint">填写错误数量，不能超过本次总数量</div></div>
           <div class="form-group" id="task_accuracy_group" style="display:none"><label>正确率（自动计算）</label><input type="text" id="task_acc" readonly style="background:var(--card);color:var(--muted)"><div class="form-hint">（总数量－错题数）÷总数量</div></div>
           <div class="form-group full-row"><label>备注</label><input type="text" id="task_note" placeholder="可选备注"></div>
+          </div>
         </div>
-        <div style="display:flex;gap:8px">
+        <div class="entry-form-actions">
           <button class="btn btn-success" id="taskFormSaveBtn" onclick="saveTask('${dateStr}')">${state._editingTaskId ? '✓ 更新任务' : '✓ 保存任务'}</button>
           <button class="btn btn-ghost btn-sm" onclick="cancelTaskForm()">${state._editingTaskId ? '取消编辑' : '取消'}</button>
         </div>
@@ -3185,50 +5276,37 @@ function renderEntry() {
       ${tasks.length === 0
       ? '<div class="empty-state"><p>暂无任务记录</p></div>'
       : `${taskFilterHtml('entry', tasks)}
-        <div class="table-wrap"><table id="entryTaskTable" class="resizable-task-table">
-          <thead><tr><th>#</th><th>任务名称</th><th>活动类型</th><th>时长</th><th>数量</th><th>效率</th><th>正确率</th><th>备注</th><th>操作</th></tr></thead>
+        <div class="table-wrap entry-table-wrap"><table id="entryTaskTable" class="resizable-task-table entry-data-table">
+          <thead><tr><th>#</th><th>任务名称</th><th>活动类型</th><th>时长</th><th>数量</th><th>效率</th><th title="相对同模板或同分类历史加权平均效率">较平均效率</th><th>正确率</th><th>备注</th><th>操作</th></tr></thead>
           <tbody>${filterTasksByView(tasks, 'entry').map((t, i) => {
         const visibleQty = visibleTaskQuantity(t);
         const visibleUnit = visibleTaskQuantityUnit(t);
         const rate = visibleQty && t.minutes ? (visibleQty / Number(t.minutes)).toFixed(2) : null;
+        const efficiencyComparison = taskEfficiencyComparisonFor(taskEfficiencyIndex, t, dateStr);
         const actColor = getActColor(t.activityType);
         const isEditingTask = state._editingTaskId === t.id;
-        return `<tr data-task-id="${t.id}"${isEditingTask ? ' style="background:rgba(255,213,79,.1);outline:1px solid rgba(255,213,79,.3)"' : ''}>
+        return `<tr data-task-id="${t.id}" class="${isEditingTask ? 'is-editing' : ''}">
           <td class="fw-mono c-muted">${i + 1}</td>
           <td class="task-name-cell" title="${escHtmlApp(t.name)}">${escHtmlApp(t.name)}${taskOrdinalBadgeHtml(t)}</td>
           <td><span class="badge" style="background:${actColor.color}22;color:${actColor.color};border:1px solid ${actColor.color}44">${t.activityType || '-'}</span></td>
           <td class="fw-mono">${fmtMin(Number(t.minutes) || 0, true)}</td>
           <td class="fw-mono task-quantity-cell">${visibleQty ? visibleQty + (visibleUnit ? ' ' + visibleUnit : '') : '-'}</td>
           <td class="fw-mono task-rate-cell">${rate ? rate + (visibleUnit ? ' ' + visibleUnit + '/min' : '/min') : '-'}</td>
-          <td class="fw-mono ${t.accuracy >= 80 ? 'c-green' : t.accuracy >= 60 ? 'c-wake' : t.accuracy ? 'c-red' : ''}">${t.accuracy != null && t.accuracy !== '' ? t.accuracy + '%' : '-'}</td>
+          <td class="fw-mono task-efficiency-delta-cell">${taskEfficiencyDeltaHtml(efficiencyComparison)}</td>
+          <td class="fw-mono c-text task-accuracy-cell">${visibleTaskAccuracy(t) == null ? '-' : `${visibleTaskAccuracy(t)}%`}</td>
           <td class="c-muted" style="font-size:11px">${t.note || ''}</td>
           <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="editTask('${dateStr}','${t.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="deleteTask('${dateStr}','${t.id}')">删除</button></td>
         </tr>`;
       }).join('')}</tbody>
-          <tfoot><tr><td colspan="3">合计</td><td class="fw-mono">${fmtMin(filterTasksByView(tasks, 'entry').reduce((s, t) => s + (Number(t.minutes) || 0), 0), true)}</td><td colspan="5"><span class="c-muted" style="font-size:10px">任务总时长 vs 实际专注: <span class="${devClass(stats.actualMin > 0 ? Math.round((stats.taskMin - stats.actualMin) / stats.actualMin * 100) : null)}">${stats.actualMin > 0 ? devStr(Math.round((stats.taskMin - stats.actualMin) / stats.actualMin * 100)) : '-'}</span></span></td></tr></tfoot>
+          <tfoot><tr><td colspan="3">合计</td><td class="fw-mono">${fmtMin(filterTasksByView(tasks, 'entry').reduce((s, t) => s + (Number(t.minutes) || 0), 0), true)}</td><td colspan="6"><span class="c-muted" style="font-size:10px">任务总时长 vs 实际专注: <span class="${devClass(stats.actualMin > 0 ? Math.round((stats.taskMin - stats.actualMin) / stats.actualMin * 100) : null)}">${stats.actualMin > 0 ? devStr(Math.round((stats.taskMin - stats.actualMin) / stats.actualMin * 100)) : '-'}</span></span></td></tr></tfoot>
         </table></div>`}
     </div>
-
-    <!-- 🌙 SLEEP TIME (bottom) -->
-    <div class="card entry-sleep-card">
-      <div class="card-header"><div><div class="card-title">🌙 睡觉时间</div></div></div>
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        ${timeInputHtml('sleepInput', day.sleepTime || '')}
-        <button class="btn btn-success btn-sm" onclick="saveSleep('${dateStr}')">保存</button>
-        ${day.sleepTime ? `<button class="btn btn-danger btn-sm" onclick="clearSavedSleepTime('${dateStr}','sleep')">删除睡觉时间</button>` : ''}
-        ${day.sleepTime ? `<span class="fw-mono" style="font-size:12px;color:var(--sleep)">${day.sleepTime}</span>` : ''}
-        <span class="form-hint" style="margin:0">填次日凌晨时间如 00:30</span>
-      </div>
-      ${day.wakeTime && day.sleepTime ? `
-        <div style="margin-top:10px;font-family:var(--mono);font-size:11px;color:var(--muted)">
-          清醒时长${tipIcon('awake')}: <span style="color:var(--text)">${fmtMin(stats.awakeMin)}</span>${stats.unavailableMin ? ` · 不可用: <span style="color:var(--muted)">${fmtMin(stats.unavailableMin)}</span>` : ''}${stats.specialStudyActualMin ? ` · 特殊学习: <span style="color:var(--clock)">${fmtMin(stats.specialStudyActualMin)}</span>` : ''} · 可支配: <span style="color:var(--text)">${fmtMin(stats.disposableMin)}</span> ·
-          不可用时间占比${tipIcon('util')}: <span style="color:${stats.utilPct == null ? 'var(--muted)' : stats.utilPct <= 30 ? 'var(--green)' : stats.utilPct <= 50 ? 'var(--wake)' : 'var(--red)'}">${stats.utilPct != null ? stats.utilPct + '%' : '-'}</span>
-        </div>` : ''}
     </div>
   `;
   requestAnimationFrame(() => {
     updateTaskCategorySequenceUi();
     initEntryTaskColumnResize();
+    syncEntryDayTypeRating();
   });
 }
 
@@ -3284,38 +5362,90 @@ async function saveDayNote(dateStr) {
   day.dayNote = note;
   cacheToLocal();
   await apiFetch(`/api/data/${dateStr}/dayNote`, { method: 'PUT', body: JSON.stringify({ dayNote: note }) });
-  renderEntry(); restoreDraft(dateStr);
   showPersistentSaveNotice(note.trim() ? '今日备注已保存' : '今日备注已清空并保存');
 }
 
 function applyDayTypeTemplateToEntry(name) {
   const tmpl = getDayTypeTemplates().find(item => item.name === String(name || '').trim());
-  if (!tmpl) return;
-  const special = document.getElementById('specialDayCheck');
   const exclude = document.getElementById('excludeFromRatingCheck');
-  if (special) special.checked = Boolean(tmpl.specialDay);
+  if (!tmpl) {
+    if (exclude) exclude.checked = false;
+    syncEntryDayTypeRating();
+    return;
+  }
   if (exclude) exclude.checked = Boolean(tmpl.excludeFromRating);
+  syncEntryDayTypeRating();
+}
+
+function syncEntryDayTypeRating() {
+  const type = document.getElementById('dayTypeInput');
+  const exclude = document.getElementById('excludeFromRatingCheck');
+  if (!exclude) return;
+  const hasType = Boolean(type?.value?.trim());
+  exclude.disabled = !hasType;
+  if (!hasType) exclude.checked = false;
+}
+
+function readEntryDayTypeSelection() {
+  const dayType = document.getElementById('dayTypeInput')?.value?.trim() || '';
+  if (!dayType) {
+    return { dayType: '', excludeFromRating: false };
+  }
+  const template = getDayTypeTemplates().find(item => item.name === dayType);
+  if (!template) {
+    const currentDay = getDay(state.selectedDate);
+    if (dayTypeName(currentDay) === dayType) {
+      return {
+        dayType,
+        excludeFromRating: Boolean(document.getElementById('excludeFromRatingCheck')?.checked),
+      };
+    }
+    alert('请选择一个有效的日期类型模板');
+    return null;
+  }
+  return {
+    dayType: template.name,
+    excludeFromRating: Boolean(document.getElementById('excludeFromRatingCheck')?.checked),
+  };
+}
+
+async function saveDayType(dateStr) {
+  const selection = readEntryDayTypeSelection();
+  if (!selection) return;
+  const { dayType, excludeFromRating } = selection;
+  const day = getDay(dateStr);
+  day.dayType = dayType;
+  delete day.specialDay;
+  day.excludeFromRating = excludeFromRating;
+  cacheToLocal();
+  await apiFetch(`/api/data/${dateStr}/dayType`, { method: 'PUT', body: JSON.stringify({ dayType, excludeFromRating }) });
+  renderEntry(); renderHeader(); restoreDraft(dateStr);
+  showPersistentSaveNotice('日期类型已保存');
 }
 
 async function saveSleep(dateStr) {
   const wakeTime = readTimeInput('wakeInput');
   const sleepTime = readTimeInput('sleepInput');
-  const dayType = document.getElementById('dayTypeInput')?.value?.trim() || '';
-  const specialDay = document.getElementById('specialDayCheck')?.checked || false;
-  const excludeFromRating = document.getElementById('excludeFromRatingCheck')?.checked || false;
+  const wakeNote = document.getElementById('wakeNoteInput')?.value || '';
+  const sleepNote = document.getElementById('sleepNoteInput')?.value || '';
+  const selection = readEntryDayTypeSelection();
+  if (!selection) return;
+  const { dayType, excludeFromRating } = selection;
   const day = getDay(dateStr);
   day.wakeTime = wakeTime;
   day.sleepTime = sleepTime;
+  day.wakeNote = wakeNote;
+  day.sleepNote = sleepNote;
   day.dayType = dayType;
-  day.specialDay = specialDay;
+  delete day.specialDay;
   day.excludeFromRating = excludeFromRating;
-  updateSleepDraft(dateStr, wakeTime, sleepTime);
+  updateSleepDraft(dateStr, wakeTime, sleepTime, wakeNote, sleepNote);
   cacheToLocal();
-  await apiFetch(`/api/data/${dateStr}/sleep`, { method: 'PUT', body: JSON.stringify({ wakeTime, sleepTime, dayType, specialDay, excludeFromRating }) });
+  await apiFetch(`/api/data/${dateStr}/sleep`, { method: 'PUT', body: JSON.stringify({ wakeTime, sleepTime, wakeNote, sleepNote, dayType, excludeFromRating }) });
   renderEntry(); renderHeader(); restoreDraft(dateStr);
 }
 
-function updateSleepDraft(dateStr, wakeTime, sleepTime) {
+function updateSleepDraft(dateStr, wakeTime, sleepTime, wakeNote = null, sleepNote = null) {
   const draft = loadDraft(dateStr) || {};
   const wakeParts = String(wakeTime || '').split(':');
   const sleepParts = String(sleepTime || '').split(':');
@@ -3323,6 +5453,8 @@ function updateSleepDraft(dateStr, wakeTime, sleepTime) {
   draft.wakeM = wakeTime ? wakeParts[1] || '' : '';
   draft.sleepH = sleepTime ? sleepParts[0] || '' : '';
   draft.sleepM = sleepTime ? sleepParts[1] || '' : '';
+  if (wakeNote != null) draft.wakeNote = wakeNote;
+  if (sleepNote != null) draft.sleepNote = sleepNote;
   draft._savedAt = new Date().toISOString();
   saveDraft(dateStr, draft);
 }
@@ -3346,6 +5478,19 @@ async function clearSavedSleepTime(dateStr, type) {
 }
 
 async function saveSession(dateStr) {
+  if (state._savingSession) return;
+  state._savingSession = true;
+  const saveBtn = document.getElementById('sessFormSaveBtn');
+  if (saveBtn) saveBtn.disabled = true;
+  try {
+    await saveSessionCore(dateStr);
+  } finally {
+    state._savingSession = false;
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+async function saveSessionCore(dateStr) {
   const sessionType = state._sessType || 'normal';
   const isSpecial = sessionType === 'special';
   const isSpecialStudy = sessionType === 'special-study';
@@ -3413,7 +5558,7 @@ async function saveSession(dateStr) {
     alert(`不能保存：${start}–${end} 与已有${conflictLabel}时段 ${conflictingSession.startTime}–${conflictingSession.endTime} 重叠。\n时段可以首尾相接，但不能交叉或相互包含。`);
     return;
   }
-  if (!canApplyNormalSessionCapacityChange(day, candidateSessions)) return;
+  if (!canApplyStudySessionCapacityChange(day, candidateSessions)) return;
 
   if (editId) {
     // ── 编辑模式：原地更新 ──
@@ -3437,7 +5582,7 @@ async function saveSession(dateStr) {
       session.restMinutes = rest;
     }
     state._editingSessionId = null;
-    cacheToLocal(); clearDraft(dateStr);
+    cacheToLocal();
     await apiFetch(`/api/data/${dateStr}`, { method: 'PUT', body: JSON.stringify(day) });
   } else {
     // ── 新增模式 ──
@@ -3454,9 +5599,10 @@ async function saveSession(dateStr) {
       session.restMinutes = rest;
     }
     day.sessions.push(session);
-    cacheToLocal(); clearDraft(dateStr);
+    cacheToLocal();
     await apiFetch(`/api/data/${dateStr}/sessions`, { method: 'POST', body: JSON.stringify(session) });
   }
+  clearEntryDraftFields(dateStr, ENTRY_SESSION_DRAFT_KEYS);
   state._sessType = 'normal';
   showTab('entry');
   if (note.trim() || previousNote.trim()) {
@@ -3469,9 +5615,11 @@ function editSession(dateStr, sessionId) {
   const day = getDay(dateStr);
   const s = (day.sessions || []).find(x => x.id === sessionId);
   if (!s) return;
+  saveCurrentEntryDraft(dateStr);
   state._editingSessionId = sessionId;
   // 重新渲染以更新按钮文字
   renderEntry();
+  restoreDraft(dateStr);
   // 打开表单
   const form = document.getElementById('sessionForm');
   if (form) form.classList.add('open');
@@ -3511,27 +5659,30 @@ function editSession(dateStr, sessionId) {
 }
 
 function cancelSessionForm() {
+  saveCurrentEntryDraft(state.selectedDate);
+  clearEntryDraftFields(state.selectedDate, ENTRY_SESSION_DRAFT_KEYS);
   state._editingSessionId = null;
   state._sessType = 'normal';
   const form = document.getElementById('sessionForm');
   if (form) form.classList.remove('open');
   renderEntry();
+  restoreDraft(state.selectedDate);
 }
 
 async function deleteSession(dateStr, id) {
   const day = getDay(dateStr);
   const candidateSessions = day.sessions.filter(s => s.id !== id);
-  if (!canApplyNormalSessionCapacityChange(day, candidateSessions)) return;
+  if (!canApplyStudySessionCapacityChange(day, candidateSessions)) return;
   day.sessions = candidateSessions;
   cacheToLocal();
   await apiFetch(`/api/data/${dateStr}/sessions/${id}`, { method: 'DELETE' });
   renderEntry(); renderHeader();
 }
 
-function normalSessionActualTotal(sessions = []) {
+function studySessionActualTotal(sessions = []) {
   return sessions.reduce((sum, session) => {
-    const isNormal = !session.type || session.type === 'normal';
-    return isNormal ? sum + Math.max(0, Number(session.actualMinutes) || 0) : sum;
+    if (isUnavailableSession(session)) return sum;
+    return sum + Math.max(0, Number(session.actualMinutes) || 0);
   }, 0);
 }
 
@@ -3542,12 +5693,12 @@ function taskMinutesTotal(tasks = [], excludedTaskId = null) {
   }, 0);
 }
 
-function canApplyNormalSessionCapacityChange(day, candidateSessions) {
+function canApplyStudySessionCapacityChange(day, candidateSessions) {
   const taskTotal = taskMinutesTotal(day.tasks);
-  const currentCapacity = normalSessionActualTotal(day.sessions);
-  const nextCapacity = normalSessionActualTotal(candidateSessions);
+  const currentCapacity = studySessionActualTotal(day.sessions);
+  const nextCapacity = studySessionActualTotal(candidateSessions);
   if (nextCapacity < taskTotal && nextCapacity < currentCapacity) {
-    alert(`不能保存：当天任务总时长为 ${taskTotal} 分钟，修改后普通时段的实际专注总时长只有 ${nextCapacity} 分钟。\n普通时段容量不能低于任务总时长。`);
+    alert(`不能保存：当天任务总时长为 ${taskTotal} 分钟，修改后学习时段的实际专注总时长只有 ${nextCapacity} 分钟。\n普通时段和特殊学习时段的实际专注容量之和不能低于任务总时长。`);
     return false;
   }
   return true;
@@ -3602,6 +5753,9 @@ async function saveTask(dateStr) {
       const quantityEnabled = inheritedTemplateConfig
         ? Boolean(inheritedTemplateConfig.quantityEnabled)
         : Boolean(document.getElementById('task_new_quantity_enabled')?.checked);
+      const accuracyEnabled = inheritedTemplateConfig
+        ? Boolean(inheritedTemplateConfig.accuracyEnabled)
+        : Boolean(document.getElementById('task_new_accuracy_enabled')?.checked);
       const ordinalUnit = inheritedTemplateConfig?.ordinalUnit || (ordinalEnabled ? '项' : '');
       const quantityUnit = inheritedTemplateConfig?.quantityUnit ||
         document.getElementById('task_unit')?.value.trim() || '';
@@ -3619,6 +5773,7 @@ async function saveTask(dateStr) {
         ordinalUnit,
         quantityEnabled,
         quantityUnit,
+        accuracyEnabled,
         note: '',
       };
       pendingTemplate = template;
@@ -3643,12 +5798,21 @@ async function saveTask(dateStr) {
     : inheritedTemplateConfig
       ? Boolean(inheritedTemplateConfig.quantityEnabled)
     : Boolean(document.getElementById('task_new_quantity_enabled')?.checked);
+  const accuracyEnabled = template
+    ? Boolean(template.accuracyEnabled)
+    : inheritedTemplateConfig
+      ? Boolean(inheritedTemplateConfig.accuracyEnabled)
+      : Boolean(document.getElementById('task_new_accuracy_enabled')?.checked);
   const ordinalUnit = template?.ordinalUnit || inheritedTemplateConfig?.ordinalUnit ||
     document.getElementById('task_new_ordinal_unit')?.value.trim() || '';
   const quantityUnit = template?.quantityUnit || inheritedTemplateConfig?.quantityUnit ||
     document.getElementById('task_unit')?.value.trim() || '';
-  if (!template && (ordinalEnabled || quantityEnabled)) {
+  if (!template && (ordinalEnabled || quantityEnabled || accuracyEnabled)) {
     alert('使用命名章节或数量记录时必须填写活动类别，以便建立并绑定模板。');
+    return;
+  }
+  if (accuracyEnabled && !quantityEnabled) {
+    alert('正确率记录依赖数量记录，请先开启数量记录。');
     return;
   }
   const forecastGoal = getForecastGoalByTemplate(templateId);
@@ -3689,11 +5853,15 @@ async function saveTask(dateStr) {
   }
   let wrongCount = null;
   let calculatedAccuracy = null;
-  if (quantityEnabled && wrongRaw !== '') {
+  if (accuracyEnabled) {
     const quantityNumber = Number(qty);
     const wrongNumber = Number(wrongRaw);
     if (!Number.isInteger(quantityNumber) || quantityNumber <= 0) {
-      alert('填写错题数前，必须先填写大于 0 的整数总数量。');
+      alert('该模板已开启正确率记录，请填写大于 0 的整数总数量。');
+      return;
+    }
+    if (wrongRaw === '') {
+      alert('该模板已开启正确率记录，请填写错误数量；没有错题时请填写 0。');
       return;
     }
     if (!Number.isInteger(wrongNumber) || wrongNumber < 0 || wrongNumber > quantityNumber) {
@@ -3708,9 +5876,9 @@ async function saveTask(dateStr) {
   const previousNote = editId ? String(day.tasks.find(task => task.id === editId)?.note || '') : '';
   const otherTaskMinutes = taskMinutesTotal(day.tasks, editId);
   const taskTotalAfterSave = otherTaskMinutes + mins;
-  const normalCapacity = normalSessionActualTotal(day.sessions);
-  if (taskTotalAfterSave > normalCapacity) {
-    alert(`不能保存：保存后当天任务总时长为 ${taskTotalAfterSave} 分钟，但普通时段的实际专注总时长只有 ${normalCapacity} 分钟。\n请先增加或调整普通专注时段。`);
+  const studyCapacity = studySessionActualTotal(day.sessions);
+  if (taskTotalAfterSave > studyCapacity) {
+    alert(`不能保存：保存后当天任务总时长为 ${taskTotalAfterSave} 分钟，但普通时段和特殊学习时段的实际专注总时长只有 ${studyCapacity} 分钟。\n请先增加或调整学习时段。`);
     return;
   }
 
@@ -3733,6 +5901,8 @@ async function saveTask(dateStr) {
     if (quantityEnabled) {
       task.quantity = qty !== '' ? Number(qty) : null;
       task.quantityUnit = quantityUnit;
+    }
+    if (accuracyEnabled) {
       task.wrongCount = wrongCount;
       task.accuracy = calculatedAccuracy;
     }
@@ -3754,7 +5924,7 @@ async function saveTask(dateStr) {
       delete task.chapterCompleted;
     }
     state._editingTaskId = null;
-    cacheToLocal(); clearDraft(dateStr);
+    cacheToLocal();
     await apiFetch(`/api/data/${dateStr}`, { method: 'PUT', body: JSON.stringify(day) });
   } else {
     // ── 新增模式 ──
@@ -3762,8 +5932,8 @@ async function saveTask(dateStr) {
       id: uid(), name, activityType, minutes: mins,
       quantity: quantityEnabled && qty !== '' ? Number(qty) : null,
       quantityUnit: quantityEnabled ? quantityUnit : '',
-      wrongCount: quantityEnabled ? wrongCount : null,
-      accuracy: quantityEnabled ? calculatedAccuracy : null, note,
+      wrongCount: accuracyEnabled ? wrongCount : null,
+      accuracy: accuracyEnabled ? calculatedAccuracy : null, note,
       templateId: templateId || null,
       namedItemAllocations: ordinalEnabled ? namedItemAllocations.map(item => ({
         itemId: item.itemId,
@@ -3774,9 +5944,11 @@ async function saveTask(dateStr) {
       })) : [],
     };
     day.tasks.push(task);
-    cacheToLocal(); clearDraft(dateStr);
+    cacheToLocal();
     await apiFetch(`/api/data/${dateStr}/tasks`, { method: 'POST', body: JSON.stringify(task) });
   }
+  // 请求完成后再清当前表单草稿，避免等待网络时被 3 秒定时器重新保存旧表单。
+  clearEntryDraftFields(dateStr, ENTRY_TASK_DRAFT_KEYS);
   showTab('entry');
   if (note.trim() || previousNote.trim()) {
     showPersistentSaveNotice(note.trim() ? '任务备注已保存' : '任务备注已清空并保存');
@@ -3788,9 +5960,11 @@ function editTask(dateStr, taskId) {
   const day = getDay(dateStr);
   const t = (day.tasks || []).find(x => x.id === taskId);
   if (!t) return;
+  saveCurrentEntryDraft(dateStr);
   state._editingTaskId = taskId;
   // 重新渲染以更新按钮文字
   renderEntry();
+  restoreDraft(dateStr);
   // 打开表单
   const form = document.getElementById('taskForm');
   if (form) form.classList.add('open');
@@ -3836,10 +6010,13 @@ function editTask(dateStr, taskId) {
 }
 
 function cancelTaskForm() {
+  saveCurrentEntryDraft(state.selectedDate);
+  clearEntryDraftFields(state.selectedDate, ENTRY_TASK_DRAFT_KEYS);
   state._editingTaskId = null;
   const form = document.getElementById('taskForm');
   if (form) form.classList.remove('open');
   renderEntry();
+  restoreDraft(state.selectedDate);
 }
 
 async function deleteTask(dateStr, id) {
@@ -3897,9 +6074,9 @@ async function moveSelectedDayData(sourceDate, mode) {
     if (selection.sessionIds.includes(state._editingSessionId)) state._editingSessionId = null;
     if (selection.taskIds.includes(state._editingTaskId)) state._editingTaskId = null;
     const draft = loadDraft(sourceDate) || {};
-    if (selection.wakeTime) { draft.wakeH = ''; draft.wakeM = ''; }
+    if (selection.wakeTime) { draft.wakeH = ''; draft.wakeM = ''; draft.wakeNote = ''; }
     if (selection.dayNote) draft.dayNote = '';
-    if (selection.sleepTime) { draft.sleepH = ''; draft.sleepM = ''; }
+    if (selection.sleepTime) { draft.sleepH = ''; draft.sleepM = ''; draft.sleepNote = ''; }
     draft._savedAt = new Date().toISOString();
     saveDraft(sourceDate, draft);
     state.selectedDate = targetDate;
@@ -3920,39 +6097,6 @@ async function dayDeleteTask(dateStr, taskId) {
   cacheToLocal();
   await apiFetch(`/api/data/${dateStr}/tasks/${taskId}`, { method: 'DELETE' });
   renderDayOverview(); renderHeader();
-}
-
-async function weekDeleteTask(dateStr, taskId) {
-  if (!confirm('确定删除该任务？')) return;
-  const day = getDay(dateStr);
-  day.tasks = day.tasks.filter(t => t.id !== taskId);
-  cacheToLocal();
-  await apiFetch(`/api/data/${dateStr}/tasks/${taskId}`, { method: 'DELETE' });
-  renderWeekOverview(); renderHeader();
-}
-
-async function weekDeleteSession(dateStr, sessionId) {
-  if (!confirm('确定删除该专注时段？')) return;
-  const day = getDay(dateStr);
-  day.sessions = day.sessions.filter(s => s.id !== sessionId);
-  cacheToLocal();
-  await apiFetch(`/api/data/${dateStr}/sessions/${sessionId}`, { method: 'DELETE' });
-  renderWeekOverview(); renderHeader();
-}
-
-function weekEditSession(dateStr, sessionId) {
-  state.selectedDate = dateStr;
-  showTab('entry');
-  setTimeout(() => editSession(dateStr, sessionId), 100);
-}
-
-async function monthDeleteSession(dateStr, sessionId) {
-  if (!confirm('确定删除该专注时段？')) return;
-  const day = getDay(dateStr);
-  day.sessions = day.sessions.filter(s => s.id !== sessionId);
-  cacheToLocal();
-  await apiFetch(`/api/data/${dateStr}/sessions/${sessionId}`, { method: 'DELETE' });
-  renderMonthOverview(); renderHeader();
 }
 
 function monthEditSession(dateStr, sessionId) {
@@ -3979,57 +6123,287 @@ function dayEditSession(dateStr, sessionId) {
 // ============================================================
 // CALENDAR TAB
 // ============================================================
+function calendarMonthDateStrs(year, month) {
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  return Array.from({ length: daysInMonth }, (_, index) =>
+    `${year}-${String(month + 1).padStart(2, '0')}-${String(index + 1).padStart(2, '0')}`
+  );
+}
+
+function calendarFocusDate(year, month, days, todayStr) {
+  const visibleDates = days.map(d => d.dateStr);
+  if (visibleDates.includes(state.selectedDate)) return state.selectedDate;
+  const monthDates = calendarMonthDateStrs(year, month);
+  if (monthDates.includes(todayStr)) return todayStr;
+  return monthDates[0];
+}
+
+function calendarHeatLevel(actualMin) {
+  if (actualMin <= 0) return 0;
+  if (actualMin < 120) return 1;
+  if (actualMin < 240) return 2;
+  if (actualMin < 360) return 3;
+  return 4;
+}
+
+function calendarBuildMonthStats(monthDates) {
+  const dayStats = monthDates.map(dateStr => ({ dateStr, ...computeDay(dateStr) }));
+  const recordedDays = monthDates.filter(isEffectiveRecordDay);
+  const totalActual = dayStats.reduce((sum, day) => sum + day.actualMin, 0);
+  const totalTask = dayStats.reduce((sum, day) => sum + day.taskMin, 0);
+  const typedCount = monthDates.filter(dateStr => Boolean(dayTypeName(state.data[dateStr]))).length;
+  const excludedCount = monthDates.filter(dateStr => Boolean(state.data[dateStr]?.excludeFromRating)).length;
+  const unclassifiedCount = monthDates.reduce((sum, dateStr) => {
+    const day = state.data[dateStr] || {};
+    return sum + ((day.tasks || []).filter(isTaskUnclassified).length);
+  }, 0);
+  return {
+    totalActual,
+    totalTask,
+    recordedDays: recordedDays.length,
+    avgActual: recordedDays.length ? Math.round(totalActual / recordedDays.length) : 0,
+    typedCount,
+    excludedCount,
+    unclassifiedCount,
+  };
+}
+
+function calendarSummaryCardHtml(label, value, sub, tone = '') {
+  return `<div class="calendar-summary-card ${tone}">
+    <span>${label}</span>
+    <strong>${value}</strong>
+    <small>${sub}</small>
+  </div>`;
+}
+
+function calendarSummaryHtml(stats) {
+  return `<div class="calendar-summary-grid">
+    ${calendarSummaryCardHtml('本月实际专注', fmtMin(stats.totalActual, true), `${stats.recordedDays} 天有记录`, 'actual')}
+    ${calendarSummaryCardHtml('任务记录时长', fmtMin(stats.totalTask, true), '任务板累计', 'task')}
+    ${calendarSummaryCardHtml('日均实际专注', fmtMin(stats.avgActual, true), '按有记录日期均分', 'avg')}
+    ${calendarSummaryCardHtml('日期类型日', `${stats.typedCount} 天`, `${stats.excludedCount} 天不参与评分`, 'typed')}
+    ${calendarSummaryCardHtml('未分类任务', `${stats.unclassifiedCount} 条`, stats.unclassifiedCount ? '需要整理活动类别' : '本月已整理', stats.unclassifiedCount ? 'warning' : 'clean')}
+  </div>`;
+}
+
+function calendarDayMeta(dateStr, inMonth, todayStr, focusDate, maxActual) {
+  const stats = computeDay(dateStr);
+  const day = state.data[dateStr] || {};
+  const tasks = day.tasks || [];
+  const sessions = day.sessions || [];
+  const unclassifiedTasks = tasks.filter(isTaskUnclassified);
+  const actualPct = maxActual > 0 ? Math.round(stats.actualMin / maxActual * 100) : 0;
+  return {
+    dateStr,
+    inMonth,
+    day,
+    stats,
+    tasks,
+    sessions,
+    unclassifiedTasks,
+    isToday: dateStr === todayStr,
+    isSelected: dateStr === focusDate,
+    isTypedDay: Boolean(dayTypeName(day)),
+    isExcluded: Boolean(dayTypeName(day) && day.excludeFromRating),
+    hasData: stats.actualMin > 0 || stats.taskMin > 0 || day.wakeTime || day.sleepTime || Boolean(dayTypeName(day)) || tasks.length > 0 || sessions.length > 0,
+    heatLevel: calendarHeatLevel(stats.actualMin),
+    heatPct: Math.max(0, Math.min(100, actualPct)),
+    heatAlpha: stats.actualMin > 0 ? Math.min(.32, .08 + actualPct / 100 * .24).toFixed(3) : '0',
+  };
+}
+
+function calendarDayTinySummary(meta) {
+  const pieces = [];
+  if (meta.sessions.length) pieces.push(`${meta.sessions.length} 段`);
+  if (meta.tasks.length) pieces.push(`${meta.tasks.length} 项`);
+  if (meta.day.wakeTime || meta.day.sleepTime) pieces.push('作息');
+  return pieces.length ? pieces.join(' · ') : '无记录';
+}
+
+function calendarDayBadgesHtml(meta) {
+  const badges = [];
+  if (meta.isTypedDay) {
+    const typeMeta = dayTypeDisplayMeta(meta.day);
+    badges.push(`<span class="cal-day-badge type" style="--day-type-color:${typeMeta.color}">${typeMeta.symbol} ${escHtmlApp(typeMeta.name)}</span>`);
+    badges.push(`<span class="cal-day-badge ${meta.isExcluded ? 'excluded' : 'scored'}">${meta.isExcluded ? '不评分' : '评分'}</span>`);
+  }
+  if (meta.unclassifiedTasks.length) badges.push('<span class="cal-day-badge warning">未分</span>');
+  return badges.join('');
+}
+
+function calendarDayCellHtml(meta) {
+  const actKeys = Object.keys(meta.stats.actMin || {})
+    .filter(key => meta.stats.actMin[key] > 0)
+    .sort((a, b) => meta.stats.actMin[b] - meta.stats.actMin[a]);
+  const dots = actKeys.slice(0, 5).map(key => {
+    const color = getActColor(key).color;
+    return `<span class="cal-dot" style="--dot-color:${color}" title="${escHtmlApp(key)}: ${fmtMin(meta.stats.actMin[key])}"></span>`;
+  }).join('');
+  const extraDot = actKeys.length > 5 ? '<span class="cal-dot more" title="更多活动类型">+</span>' : '';
+  const title = `${meta.dateStr}，实际${fmtMin(meta.stats.actualMin)}，任务${meta.tasks.length}项，时段${meta.sessions.length}段`;
+  return `<button type="button"
+      class="cal-day heat-${meta.heatLevel} ${meta.isToday ? 'today' : ''} ${meta.isSelected ? 'selected' : ''} ${!meta.inMonth ? 'other-month' : ''} ${meta.hasData ? 'has-data' : ''} ${meta.isTypedDay ? 'typed-day' : ''} ${meta.isExcluded ? 'excluded-day' : ''} ${meta.unclassifiedTasks.length ? 'has-warning' : ''}"
+      style="--cal-heat:${meta.heatAlpha};--cal-fill:${meta.heatPct}%"
+      onclick="calSelectDay('${meta.dateStr}')"
+      title="${escHtmlApp(title)}">
+      <span class="cal-day-top">
+        <span class="cal-day-num">${strToDate(meta.dateStr).getDate()}</span>
+        <span class="cal-day-badges">${calendarDayBadgesHtml(meta)}</span>
+      </span>
+      <span class="cal-day-main">
+        <span class="cal-day-hours">${meta.hasData ? fmtHrs(meta.stats.actualMin) : '—'}</span>
+        <span class="cal-day-sub">${calendarDayTinySummary(meta)}</span>
+      </span>
+      <span class="cal-day-bar"><span></span></span>
+      <span class="cal-day-indicator">${dots}${extraDot}</span>
+    </button>`;
+}
+
+function calendarDayListHtml(meta) {
+  const typeMeta = dayTypeDisplayMeta(meta.day);
+  const typeHtml = typeMeta.name
+    ? `<span class="calendar-list-type" style="--day-type-color:${typeMeta.color}">${typeMeta.symbol} ${escHtmlApp(typeMeta.name)}</span><span class="calendar-list-rating ${meta.isExcluded ? 'excluded' : 'scored'}">${meta.isExcluded ? '不评分' : '评分'}</span>`
+    : '<span class="calendar-list-type normal">普通日期</span>';
+  return `<button type="button" class="calendar-list-row ${meta.isToday ? 'today' : ''} ${meta.isSelected ? 'selected' : ''} ${meta.isExcluded ? 'excluded' : ''}" onclick="calSelectDay('${meta.dateStr}')">
+    <span class="calendar-list-date"><b>${formatShort(meta.dateStr)}</b><small>${meta.dateStr}</small></span>
+    <span class="calendar-list-status">${typeHtml}</span>
+    <span class="calendar-list-metrics"><b>${fmtMin(meta.stats.actualMin, true)}</b><small>${meta.tasks.length} 项任务 · ${meta.sessions.length} 段时段</small></span>
+  </button>`;
+}
+
+function calendarFocusMetricHtml(label, value, tone = '') {
+  return `<div class="calendar-focus-metric ${tone}">
+    <span>${label}</span>
+    <strong>${value}</strong>
+  </div>`;
+}
+
+function calendarFocusStatusHtml(meta) {
+  if (meta.isTypedDay) {
+    const typeMeta = dayTypeDisplayMeta(meta.day);
+    return `<span class="calendar-status-group"><span class="calendar-status-pill type" style="--day-type-color:${typeMeta.color}">${typeMeta.symbol} ${escHtmlApp(typeMeta.name)}</span><span class="calendar-status-pill ${meta.isExcluded ? 'excluded' : 'scored'}">${meta.isExcluded ? '不评分' : '评分'}</span></span>`;
+  }
+  return '<span class="calendar-status-pill normal">普通日期</span>';
+}
+
+function calendarFocusPanelHtml(meta) {
+  const date = strToDate(meta.dateStr);
+  const weekday = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][date.getDay()];
+  const unclassifiedTitle = meta.unclassifiedTasks.map(task => task.name || '未命名任务').join('、');
+  return `<aside class="calendar-focus-panel">
+    <div class="calendar-focus-head">
+      <div>
+        <div class="calendar-eyebrow">Focus Day</div>
+        <div class="calendar-focus-date">${formatShort(meta.dateStr)}</div>
+        <div class="calendar-focus-sub">${meta.dateStr} · ${weekday}</div>
+      </div>
+      ${calendarFocusStatusHtml(meta)}
+    </div>
+    <div class="calendar-focus-grid">
+      ${calendarFocusMetricHtml('实际专注', fmtMin(meta.stats.actualMin, true), 'actual')}
+      ${calendarFocusMetricHtml('任务时长', fmtMin(meta.stats.taskMin, true), 'task')}
+      ${calendarFocusMetricHtml('时段数', `${meta.sessions.length} 段`, 'count')}
+      ${calendarFocusMetricHtml('任务数', `${meta.tasks.length} 项`, 'count')}
+      ${calendarFocusMetricHtml('起床', meta.day.wakeTime || '-', 'wake')}
+      ${calendarFocusMetricHtml('睡觉', meta.day.sleepTime || '-', 'sleep')}
+    </div>
+    ${meta.unclassifiedTasks.length ? `<div class="calendar-warning">
+      <strong>${meta.unclassifiedTasks.length} 条未分类任务</strong>
+      <span title="${escHtmlApp(unclassifiedTitle)}">建议补齐活动类别，避免统计颜色和分类分析失真。</span>
+      <button type="button" class="btn btn-danger btn-sm" onclick="calOpenUnclassified('${meta.dateStr}')">处理未分类</button>
+    </div>` : ''}
+    <div class="calendar-focus-actions">
+      <button type="button" class="btn btn-primary" onclick="calOpenDay('${meta.dateStr}')">进入日览</button>
+      <button type="button" class="btn btn-ghost" onclick="calOpenEntry('${meta.dateStr}')">去录入</button>
+    </div>
+  </aside>`;
+}
+
+function calendarLegendHtml(monthDates) {
+  const activityPaths = new Set();
+  const typeMetas = new Map();
+  monthDates.forEach(dateStr => {
+    (getDay(dateStr).tasks || []).forEach(task => {
+      activityPaths.add(String(task.activityType || '').trim() || '未分类');
+    });
+    const typeMeta = dayTypeDisplayMeta(state.data[dateStr]);
+    if (typeMeta.name && !typeMetas.has(typeMeta.name)) typeMetas.set(typeMeta.name, typeMeta);
+  });
+  const visibleActivities = [...activityPaths].sort();
+  const heatItems = [
+    ['heat-0', '0'],
+    ['heat-1', '<2h'],
+    ['heat-2', '2-4h'],
+    ['heat-3', '4-6h'],
+    ['heat-4', '6h+'],
+  ];
+  return `<div class="cal-legend">
+    <div class="cal-legend-section">
+      <span class="cal-legend-label">活动类型</span>
+      ${visibleActivities.map(activity => {
+    const color = activity === '未分类' ? getSystemSeriesColor('unclassified') : getCategoryColor(activity);
+    return `<span class="cal-legend-chip"><span class="cal-dot" style="--dot-color:${color}"></span>${escHtmlApp(activity)}</span>`;
+  }).join('') || '<span class="cal-legend-muted">本月暂无活动类型</span>'}
+    </div>
+    <div class="cal-legend-section">
+      <span class="cal-legend-label">热力</span>
+      ${heatItems.map(([cls, label]) => `<span class="cal-legend-chip"><span class="cal-heat-swatch ${cls}"></span>${label}</span>`).join('')}
+    </div>
+    <div class="cal-legend-section">
+      <span class="cal-legend-label">日期类型</span>
+      ${[...typeMetas.values()].map(meta => `<span class="cal-legend-chip"><span class="cal-status-swatch type" style="--day-type-color:${meta.color}">${meta.symbol}</span>${escHtmlApp(meta.name)}</span>`).join('') || '<span class="cal-legend-muted">本月暂无日期类型</span>'}
+    </div>
+    <div class="cal-legend-section">
+      <span class="cal-legend-label">评分状态</span>
+      <span class="cal-legend-chip"><span class="cal-status-swatch scored"></span>评分</span>
+      <span class="cal-legend-chip"><span class="cal-status-swatch excluded"></span>不评分</span>
+      <span class="cal-legend-chip"><span class="cal-status-swatch warning"></span>未分类任务</span>
+    </div>
+  </div>`;
+}
+
 function renderCalendar() {
   const { year, month } = state.cal;
   const days = getMonthDays(year, month);
   const todayStr = getTodayStr();
   const monthNames = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
   const weekdayNames = ['一', '二', '三', '四', '五', '六', '日'];
-  const maxActual = Math.max(...days.map(d => computeDay(d.dateStr).actualMin), 1);
+  const monthDates = calendarMonthDateStrs(year, month);
+  const focusDate = calendarFocusDate(year, month, days, todayStr);
+  const maxActual = Math.max(...monthDates.map(dateStr => computeDay(dateStr).actualMin), 1);
+  const monthStats = calendarBuildMonthStats(monthDates);
+  const dayMetas = days.map(({ dateStr, inMonth }) => calendarDayMeta(dateStr, inMonth, todayStr, focusDate, maxActual));
+  const focusMeta = dayMetas.find(meta => meta.dateStr === focusDate)
+    || calendarDayMeta(focusDate, true, todayStr, focusDate, maxActual);
 
   document.getElementById('tab-calendar').innerHTML = `
-    <div class="cal-header">
-      <button class="btn btn-ghost btn-sm" onclick="calNav(-1)">← 上月</button>
-      <span class="cal-month">${year}年 ${monthNames[month]}</span>
-      <button class="btn btn-ghost btn-sm" onclick="calNav(1)">下月 →</button>
-      <button class="btn btn-ghost btn-sm" onclick="calGoToday()" style="margin-left:8px">今天</button>
-    </div>
-    <div class="cal-grid">
-      ${weekdayNames.map(w => `<div class="cal-weekday">${w}</div>`).join('')}
-      ${days.map(({ dateStr, inMonth }) => {
-    const s = computeDay(dateStr);
-    const isToday = dateStr === todayStr;
-    const isSel = dateStr === state.selectedDate;
-    const hasData = s.actualMin > 0 || s.taskMin > 0 || state.data[dateStr]?.wakeTime;
-    const pct = Math.round(s.actualMin / maxActual * 100);
-    const hourColor = s.actualMin >= 360 ? 'var(--pol)' : s.actualMin >= 240 ? 'var(--hp)' : s.actualMin >= 120 ? 'var(--wake)' : s.actualMin > 0 ? 'var(--red)' : 'var(--dim)';
-    const actKeys = Object.keys(s.actMin || {}).filter(k => s.actMin[k] > 0);
-    const unclassifiedTasks = (state.data[dateStr]?.tasks || []).filter(isTaskUnclassified);
-    const unclassifiedTitle = unclassifiedTasks.map(task => task.name || '未命名任务').join('、');
-    const dots = actKeys
-      .map(k => { const c = getActColor(k); return `<div class="cal-dot" style="background:${c.color}" title="${k}: ${fmtMin(s.actMin[k])}"></div>`; })
-      .join('');
-    return `<div class="cal-day ${isToday ? 'today' : ''} ${isSel ? 'selected' : ''} ${!inMonth ? 'other-month' : ''} ${hasData ? 'has-data' : ''}"
-          style="${unclassifiedTasks.length ? 'box-shadow:inset 0 0 0 2px rgba(255,82,82,.82);background:rgba(255,82,82,.06)' : ''}"
-          onclick="calSelectDay('${dateStr}')">
-          <div class="cal-day-num">${strToDate(dateStr).getDate()}</div>
-          ${unclassifiedTasks.length ? `<button type="button" title="未分类任务：${escHtmlApp(unclassifiedTitle)}"
-            onclick="event.stopPropagation();calOpenUnclassified('${dateStr}')"
-            style="display:block;width:100%;margin:4px 0;padding:3px 5px;border:1px solid rgba(255,82,82,.8);border-radius:5px;background:rgba(255,82,82,.18);color:#ff8a80;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-            ⚠ 未分类 ${unclassifiedTasks.length}
-          </button>` : ''}
-          ${hasData ? `
-            <div class="cal-day-hours" style="color:${hourColor}">${fmtHrs(s.actualMin)}</div>
-            <div class="cal-day-bar"><div style="width:${pct}%;height:100%;border-radius:2px;background:${hourColor}"></div></div>
-            <div class="cal-day-indicator">${dots}</div>
-          ` : ''}
-        </div>`;
-  }).join('')}
-    </div>
-    <div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
-      ${getActivityTypes().map(a => { const c = getActColor(a); return `<span style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted)"><span class="cal-dot" style="background:${c.color}"></span>${a}</span>`; }).join('')}
-      <span style="display:flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80"><span style="width:10px;height:10px;border:2px solid rgba(255,82,82,.82);border-radius:3px"></span>存在未分类任务</span>
-      <span style="font-size:11px;color:var(--muted);margin-left:8px">点击日期→录入/日览</span>
+    <div class="calendar-page">
+      <section class="calendar-hero">
+        <div>
+          <div class="calendar-eyebrow">Calendar</div>
+          <h2>${year}年 ${monthNames[month]}</h2>
+          <p>点击日期查看当日摘要，再进入日览或录入。</p>
+        </div>
+        <div class="calendar-actions">
+          <button class="btn btn-ghost btn-sm" onclick="calNav(-1)">← 上月</button>
+          <button class="btn btn-ghost btn-sm" onclick="calGoToday()">今天</button>
+          <button class="btn btn-ghost btn-sm" onclick="calNav(1)">下月 →</button>
+        </div>
+      </section>
+      ${calendarSummaryHtml(monthStats)}
+      <div class="calendar-layout">
+        <section class="calendar-board">
+          <div class="cal-grid calendar-grid-view">
+            ${weekdayNames.map(w => `<div class="cal-weekday">${w}</div>`).join('')}
+            ${dayMetas.map(calendarDayCellHtml).join('')}
+          </div>
+          <div class="calendar-list-view">
+            ${dayMetas.filter(meta => meta.inMonth).map(calendarDayListHtml).join('')}
+          </div>
+        </section>
+        ${calendarFocusPanelHtml(focusMeta)}
+      </div>
+      ${calendarLegendHtml(monthDates)}
     </div>
   `;
 }
@@ -4056,7 +6430,21 @@ function calGoToday() {
 }
 function calSelectDay(dateStr) {
   state.selectedDate = dateStr;
+  renderCalendar();
+}
+function calOpenDay(dateStr) {
+  state.selectedDate = dateStr;
   showTab('day');
+}
+function calOpenEntry(dateStr) {
+  state.selectedDate = dateStr;
+  showTab('entry');
+}
+
+function openEntryDate(dateStr) {
+  if (!dateStr) return;
+  state.selectedDate = dateStr;
+  showTab('entry');
 }
 
 // ============================================================
@@ -4067,6 +6455,8 @@ function renderDayOverview() {
   const s = computeDay(dateStr);
   const day = getDay(dateStr);
   const actData = Object.keys(s.actMin || {}).filter(k => s.actMin[k] > 0);
+  const taskEfficiencyIndex = buildTaskEfficiencyComparisonIndex();
+  const taskOutputDeviation = taskOutputDeviationForDates([dateStr], taskEfficiencyIndex);
 
   document.getElementById('tab-day').innerHTML = `
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
@@ -4076,36 +6466,7 @@ function renderDayOverview() {
       <button class="btn btn-primary btn-sm" onclick="state.selectedDate='${dateStr}';showTab('entry')">✏️ 编辑</button>
     </div>
 
-    <div class="three-time" style="margin-bottom:16px">
-      <div class="time-block clock">
-        <div class="label">⏱ 时钟时长${tipIcon('clock')}</div>
-        <div class="value">${fmtMin(s.clockMin, true)}</div>
-        <div class="sub">有效${tipIcon('effectiveClock')} ${fmtMin(s.effectiveClockMin)} · 休息 ${fmtMin(s.restMin)}</div>
-      </div>
-      <div class="time-block nominal">
-        <div class="label">📋 名义时长${tipIcon('nominal')}</div>
-        <div class="value">${fmtMin(s.nominalMin, true)}</div>
-        <div class="sub">计划目标</div>
-      </div>
-      <div class="time-block actual">
-        <div class="label">✅ 实际专注${tipIcon('actual')}</div>
-        <div class="value">${fmtMin(s.actualMin, true)}</div>
-        <div class="sub">真实专注 <span class="${devClass(s.actualVsNominal)}">${devStr(s.actualVsNominal)}</span></div>
-      </div>
-    </div>
-
-    <div class="mini-grid">
-      <div class="mini-card"><div class="lbl">有效时钟${tipIcon('effectiveClock')}</div><div class="val c-clock">${fmtMin(s.effectiveClockMin, true)}</div><div class="sub">时钟 − 休息</div></div>
-      <div class="mini-card"><div class="lbl">任务记录${tipIcon('taskMin')}</div><div class="val" style="color:var(--word)">${fmtMin(s.taskMin, true)}</div><div class="sub">所有任务合计</div></div>
-      <div class="mini-card"><div class="lbl">专注效率${tipIcon('efficiency')}</div><div class="val" style="color:${s.focusEfficiency >= 80 ? 'var(--green)' : s.focusEfficiency >= 60 ? 'var(--wake)' : 'var(--red)'}">${s.focusEfficiency != null ? s.focusEfficiency + '%' : '-'}</div><div class="sub">实际/(时钟−休息)</div></div>
-      <div class="mini-card"><div class="lbl">休息时间${tipIcon('rest')}</div><div class="val" style="color:var(--sleep)">${fmtMin(s.restMin, true)}</div><div class="sub">计划休息合计</div></div>
-      <div class="mini-card"><div class="lbl">分心时间${tipIcon('distract')}</div><div class="val" style="color:var(--red)">${fmtMin(s.distractMin, true)}</div><div class="sub">时钟−实际−休息</div></div>
-      <div class="mini-card"><div class="lbl">清醒时长${tipIcon('awake')}</div><div class="val" style="color:var(--wake)">${fmtMin(s.awakeMin)}</div><div class="sub">${day.wakeTime || '?'} → ${day.sleepTime || '?'}</div></div>
-      <div class="mini-card"><div class="lbl">可支配时长</div><div class="val" style="color:var(--clock)">${s.disposableMin != null ? fmtMin(s.disposableMin) : '-'}</div><div class="sub">清醒${s.unavailableMin ? ' − 不可用' + fmtMin(s.unavailableMin) : ' (无不可用时段)'}</div></div>
-      <div class="mini-card"><div class="lbl">不可用时间占比${tipIcon('util')}</div><div class="val" style="color:${s.utilPct == null ? 'var(--muted)' : s.utilPct <= 30 ? 'var(--green)' : s.utilPct <= 50 ? 'var(--wake)' : 'var(--red)'}">${s.utilPct != null ? s.utilPct + '%' : '-'}</div><div class="sub">不可用时长/清醒时长</div></div>
-      <div class="mini-card"><div class="lbl">时段数量</div><div class="val" style="color:var(--hp)">${s.sessions.length}</div><div class="sub">专注时段</div></div>
-      <div class="mini-card"><div class="lbl">任务数量</div><div class="val" style="color:var(--pol)">${s.tasks.length}</div><div class="sub">已记录任务</div></div>
-    </div>
+    ${renderRangeKpiStatus([{ dateStr, ...s }], { totalDays: 1 })}
 
     ${day.dayNote ? `<div class="card" style="margin-bottom:16px">
       <div class="card-title" style="margin-bottom:6px">📝 今日备注</div>
@@ -4123,17 +6484,24 @@ function renderDayOverview() {
         <div class="chart-sub">任务时长按类别</div>
         <canvas id="dayCatChart" height="180"></canvas>
       </div>
+      <div class="chart-card full">
+        <div class="chart-title">当日汇总表</div>
+        <div class="chart-sub">点击日期进入当天录入界面</div>
+        <div class="table-wrap"><table><thead><tr><th>日期</th><th>起床</th><th>睡觉</th><th class="c-clock">时钟</th><th class="c-clock">有效</th><th>休息</th><th class="c-nominal">名义</th><th class="c-actual">实际</th><th>计划偏差</th><th>效率</th><th title="按各任务历史平均效率计算当天实际产出高于或低于应完成量的比例">任务产出偏差</th><th>不可用占比</th></tr></thead>
+          <tbody><tr class="range-summary-clickable" onclick="openEntryDate('${dateStr}')"><td class="fw-mono c-hp">${formatShort(dateStr)}${dayTypeName(day) ? `<br>${dayTypeBadgeHtml(day)}` : ''}</td><td class="fw-mono c-wake">${day.wakeTime || '-'}</td><td class="fw-mono c-sleep">${day.sleepTime || '-'}</td><td class="fw-mono c-clock">${fmtMin(s.clockMin, true)}</td><td class="fw-mono c-clock">${fmtMin(s.effectiveClockMin, true)}</td><td class="fw-mono">${fmtMin(s.restMin, true)}</td><td class="fw-mono c-nominal">${fmtMin(s.nominalMin, true)}</td><td class="fw-mono c-actual">${fmtMin(s.actualMin, true)}</td><td class="fw-mono ${devClass(s.actualVsNominal)}">${devStr(s.actualVsNominal)}</td><td class="fw-mono c-actual">${s.focusEfficiency != null ? `${s.focusEfficiency}%` : '-'}</td><td class="fw-mono">${taskOutputDeviationHtml(taskOutputDeviation)}</td><td class="fw-mono c-muted">${s.utilPct != null ? `${s.utilPct}%` : '-'}</td></tr></tbody>
+        </table></div>
+      </div>
       ${s.sessions.length > 0 ? `
       <div class="chart-card full">
         <div class="chart-title">专注时段明细</div>
         <div class="chart-sub">时钟 · 名义 · 实际 · 休息 · 分心 · 专注率</div>
         <div class="table-wrap">
-          <table>
+          <table data-sort-table="day-sessions">
             <thead><tr>
-              <th>#</th><th>开始</th><th>结束</th>
-              <th class="c-clock">时钟</th><th class="c-nominal">名义</th><th class="c-actual">实际</th>
-              <th>休息${tipIcon('rest')}</th><th>分心${tipIcon('distract')}</th>
-              <th>专注率</th><th>操作</th>
+              <th>#</th>${sortableTableHeaderHtml('day-sessions', 'start', '开始', 'time')}${sortableTableHeaderHtml('day-sessions', 'end', '结束', 'time')}
+              ${sortableTableHeaderHtml('day-sessions', 'clock', '时钟', 'number', 'c-clock')}${sortableTableHeaderHtml('day-sessions', 'nominal', '名义', 'number', 'c-nominal')}${sortableTableHeaderHtml('day-sessions', 'actual', '实际', 'number', 'c-actual')}
+              ${sortableTableHeaderHtml('day-sessions', 'rest', `休息${tipIcon('rest')}`)}${sortableTableHeaderHtml('day-sessions', 'distract', `分心${tipIcon('distract')}`)}
+              ${sortableTableHeaderHtml('day-sessions', 'efficiency', '专注率')}<th>操作</th>
             </tr></thead>
             <tbody>
               ${sortSessionsByStart(s.sessions).map((sess, i) => {
@@ -4145,55 +6513,67 @@ function renderDayOverview() {
     const rest = Number(sess.restMinutes) || 0;
     const distract = isSpec || isSpecialStudy ? 0 : Math.max(0, cl - actual - rest);
     const eff = (!isSpec && !isSpecialStudy && (cl - rest) > 0) ? Math.round(actual / (cl - rest) * 100) : null;
-    return `<tr${typeMeta.bg ? ` style="background:${typeMeta.bg}"` : ''}>
+    return `<tr ${sortableTableRowAttrs({
+      start: parseMin(sess.startTime), end: parseMin(sess.endTime), clock: cl,
+      nominal: Number(sess.nominalMinutes) || 0, actual, rest: isSpec || isSpecialStudy ? null : rest,
+      distract: isSpec || isSpecialStudy ? null : distract, efficiency: eff,
+    }, i)}${typeMeta.bg ? ` style="background:${typeMeta.bg}"` : ''}>
                   <td class="fw-mono c-muted">${i + 1}${typeMeta.short ? `<br><span style="font-size:9px;background:${typeMeta.color}22;color:${typeMeta.color};padding:1px 4px;border-radius:3px">${typeMeta.short}</span>` : ''}</td>
-                  <td class="fw-mono">${sess.type !== 'normal' && sess.name ? `<span style="color:${typeMeta.color};font-weight:600">${escHtmlApp(sess.name)}</span><br>` : ''}${sess.startTime || '-'}</td><td class="fw-mono">${sess.endTime || '-'}</td>
+                  <td class="fw-mono">${sess.type !== 'normal' && sess.name ? `<span style="color:${typeMeta.color};font-weight:600">${escHtmlApp(sess.name)}</span><br>` : ''}<button type="button" class="range-record-link" onclick="dayEditSession('${dateStr}','${sess.id}')">${sess.startTime || '-'}</button></td><td class="fw-mono">${sess.endTime || '-'}</td>
                   <td class="fw-mono c-clock">${fmtMin(cl, true)}</td>
                   <td class="fw-mono c-nominal">${fmtMin(Number(sess.nominalMinutes) || 0, true)}</td>
                   <td class="fw-mono c-actual">${fmtMin(actual, true)}</td>
                   <td class="fw-mono">${isSpec || isSpecialStudy ? '-' : fmtMin(rest, true)}</td>
                   <td class="fw-mono">${isSpec || isSpecialStudy ? '-' : fmtMin(distract, true)}</td>
-                  <td class="fw-mono ${eff >= 80 ? 'c-green' : eff >= 60 ? 'c-wake' : 'c-red'}">${eff != null ? eff + '%' : '-'}</td>
+                  <td class="fw-mono c-actual">${eff != null ? eff + '%' : '-'}</td>
                   <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="dayEditSession('${dateStr}','${sess.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="dayDeleteSession('${dateStr}','${sess.id}')">删除</button></td>
                 </tr>`;
   }).join('')}
             </tbody>
           </table>
         </div>
-      </div>` : ''}
+      </div>` : '<div class="chart-card full"><div class="chart-title">专注时段明细</div><div class="chart-sub">点击记录可进入时段编辑</div><div class="empty-state"><p>当天暂无专注时段</p></div></div>'}
       ${s.tasks.length > 0 ? `
       <div class="chart-card full">
         <div class="chart-title">任务明细</div>
         <div class="chart-sub">类别 · 时长 · 数量 · 效率 · 共 ${s.tasks.length} 条</div>
         ${taskFilterHtml('day', s.tasks)}
         <div class="table-wrap">
-          <table>
+          <table data-sort-table="day-tasks">
             <thead><tr>
               <th>任务</th><th>活动类型</th>
-              <th>时长</th><th>数量</th><th>效率</th><th>正确率</th><th>备注</th><th>操作</th>
+              ${sortableTableHeaderHtml('day-tasks', 'minutes', '时长')}${sortableTableHeaderHtml('day-tasks', 'quantity', '数量')}${sortableTableHeaderHtml('day-tasks', 'efficiency', '效率')}${sortableTableHeaderHtml('day-tasks', 'efficiencyDelta', '较平均效率')}${sortableTableHeaderHtml('day-tasks', 'accuracy', '正确率')}<th>备注</th><th>操作</th>
             </tr></thead>
             <tbody>
-              ${filterTasksByView(s.tasks, 'day').map(t => {
+              ${filterTasksByView(s.tasks, 'day').map((t, rowIndex) => {
     const actColor = getActColor(t.activityType);
     const visibleQty = visibleTaskQuantity(t);
     const visibleUnit = visibleTaskQuantityUnit(t);
     const rate = visibleQty && t.minutes ? (visibleQty / Number(t.minutes)).toFixed(2) : null;
-    return `<tr>
-                  <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtmlApp(t.name)}</td>
+    const efficiencyComparison = taskEfficiencyComparisonFor(taskEfficiencyIndex, t, dateStr);
+    return `<tr ${sortableTableRowAttrs({
+      minutes: Number(t.minutes) || 0,
+      quantity: visibleQty > 0 ? visibleQty : null,
+      efficiency: visibleQty > 0 && Number(t.minutes) > 0 ? visibleQty / Number(t.minutes) : null,
+      efficiencyDelta: efficiencyComparison?.deltaPct,
+      accuracy: visibleTaskAccuracy(t),
+    }, rowIndex)}>
+                  <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><button type="button" class="range-record-link" onclick="monthEditTask('${dateStr}','${t.id}')">${escHtmlApp(t.name)}</button></td>
                   <td><span class="badge" style="background:${actColor.color}22;color:${actColor.color};border:1px solid ${actColor.color}44">${t.activityType || '-'}</span></td>
                   <td class="fw-mono">${fmtMin(Number(t.minutes) || 0, true)}</td>
                   <td class="fw-mono">${visibleQty ? (visibleQty + (visibleUnit ? ' ' + visibleUnit : '')) : '-'}</td>
                   <td class="fw-mono">${rate ? (rate + (visibleUnit ? ' ' + visibleUnit + '/min' : '/min')) : '-'}</td>
-                  <td class="fw-mono ${t.accuracy >= 80 ? 'c-green' : t.accuracy >= 60 ? 'c-wake' : t.accuracy ? 'c-red' : ''}">${t.accuracy != null && t.accuracy !== '' ? t.accuracy + '%' : '-'}</td>
+                  <td class="fw-mono">${taskEfficiencyDeltaHtml(efficiencyComparison)}</td>
+                  <td class="fw-mono c-text">${visibleTaskAccuracy(t) == null ? '-' : `${visibleTaskAccuracy(t)}%`}</td>
                   <td class="c-muted" style="font-size:11px">${t.note || ''}</td>
                   <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="monthEditTask('${dateStr}','${t.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="dayDeleteTask('${dateStr}','${t.id}')">删除</button></td>
                 </tr>`;
   }).join('')}
             </tbody>
-            <tfoot><tr><td colspan="2">合计</td><td class="fw-mono">${fmtMin(filterTasksByView(s.tasks, 'day').reduce((a, t) => a + (Number(t.minutes) || 0), 0), true)}</td><td colspan="5"></td></tr></tfoot>
+            <tfoot><tr><td colspan="2">合计</td><td class="fw-mono">${fmtMin(filterTasksByView(s.tasks, 'day').reduce((a, t) => a + (Number(t.minutes) || 0), 0), true)}</td><td colspan="6"></td></tr></tfoot>
           </table>
         </div>
-      </div>` : ''}
+      </div>` : '<div class="chart-card full"><div class="chart-title">任务记录</div><div class="chart-sub">点击任务可进入任务编辑</div><div class="empty-state"><p>当天暂无任务记录</p></div></div>'}
     </div>
   `;
 
@@ -4203,8 +6583,18 @@ function renderDayOverview() {
       labels: ['时钟时长', '有效时钟', '名义时长', '实际专注'],
       datasets: [{
         data: [s.clockMin, s.effectiveClockMin, s.nominalMin, s.actualMin],
-        backgroundColor: ['rgba(128,222,234,.15)', 'rgba(128,222,234,.3)', 'rgba(79,195,247,.3)', 'rgba(105,240,174,.3)'],
-        borderColor: ['#80deea', '#80deea', '#4fc3f7', '#69f0ae'], borderWidth: 2, borderRadius: 4
+        backgroundColor: [
+          hexRgba(getChartSeriesColor('clock'), .15),
+          hexRgba(getChartSeriesColor('effectiveClock'), .3),
+          hexRgba(getChartSeriesColor('nominal'), .3),
+          hexRgba(getChartSeriesColor('actual'), .3),
+        ],
+        borderColor: [
+          getChartSeriesColor('clock'),
+          getChartSeriesColor('effectiveClock'),
+          getChartSeriesColor('nominal'),
+          getChartSeriesColor('actual'),
+        ], borderWidth: 2, borderRadius: 4
       }]
     },
     options: {
@@ -4224,622 +6614,298 @@ function renderDayOverview() {
 }
 
 // ============================================================
-// WEEK OVERVIEW TAB
+// OVERALL OVERVIEW TAB
 // ============================================================
-function renderWeekOverview() {
-  const days = getWeekDays(state.weekStart);
-  const { days: dayStats, totals } = computeRange(days);
-  const todayStr = getTodayStr();
+function overviewCalendarDates(start, end) {
+  if (!start || !end || start > end) return [];
+  const dates = [];
+  for (let date = start; date <= end; date = addDays(date, 1)) dates.push(date);
+  return dates;
+}
 
-  // 统计指标
-  const wkStatsClock = calcStats(dayStats.map(d => d.clockMin));
-  const wkStatsActual = calcStats(dayStats.map(d => d.actualMin));
-  const wkStatsNominal = calcStats(dayStats.map(d => d.nominalMin));
-  const wkStatsRest = calcStats(dayStats.map(d => d.restMin));
-  const wkStatsEffClock = calcStats(dayStats.map(d => d.effectiveClockMin));
-  const wkStatsTask = calcStats(dayStats.map(d => d.taskMin));
-
-  // 收集本周所有任务
-  const allWeekTasks = [];
-  days.forEach(dateStr => {
-    const day = getDay(dateStr);
-    (day.tasks || []).forEach(t => { allWeekTasks.push({ ...t, _date: dateStr }); });
+function overviewDailyBuckets(dates, recordedDateSet) {
+  return dates.map(date => {
+    const totals = computeRange([date]).totals;
+    const recorded = recordedDateSet.has(date);
+    const excluded = recorded && Boolean(state.data[date]?.excludeFromRating);
+    return {
+      key: date,
+      label: formatShort(date),
+      totals,
+      recorded,
+      excluded,
+    };
   });
-  const weekTaskTotalMin = allWeekTasks.reduce((s, t) => s + (Number(t.minutes) || 0), 0);
+}
 
-  // 收集本周所有专注时段
-  const allWeekSessions = [];
-  days.forEach(dateStr => {
-    const day = getDay(dateStr);
-    sortSessionsByStart(day.sessions || []).forEach(s => { allWeekSessions.push({ ...s, _date: dateStr }); });
+function overviewOpenDay(date) {
+  state.selectedDate = date;
+  showTab('day');
+}
+
+function overviewTaskRecordsHtml(tasks) {
+  const totalMinutes = tasks.reduce((sum, task) => sum + (Number(task.minutes) || 0), 0);
+  const taskEfficiencyIndex = buildTaskEfficiencyComparisonIndex();
+  return `<div class="card entry-table-card range-record-table-card">
+    <div class="card-header"><div><div class="card-title">任务记录</div><div class="card-sub">共 ${tasks.length} 条 · ${fmtMin(totalMinutes, true)} · 点击任务进入编辑</div></div></div>
+    ${tasks.length ? `<div class="table-wrap" style="max-height:520px"><table data-sort-table="overview-tasks"><thead><tr>${sortableTableHeaderHtml('overview-tasks', 'date', '日期', 'date')}<th>任务名称</th><th>活动类型</th>${sortableTableHeaderHtml('overview-tasks', 'minutes', '时长')}${sortableTableHeaderHtml('overview-tasks', 'quantity', '数量')}${sortableTableHeaderHtml('overview-tasks', 'efficiency', '效率')}${sortableTableHeaderHtml('overview-tasks', 'efficiencyDelta', '较平均效率')}${sortableTableHeaderHtml('overview-tasks', 'accuracy', '正确率')}<th>备注</th><th>操作</th></tr></thead>
+      <tbody>${tasks.map((task, rowIndex) => {
+    const visibleQty = visibleTaskQuantity(task);
+    const visibleUnit = visibleTaskQuantityUnit(task);
+    const rate = visibleQty && Number(task.minutes) > 0 ? visibleQty / Number(task.minutes) : null;
+    const efficiencyComparison = taskEfficiencyComparisonFor(taskEfficiencyIndex, task, task._date);
+    const actColor = getActColor(task.activityType);
+    return `<tr ${sortableTableRowAttrs({
+      date: task._date, minutes: Number(task.minutes) || 0,
+      quantity: visibleQty > 0 ? visibleQty : null, efficiency: rate, efficiencyDelta: efficiencyComparison?.deltaPct,
+      accuracy: visibleTaskAccuracy(task),
+    }, rowIndex)}><td class="fw-mono c-hp" onclick="openEntryDate('${task._date}')" style="cursor:pointer;white-space:nowrap">${formatShort(task._date)}</td><td><button type="button" class="range-record-link" onclick="monthEditTask('${task._date}','${task.id}')">${escHtmlApp(task.name || '未命名任务')}</button></td><td><span class="badge" style="background:${actColor.color}22;color:${actColor.color};border:1px solid ${actColor.color}44">${escHtmlApp(task.activityType || '-')}</span></td><td class="fw-mono">${fmtMin(Number(task.minutes) || 0, true)}</td><td class="fw-mono">${visibleQty ? `${visibleQty}${visibleUnit ? ` ${escHtmlApp(visibleUnit)}` : ''}` : '-'}</td><td class="fw-mono">${rate == null ? '-' : `${rate.toFixed(2)}${visibleUnit ? ` ${escHtmlApp(visibleUnit)}` : ''}/min`}</td><td class="fw-mono">${taskEfficiencyDeltaHtml(efficiencyComparison)}</td><td class="fw-mono">${visibleTaskAccuracy(task) == null ? '-' : `${visibleTaskAccuracy(task)}%`}</td><td class="c-muted">${escHtmlApp(task.note || '')}</td><td><button type="button" class="btn btn-ghost btn-sm" onclick="monthEditTask('${task._date}','${task.id}')">编辑</button></td></tr>`;
+  }).join('')}</tbody><tfoot><tr><td colspan="3">合计</td><td class="fw-mono">${fmtMin(totalMinutes, true)}</td><td colspan="6"></td></tr></tfoot></table></div>` : '<div class="empty-state"><p>当前范围暂无任务记录</p></div>'}
+  </div>`;
+}
+
+function overviewSessionRecordsHtml(sessions) {
+  const totalClock = sessions.reduce((sum, session) => sum + sessionClock(session), 0);
+  const totalActual = sessions.filter(session => !isUnavailableSession(session)).reduce((sum, session) => sum + (Number(session.actualMinutes) || 0), 0);
+  return `<div class="card entry-table-card range-record-table-card">
+    <div class="card-header"><div><div class="card-title">专注时段</div><div class="card-sub">共 ${sessions.length} 段 · 时钟 ${fmtMin(totalClock, true)} · 实际 ${fmtMin(totalActual, true)} · 点击时段进入编辑</div></div></div>
+    ${sessions.length ? `<div class="table-wrap" style="max-height:520px"><table data-sort-table="overview-sessions"><thead><tr>${sortableTableHeaderHtml('overview-sessions', 'date', '日期', 'date')}<th>类型</th>${sortableTableHeaderHtml('overview-sessions', 'start', '开始', 'time')}${sortableTableHeaderHtml('overview-sessions', 'end', '结束', 'time')}${sortableTableHeaderHtml('overview-sessions', 'clock', '时钟', 'number', 'c-clock')}${sortableTableHeaderHtml('overview-sessions', 'nominal', '名义', 'number', 'c-nominal')}${sortableTableHeaderHtml('overview-sessions', 'actual', '实际', 'number', 'c-actual')}${sortableTableHeaderHtml('overview-sessions', 'rest', '休息')}${sortableTableHeaderHtml('overview-sessions', 'efficiency', '效率')}<th>备注</th><th>操作</th></tr></thead>
+      <tbody>${sessions.map((session, rowIndex) => {
+    const clock = sessionClock(session);
+    const unavailable = isUnavailableSession(session);
+    const specialStudy = isSpecialStudySession(session);
+    const typeMeta = sessionTypeMeta(session);
+    const actual = Number(session.actualMinutes) || 0;
+    const rest = Number(session.restMinutes) || 0;
+    const efficiency = !unavailable && !specialStudy && clock - rest > 0 ? Math.round(actual / (clock - rest) * 100) : null;
+    return `<tr ${sortableTableRowAttrs({
+      date: session._date, start: parseMin(session.startTime), end: parseMin(session.endTime), clock,
+      nominal: unavailable || specialStudy ? null : Number(session.nominalMinutes) || 0,
+      actual: unavailable ? null : actual, rest: unavailable || specialStudy ? null : rest, efficiency,
+    }, rowIndex)}${typeMeta.bg ? ` style="background:${typeMeta.bg}"` : ''}><td class="fw-mono c-hp" onclick="openEntryDate('${session._date}')" style="cursor:pointer;white-space:nowrap">${formatShort(session._date)}</td><td>${unavailable || specialStudy ? `<span style="font-size:10px;background:${typeMeta.color}22;color:${typeMeta.color};padding:1px 6px;border-radius:3px">${escHtmlApp(typeMeta.label)}</span>` : '普通'}</td><td class="fw-mono"><button type="button" class="range-record-link" onclick="monthEditSession('${session._date}','${session.id}')">${session.startTime || '-'}</button></td><td class="fw-mono">${session.endTime || '-'}</td><td class="fw-mono c-clock">${fmtMin(clock, true)}</td><td class="fw-mono c-nominal">${unavailable || specialStudy ? '-' : fmtMin(Number(session.nominalMinutes) || 0, true)}</td><td class="fw-mono c-actual">${unavailable ? '-' : fmtMin(actual, true)}</td><td class="fw-mono">${unavailable || specialStudy ? '-' : fmtMin(rest, true)}</td><td class="fw-mono c-actual">${efficiency == null ? '-' : `${efficiency}%`}</td><td class="c-muted">${escHtmlApp(session.note || '')}</td><td><button type="button" class="btn btn-ghost btn-sm" onclick="monthEditSession('${session._date}','${session.id}')">编辑</button></td></tr>`;
+  }).join('')}</tbody></table></div>` : '<div class="empty-state"><p>当前范围暂无专注时段</p></div>'}
+  </div>`;
+}
+
+function renderOverallOverview() {
+  destroyChart('overviewTrendChart');
+  destroyChart('overviewCategoryChart');
+  destroyChart('overviewTaskChart');
+  const host = document.getElementById('tab-overview');
+  if (!host) return;
+
+  const sharedRange = analysisRangeMeta('overview');
+  const allStoredDates = getAllChartRecordDates();
+  const baseDates = sharedRange.baseDates;
+  const rangeContext = sharedRange.context;
+  const dates = rangeContext.analysisDates;
+  const filterHtml = `<div class="overview-unified-head"><div><div class="card-title">🌐 总览</div><div class="overview-range-meta">周、月及跨周期统计统一入口 · 点击汇总表可进入当天录入</div></div></div>${analysisRangePlannerHtml('overview', sharedRange)}`;
+
+  const storedDateSet = new Set(allStoredDates);
+  const recordedDates = dates.filter(date => storedDateSet.has(date));
+  const displayRecordedDates = rangeContext.displayDates.filter(date => storedDateSet.has(date));
+  if (!baseDates.length || !displayRecordedDates.length || (rangeContext.filtered && !recordedDates.length)) {
+    host.innerHTML = `${filterHtml}
+      <div class="day-type-filter-empty"><b>${rangeContext.filtered ? `当前范围没有“${escHtmlApp(rangeContext.selectedType)}”记录` : '当前范围内暂无有效记录'}</b><span>可以调整日期范围或日期类型筛选。</span></div>`;
+    return;
+  }
+
+  const { totals } = computeRange(dates);
+  const taskEfficiencyIndex = buildTaskEfficiencyComparisonIndex();
+  const summaryTaskOutputDeviation = taskOutputDeviationForDates(dates, taskEfficiencyIndex);
+  const excludedCount = rangeContext.includeExcluded
+    ? recordedDates.filter(date => state.data[date]?.excludeFromRating).length
+    : rangeContext.shellDates.filter(date => storedDateSet.has(date)).length;
+  const buckets = overviewDailyBuckets(dates, storedDateSet).map(bucket => ({ ...bucket, _dayTypeFilterActive: rangeContext.includeExcluded }));
+  const recordedBuckets = buckets.filter(bucket => bucket.recorded);
+  const shellSet = new Set(rangeContext.shellDates);
+  const displayBuckets = overviewDailyBuckets(rangeContext.displayDates, storedDateSet)
+    .filter(bucket => bucket.recorded)
+    .map(bucket => ({ ...bucket, _shell: shellSet.has(bucket.key), _dayTypeFilterActive: rangeContext.includeExcluded }));
+  const categoryMinutes = {};
+  dates.forEach(date => {
+    const day = computeDay(date);
+    Object.entries(day.actMin || {}).forEach(([category, minutes]) => {
+      categoryMinutes[category] = (categoryMinutes[category] || 0) + minutes;
+    });
   });
-  const weekSessTotalClock = allWeekSessions.reduce((s, sess) => s + sessionClock(sess), 0);
-  const weekSessTotalActual = allWeekSessions.filter(s => s.type !== 'special').reduce((s, sess) => s + (Number(sess.actualMinutes) || 0), 0);
+  const categoryKeys = Object.keys(categoryMinutes)
+    .filter(category => categoryMinutes[category] > 0)
+    .sort((a, b) => categoryMinutes[b] - categoryMinutes[a]);
+  const firstDate = dates[0];
+  const lastDate = dates[dates.length - 1];
+  const summaryEfficiency = totals.focusEfficiency;
+  const summaryDeviation = totals.actualVsNominal;
+  const averageActual = totals.avgActual;
+  const overviewTasks = [];
+  const overviewSessions = [];
+  dates.forEach(dateStr => {
+    const day = getDay(dateStr);
+    (day.tasks || []).forEach(task => overviewTasks.push({ ...task, _date: dateStr }));
+    sortSessionsByStart(day.sessions || []).forEach(session => overviewSessions.push({ ...session, _date: dateStr }));
+  });
 
-  document.getElementById('tab-week').innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
-      <button class="btn btn-ghost btn-sm" onclick="weekNav(-7)">← 上周</button>
-      <span style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--hp)">${formatShort(days[0])} — ${formatShort(days[6])}</span>
-      <button class="btn btn-ghost btn-sm" onclick="weekNav(7)">下周 →</button>
-      <button class="btn btn-ghost btn-sm" onclick="weekGoToday()">本周</button>
-    </div>
+  host.innerHTML = `${filterHtml}
+    ${renderRangeKpiStatus(computeRange(dates).days, { totalDays: rangeContext.filtered ? dates.length : baseDates.length, className: 'overview-kpi-grid', excludedShellCount: rangeContext.shellDates.length, dayTypeFilterName: rangeContext.selectedType, includeAllDayTypes: rangeContext.complete })}
 
-    <div class="week-row">
-      ${dayStats.map(d => {
-    const isToday = d.dateStr === todayStr;
-    const isSel = d.dateStr === state.selectedDate;
-    const dayNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-    const idx = days.indexOf(d.dateStr);
-    const hasAny = d.actualMin > 0 || d.taskMin > 0;
-    return `<div class="week-day-card ${isToday ? 'today' : ''} ${isSel ? 'selected' : ''}" onclick="weekSelectDay('${d.dateStr}')">
-          <div class="week-day-lbl">${dayNames[idx]}</div>
-          <div class="week-day-date" style="color:${isToday ? 'var(--hp)' : 'var(--text)'}">${formatShort(d.dateStr)}</div>
-          <div class="week-day-hours" style="color:${d.actualMin >= 360 ? 'var(--pol)' : d.actualMin >= 180 ? 'var(--hp)' : d.actualMin > 0 ? 'var(--wake)' : 'var(--dim)'}">${hasAny ? fmtHrs(d.actualMin) : '—'}</div>
-        </div>`;
-  }).join('')}
-    </div>
-
-    <div class="mini-grid" style="margin-bottom:16px">
-      <div class="mini-card"><div class="lbl">有效天数</div><div class="val" style="color:var(--hp)">${totals.daysWithData}<span style="font-size:12px;opacity:.6">/7天</span></div></div>
-      <div class="mini-card"><div class="lbl">总时钟${tipIcon('clock')}</div><div class="val c-clock">${fmtMin(totals.clockMin, true)}</div><div class="sub">休息 ${fmtMin(totals.restMin)} · 日均 ${fmtMin(totals.avgClock)} · CV ${fmtCV(wkStatsClock.cv)}</div></div>
-      <div class="mini-card"><div class="lbl">总有效时钟${tipIcon('effectiveClock')}</div><div class="val c-clock">${fmtMin(totals.effectiveClockMin, true)}</div><div class="sub">日均 ${fmtMin(totals.avgEffClock)} · CV ${fmtCV(wkStatsEffClock.cv)}</div></div>
-      <div class="mini-card"><div class="lbl">总名义${tipIcon('nominal')}</div><div class="val c-nominal">${fmtMin(totals.nominalMin, true)}</div><div class="sub">日均 ${fmtMin(totals.avgNominal)} · CV ${fmtCV(wkStatsNominal.cv)}</div></div>
-      <div class="mini-card"><div class="lbl">总实际专注${tipIcon('actual')}</div><div class="val c-actual">${fmtMin(totals.actualMin, true)}</div><div class="sub">日均 ${fmtMin(totals.avgActual)} · CV ${fmtCV(wkStatsActual.cv)}</div></div>
-      <div class="mini-card"><div class="lbl">总任务时长${tipIcon('taskMin')}</div><div class="val" style="color:var(--word)">${fmtMin(totals.taskMin, true)}</div><div class="sub">日均 ${fmtMin(totals.avgTask)} · CV ${fmtCV(wkStatsTask.cv)}</div></div>
-    </div>
-
-    <div class="chart-grid">
-      <div class="chart-card full">
-        <div class="chart-title">每日三维时间对比</div>
-        <div class="chart-sub">填充折线图 · 时钟（虚线）/ 有效时钟 / 名义（蓝）/ 实际（绿）</div>
-        <canvas id="weekThreeChart" height="90"></canvas>
+    <div class="chart-grid overview-chart-grid">
+      <div class="chart-card full three-dim-chart-card">
+        <div class="range-chart-head"><div><div class="chart-title">三维时间趋势</div><div class="chart-sub">${rangeChartView('overview', 'time') === 'daily' ? '时钟 / 有效时钟 / 名义 / 实际 · 日期类型使用模板符号' : '截至当天各项正值记录的累计平均时长'}</div></div>${rangeChartViewTabsHtml('overview', 'time')}</div>
+        <canvas id="overviewTrendChart" height="90"></canvas>
       </div>
       <div class="chart-card">
-        <div class="chart-title">类别时间分布</div>
-        <div class="chart-sub">本周各类别累计</div>
-        <canvas id="weekCatChart" height="200"></canvas>
+        <div class="chart-title">任务类别累计占比</div>
+        <div class="chart-sub">按任务记录时长汇总</div>
+        ${categoryKeys.length
+      ? '<canvas id="overviewCategoryChart" height="210"></canvas>'
+      : '<div class="empty-state"><p>当前范围内暂无任务类别数据。</p></div>'}
       </div>
       <div class="chart-card">
-        <div class="chart-title">每日专注效率</div>
-        <div class="chart-sub">实际专注/有效时钟 %</div>
-        <canvas id="weekEffChart" height="200"></canvas>
+        <div class="range-chart-head"><div><div class="chart-title">范围每日任务时长</div><div class="chart-sub">${rangeChartView('overview', 'task') === 'daily' ? '任务记录时长面积折线图 · 点击数据点进入日览' : '截至当天有任务日的累计平均时长 · 点击数据点进入日览'}</div></div>${rangeChartViewTabsHtml('overview', 'task')}</div>
+        ${recordedBuckets.length ? '<canvas id="overviewTaskChart" height="210"></canvas>' : '<div class="empty-state"><p>当前统计日期内暂无任务记录。</p></div>'}
       </div>
       <div class="chart-card full">
         <div class="chart-title">每日汇总表</div>
-        <div class="chart-sub">时钟 + 有效时钟 + 休息 + 名义 + 实际 + 偏差 + 效率 + 不可用时间占比</div>
-        <div class="table-wrap">
-          <table>
+        <div class="chart-sub">只列有记录日期 · 点击行进入录入界面 · 汇总状态表示是否计入顶部范围 KPI</div>
+        <div class="table-wrap overview-table-wrap">
+          <table data-sort-table="overview-summary">
             <thead><tr>
-              <th>日期</th><th>起床</th><th>睡觉</th>
-              <th class="c-clock">时钟${tipIcon('clock')}</th><th class="c-clock">有效${tipIcon('effectiveClock')}</th><th>休息${tipIcon('rest')}</th><th class="c-nominal">名义${tipIcon('nominal')}</th><th class="c-actual">实际${tipIcon('actual')}</th>
-              <th>偏差率${tipIcon('deviation')}</th><th>效率${tipIcon('efficiency')}</th><th>不可用占比${tipIcon('util')}</th>
+              ${sortableTableHeaderHtml('overview-summary', 'date', '日期', 'date')}
+              ${sortableTableHeaderHtml('overview-summary', 'clock', '时钟', 'number', 'c-clock')}${sortableTableHeaderHtml('overview-summary', 'effective', '有效', 'number', 'c-clock')}
+              ${sortableTableHeaderHtml('overview-summary', 'nominal', '名义', 'number', 'c-nominal')}${sortableTableHeaderHtml('overview-summary', 'actual', '实际', 'number', 'c-actual')}${sortableTableHeaderHtml('overview-summary', 'actualDeviation', '实际偏日均')}
+              ${sortableTableHeaderHtml('overview-summary', 'task', '任务时长')}${sortableTableHeaderHtml('overview-summary', 'efficiency', '专注效率')}${sortableTableHeaderHtml('overview-summary', 'taskOutputDeviation', '任务产出偏差')}${sortableTableHeaderHtml('overview-summary', 'deviation', '计划偏差')}<th>汇总状态</th>
             </tr></thead>
             <tbody>
-              ${dayStats.map(d => {
-    const dayObj = getDay(d.dateStr);
-    return `<tr ${d.dateStr === todayStr ? 'style="background:rgba(79,195,247,.04)"' : ''}>
-                  <td class="fw-mono ${d.dateStr === todayStr ? 'c-hp' : ''}">${formatShort(d.dateStr)}</td>
-                  <td class="fw-mono c-wake">${dayObj.wakeTime || '-'}</td>
-                  <td class="fw-mono c-sleep">${dayObj.sleepTime || '-'}</td>
-                  <td class="fw-mono c-clock">${fmtMin(d.clockMin, true)}</td>
-                  <td class="fw-mono c-clock">${fmtMin(d.effectiveClockMin, true)}</td>
-                  <td class="fw-mono">${fmtMin(d.restMin, true)}</td>
-                  <td class="fw-mono c-nominal">${fmtMin(d.nominalMin, true)}</td>
-                  <td class="fw-mono c-actual">${fmtMin(d.actualMin, true)}</td>
-                  <td class="fw-mono ${devClass(d.actualVsNominal)}">${devStr(d.actualVsNominal)}</td>
-                  <td class="fw-mono ${d.focusEfficiency >= 80 ? 'c-green' : d.focusEfficiency >= 60 ? 'c-wake' : 'c-red'}">${d.focusEfficiency != null ? d.focusEfficiency + '%' : '-'}</td>
-                  <td class="fw-mono ${d.utilPct == null ? 'c-muted' : d.utilPct <= 30 ? 'c-green' : d.utilPct <= 50 ? 'c-wake' : 'c-red'}">${d.utilPct != null ? d.utilPct + '%' : '-'}</td>
+              ${[...displayBuckets].reverse().map((bucket, rowIndex) => {
+        if (bucket._shell) return dayTypeShellRowHtml({ ...(state.data[bucket.key] || {}), dateStr: bucket.key }, 11, rangeContext.filtered, { date: bucket.key }, rowIndex);
+        const efficiency = bucket.totals.focusEfficiency;
+        const deviation = bucket.totals.actualVsNominal;
+        const actualDeviation = actualFocusDeviationPct(bucket.totals.actualMin, averageActual);
+        const taskOutputDeviation = taskOutputDeviationForDates([bucket.key], taskEfficiencyIndex);
+        const dayObj = state.data[bucket.key] || {};
+        return `<tr class="overview-summary-row range-summary-clickable" ${sortableTableRowAttrs({
+          date: bucket.key, clock: bucket.totals.clockMin, effective: bucket.totals.effectiveClockMin,
+          nominal: bucket.totals.nominalMin, actual: bucket.totals.actualMin, actualDeviation, task: bucket.totals.taskMin,
+          efficiency, taskOutputDeviation: taskOutputDeviation?.deltaPct, deviation,
+        }, rowIndex)}
+                  onclick="openEntryDate('${bucket.key}')">
+                  <td class="fw-mono" style="color:var(--hp)">${escHtmlApp(bucket.label)}${dayTypeName(dayObj) ? `<br>${dayTypeBadgeHtml(dayObj)}` : ''}</td>
+                  <td class="fw-mono c-clock">${fmtMin(bucket.totals.clockMin, true)}</td>
+                  <td class="fw-mono c-clock">${fmtMin(bucket.totals.effectiveClockMin, true)}</td>
+                  <td class="fw-mono c-nominal">${fmtMin(bucket.totals.nominalMin, true)}</td>
+                  <td class="fw-mono c-actual">${fmtMin(bucket.totals.actualMin, true)}</td>
+                  <td class="fw-mono">${actualFocusDeviationBoxHtml(actualDeviation, averageActual)}</td>
+                  <td class="fw-mono">${fmtMin(bucket.totals.taskMin, true)}</td>
+                  <td class="fw-mono c-actual">${efficiency != null ? `${efficiency}%` : '-'}</td>
+                  <td class="fw-mono">${taskOutputDeviationHtml(taskOutputDeviation)}</td>
+                  <td class="fw-mono ${devClass(deviation)}">${devStr(deviation)}</td>
+                  <td class="fw-mono ${bucket.excluded ? 'c-muted' : 'c-text'}">${bucket.excluded ? '筛选纳入（不评分）' : '计入'}</td>
                 </tr>`;
-  }).join('')}
+      }).join('')}
             </tbody>
             <tfoot><tr>
-              <td colspan="3">周合计</td>
+              <td>范围合计（${recordedDates.length}天）</td>
               <td class="c-clock">${fmtMin(totals.clockMin, true)}</td>
               <td class="c-clock">${fmtMin(totals.effectiveClockMin, true)}</td>
-              <td>${fmtMin(totals.restMin, true)}</td>
               <td class="c-nominal">${fmtMin(totals.nominalMin, true)}</td>
               <td class="c-actual">${fmtMin(totals.actualMin, true)}</td>
-              <td class="${devClass(totals.actualVsNominal)}">${devStr(totals.actualVsNominal)}</td>
-              <td class="${totals.focusEfficiency >= 80 ? 'c-green' : totals.focusEfficiency >= 60 ? 'c-wake' : 'c-red'}">${totals.focusEfficiency != null ? totals.focusEfficiency + '%' : '-'}</td>
-              <td>-</td>
-            </tr><tr style="color:var(--muted)">
-              <td colspan="3">日均 (${totals.daysWithData}天)</td>
-              <td>${fmtMin(totals.avgClock)}</td>
-              <td>${fmtMin(totals.avgEffClock)}</td>
-              <td>${fmtMin(totals.avgRest)}</td>
-              <td>${fmtMin(totals.avgNominal)}</td>
-              <td>${fmtMin(totals.avgActual)}</td>
-              <td colspan="3"></td>
-            </tr><tr style="color:var(--dim);font-size:11px">
-              <td colspan="3">σ${tipIcon('stdDev')} / CV${tipIcon('cv')}</td>
-              <td>${fmtSD(wkStatsClock.stdDev)} / ${fmtCV(wkStatsClock.cv)}</td>
-              <td>${fmtSD(wkStatsEffClock.stdDev)} / ${fmtCV(wkStatsEffClock.cv)}</td>
-              <td>${fmtSD(wkStatsRest.stdDev)} / ${fmtCV(wkStatsRest.cv)}</td>
-              <td>${fmtSD(wkStatsNominal.stdDev)} / ${fmtCV(wkStatsNominal.cv)}</td>
-              <td>${fmtSD(wkStatsActual.stdDev)} / ${fmtCV(wkStatsActual.cv)}</td>
-              <td colspan="3"></td>
+              <td><span class="actual-focus-deviation-box c-muted" title="当前筛选范围的实际专注日均基准">日均 ${fmtMin(averageActual, true)}</span></td>
+              <td>${fmtMin(totals.taskMin, true)}</td>
+              <td class="c-actual">${summaryEfficiency != null ? `${summaryEfficiency}%` : '-'}</td>
+              <td>${taskOutputDeviationHtml(summaryTaskOutputDeviation)}</td>
+              <td class="${devClass(summaryDeviation)}">${devStr(summaryDeviation)}</td>
+              <td>${excludedCount || '-'}</td>
             </tr></tfoot>
           </table>
         </div>
       </div>
     </div>
+    ${overviewSessionRecordsHtml(overviewSessions)}
+    ${overviewTaskRecordsHtml(overviewTasks)}`;
 
-    <!-- 📝 本周任务记录 -->
-    <div class="card entry-table-card" style="margin-top:16px">
-      <div class="card-header">
-        <div><div class="card-title">📝 本周任务记录</div><div class="card-sub">共 ${allWeekTasks.length} 条 · ${fmtMin(weekTaskTotalMin)}</div></div>
-      </div>
-      ${allWeekTasks.length === 0
-      ? '<div class="empty-state"><p>本周暂无任务记录</p></div>'
-      : `${taskFilterHtml('week', allWeekTasks)}
-        <div class="table-wrap" style="max-height:520px">
-          <table>
-            <thead><tr>
-              <th>日期</th><th>任务名称</th><th>活动类型</th><th>时长</th><th>数量</th><th>效率</th><th>正确率</th><th>备注</th><th>操作</th>
-            </tr></thead>
-            <tbody>${filterTasksByView(allWeekTasks, 'week').map(t => {
-        const visibleQty = visibleTaskQuantity(t);
-        const visibleUnit = visibleTaskQuantityUnit(t);
-        const rate = visibleQty && t.minutes ? (visibleQty / Number(t.minutes)).toFixed(2) : null;
-        const actColor = getActColor(t.activityType);
-        return `<tr>
-              <td class="fw-mono" style="white-space:nowrap;cursor:pointer;color:var(--hp)" onclick="state.selectedDate='${t._date}';showTab('day')">${formatShort(t._date)}</td>
-              <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtmlApp(t.name)}">${escHtmlApp(t.name)}</td>
-              <td><span class="badge" style="background:${actColor.color}22;color:${actColor.color};border:1px solid ${actColor.color}44">${t.activityType || '-'}</span></td>
-              <td class="fw-mono">${fmtMin(Number(t.minutes) || 0, true)}</td>
-              <td class="fw-mono">${visibleQty ? visibleQty + (visibleUnit ? ' ' + visibleUnit : '') : '-'}</td>
-              <td class="fw-mono">${rate ? rate + (visibleUnit ? ' ' + visibleUnit + '/min' : '/min') : '-'}</td>
-              <td class="fw-mono ${t.accuracy >= 80 ? 'c-green' : t.accuracy >= 60 ? 'c-wake' : t.accuracy ? 'c-red' : ''}">${t.accuracy != null && t.accuracy !== '' ? t.accuracy + '%' : '-'}</td>
-              <td class="c-muted" style="font-size:11px">${t.note || ''}</td>
-              <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="monthEditTask('${t._date}','${t.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="weekDeleteTask('${t._date}','${t.id}')">删除</button></td>
-            </tr>`;
-      }).join('')}</tbody>
-            <tfoot><tr>
-              <td colspan="3">合计</td>
-              <td class="fw-mono">${fmtMin(filterTasksByView(allWeekTasks, 'week').reduce((s, t) => s + (Number(t.minutes) || 0), 0), true)}</td>
-              <td colspan="5"></td>
-            </tr></tfoot>
-          </table>
-        </div>`}
-    </div>
+  const labels = buckets.map(bucket => bucket.label);
+  renderThreeDimTrendChart(
+    'overviewTrendChart',
+    buckets.map(bucket => ({ dateStr: bucket.key, label: bucket.label, _dayTypeFilterActive: bucket._dayTypeFilterActive, ...bucket.totals })),
+    item => item.label,
+    'overview'
+  );
 
-    <!-- ⏱ 本周专注时段 -->
-    <div class="card entry-table-card" style="margin-top:16px">
-      <div class="card-header">
-        <div><div class="card-title">⏱ 本周专注时段</div><div class="card-sub">共 ${allWeekSessions.length} 段 · 时钟 ${fmtMin(weekSessTotalClock)} · 实际 ${fmtMin(weekSessTotalActual)}</div></div>
-      </div>
-      ${allWeekSessions.length === 0
-      ? '<div class="empty-state"><p>本周暂无专注时段</p></div>'
-      : `<div class="table-wrap" style="max-height:520px">
-          <table>
-            <thead><tr>
-              <th>日期</th><th>类型</th><th>开始</th><th>结束</th>
-              <th class="c-clock">时钟${tipIcon('clock')}</th><th class="c-nominal">名义${tipIcon('nominal')}</th><th class="c-actual">实际${tipIcon('actual')}</th>
-              <th>休息${tipIcon('rest')}</th><th>效率${tipIcon('efficiency')}</th><th>备注</th><th>操作</th>
-            </tr></thead>
-            <tbody>${allWeekSessions.map(sess => {
-        const cl = sessionClock(sess);
-        const isSpec = isUnavailableSession(sess);
-        const isSpecialStudy = isSpecialStudySession(sess);
-        const typeMeta = sessionTypeMeta(sess);
-        const actual = Number(sess.actualMinutes) || 0;
-        const rest = Number(sess.restMinutes) || 0;
-        const eff = (!isSpec && !isSpecialStudy && (cl - rest) > 0) ? Math.round(actual / (cl - rest) * 100) : null;
-        return `<tr${typeMeta.bg ? ` style="background:${typeMeta.bg}"` : ''}>
-              <td class="fw-mono" style="white-space:nowrap;cursor:pointer;color:var(--hp)" onclick="state.selectedDate='${sess._date}';showTab('day')">${formatShort(sess._date)}</td>
-              <td>${isSpec || isSpecialStudy ? `<span style="font-size:10px;background:${typeMeta.color}22;color:${typeMeta.color};padding:1px 6px;border-radius:3px">${escHtmlApp(typeMeta.label)}</span>` : '普通'}</td>
-              <td class="fw-mono">${sess.startTime || '-'}</td><td class="fw-mono">${sess.endTime || '-'}</td>
-              <td class="fw-mono c-clock">${fmtMin(cl, true)}</td>
-              <td class="fw-mono c-nominal">${isSpec || isSpecialStudy ? '-' : fmtMin(Number(sess.nominalMinutes) || 0, true)}</td>
-              <td class="fw-mono c-actual">${isSpec ? '-' : fmtMin(actual, true)}</td>
-              <td class="fw-mono">${isSpec || isSpecialStudy ? '-' : fmtMin(rest, true)}</td>
-              <td class="fw-mono ${eff >= 80 ? 'c-green' : eff >= 60 ? 'c-wake' : eff != null ? 'c-red' : ''}">${eff != null ? eff + '%' : '-'}</td>
-              <td class="c-muted" style="font-size:11px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${sess.note || ''}</td>
-              <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="weekEditSession('${sess._date}','${sess.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="weekDeleteSession('${sess._date}','${sess.id}')">删除</button></td>
-            </tr>`;
-      }).join('')}</tbody>
-          </table>
-        </div>`}
-    </div>
-  `;
-
-  const labels = dayStats.map(d => formatShort(d.dateStr));
-  mkChart('weekThreeChart', {
-    type: 'line', data: {
-      labels, datasets: [
-        { label: '时钟', data: dayStats.map(d => +(d.clockMin / 60).toFixed(2)), borderColor: '#80deea', backgroundColor: 'rgba(128,222,234,.15)', borderWidth: 1.5, borderDash: [4, 4], pointRadius: 2, tension: .3, fill: 'origin' },
-        { label: '有效时钟', data: dayStats.map(d => +(d.effectiveClockMin / 60).toFixed(2)), borderColor: '#80deea', backgroundColor: 'rgba(128,222,234,.2)', borderWidth: 1.5, pointRadius: 3, tension: .3, fill: 'origin' },
-        { label: '名义', data: dayStats.map(d => +(d.nominalMin / 60).toFixed(2)), borderColor: '#4fc3f7', backgroundColor: 'rgba(79,195,247,.2)', borderWidth: 1.5, pointRadius: 3, tension: .3, fill: 'origin' },
-        { label: '实际', data: dayStats.map(d => +(d.actualMin / 60).toFixed(2)), borderColor: '#69f0ae', backgroundColor: 'rgba(105,240,174,.25)', borderWidth: 2, pointRadius: 3, tension: .3, fill: 'origin' },
-      ]
-    },
-    options: {
-      responsive: true,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: { labels: { color: '#6b7a9e' } }, filler: { propagate: false },
-        tooltip: { callbacks: { label: ctx => { const v = ctx.parsed.y; if (!v) return null; return `${ctx.dataset.label}: ${fmtMin(Math.round(v * 60))}`; } } }
-      },
-      scales: { x: { ticks: { color: '#6b7a9e' }, grid: gridCfg }, y: { ticks: { color: '#6b7a9e', callback: v => v + 'h' }, grid: gridCfg, title: { display: true, text: '小时', color: '#6b7a9e' }, min: 0 } }
-    }
-  });
-
-  const weekActMin = {};
-  dayStats.forEach(d => Object.keys(d.actMin || {}).forEach(k => weekActMin[k] = (weekActMin[k] || 0) + d.actMin[k]));
-  const actDataW = Object.keys(weekActMin).filter(k => weekActMin[k] > 0);
-  if (actDataW.length > 0) {
-    mkChart('weekCatChart', {
+  if (categoryKeys.length) {
+    mkChart('overviewCategoryChart', {
       type: 'doughnut',
-      data: { labels: actDataW, datasets: [{ data: actDataW.map(k => weekActMin[k]), backgroundColor: actDataW.map(k => getActColor(k).color + 'cc'), borderColor: actDataW.map(k => getActColor(k).color), borderWidth: 1 }] },
-      options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#6b7a9e', boxWidth: 10, padding: 8 } }, tooltip: { callbacks: { label: ctx => `${ctx.label}: ${fmtMin(ctx.raw)}` } } } }
+      data: {
+        labels: categoryKeys,
+        datasets: [{
+          data: categoryKeys.map(category => categoryMinutes[category]),
+          backgroundColor: categoryKeys.map(category => `${getActColor(category).color}cc`),
+          borderColor: categoryKeys.map(category => getActColor(category).color),
+          borderWidth: 1,
+        }],
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { position: 'right', labels: { color: '#6b7a9e', boxWidth: 10, padding: 8 } },
+          tooltip: { callbacks: { label: context => `${context.label}: ${fmtMin(context.raw, true)}` } },
+        },
+      },
     });
   }
 
-  mkChart('weekEffChart', {
-    type: 'bar', data: {
-      labels, datasets: [{
-        label: '专注效率%',
-        data: dayStats.map(d => d.focusEfficiency || 0),
-        backgroundColor: dayStats.map(d => (d.focusEfficiency || 0) >= 80 ? 'rgba(105,240,174,.4)' : (d.focusEfficiency || 0) >= 60 ? 'rgba(255,213,79,.4)' : 'rgba(244,67,54,.3)'),
-        borderColor: dayStats.map(d => (d.focusEfficiency || 0) >= 80 ? '#69f0ae' : (d.focusEfficiency || 0) >= 60 ? '#ffd54f' : '#f44336'),
-        borderWidth: 1.5, borderRadius: 3
-      }]
-    },
-    options: {
-      responsive: true, plugins: { legend: { display: false } },
-      scales: { x: { ticks: { color: '#6b7a9e' }, grid: gridCfg }, y: { ticks: { color: '#6b7a9e', callback: v => v + '%' }, grid: gridCfg, min: 0, max: 100 } }
-    }
-  });
-}
-function weekNav(n) { state.weekStart = addDays(state.weekStart, n); renderWeekOverview(); }
-function weekGoToday() { state.weekStart = getMondayOfDate(new Date()); renderWeekOverview(); }
-function weekSelectDay(d) { state.selectedDate = d; showTab('day'); }
-
-// ============================================================
-// MONTH OVERVIEW TAB
-// ============================================================
-function renderMonthOverview() {
-  const { year, month } = state.monthView;
-  const monthNames = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
-  const lastDay = new Date(year, month + 1, 0).getDate();
-  const dates = Array.from({ length: lastDay }, (_, i) => {
-    const m = String(month + 1).padStart(2, '0'), d = String(i + 1).padStart(2, '0');
-    return `${year}-${m}-${d}`;
-  });
-  const { days: dayStats, totals } = computeRange(dates);
-  const activeDays = dayStats.filter(d => d.clockMin > 0 || d.taskMin > 0);
-  const monthDayStatuses = dayStats.map(d => {
-    const day = getDay(d.dateStr);
-    if (day.specialDay && day.excludeFromRating) return 'special-excluded';
-    if (day.excludeFromRating) return 'excluded';
-    if (day.specialDay) return 'special';
-    return 'normal';
-  });
-
-  // 月度统计指标
-  const moStatsClock = calcStats(dayStats.map(d => d.clockMin));
-  const moStatsActual = calcStats(dayStats.map(d => d.actualMin));
-  const moStatsNominal = calcStats(dayStats.map(d => d.nominalMin));
-  const moStatsRest = calcStats(dayStats.map(d => d.restMin));
-  const moStatsTask = calcStats(dayStats.map(d => d.taskMin));
-  const moStatsEffClock = calcStats(dayStats.map(d => d.effectiveClockMin));
-  const mActMin = {};
-  dayStats.forEach(d => Object.keys(d.actMin || {}).forEach(k => mActMin[k] = (mActMin[k] || 0) + d.actMin[k]));
-  const actDataM = Object.keys(mActMin).filter(k => mActMin[k] > 0);
-
-  // 收集本月所有任务（带日期信息）
-  const allMonthTasks = [];
-  dates.forEach(dateStr => {
-    const day = getDay(dateStr);
-    (day.tasks || []).forEach(t => {
-      allMonthTasks.push({ ...t, _date: dateStr });
-    });
-  });
-  const monthTaskTotalMin = allMonthTasks.reduce((s, t) => s + (Number(t.minutes) || 0), 0);
-
-  // 收集本月所有专注时段
-  const allMonthSessions = [];
-  dates.forEach(dateStr => {
-    const day = getDay(dateStr);
-    sortSessionsByStart(day.sessions || []).forEach(s => { allMonthSessions.push({ ...s, _date: dateStr }); });
-  });
-  const monthSessTotalClock = allMonthSessions.reduce((s, sess) => s + sessionClock(sess), 0);
-  const monthSessTotalActual = allMonthSessions.filter(s => s.type !== 'special').reduce((s, sess) => s + (Number(sess.actualMinutes) || 0), 0);
-
-  document.getElementById('tab-month').innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
-      <button class="btn btn-ghost btn-sm" onclick="monthNav(-1)">← 上月</button>
-      <span style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--hp)">${year}年 ${monthNames[month]}</span>
-      <button class="btn btn-ghost btn-sm" onclick="monthNav(1)">下月 →</button>
-      <button class="btn btn-ghost btn-sm" onclick="monthGoToday()">本月</button>
-    </div>
-
-    <div class="mini-grid" style="margin-bottom:16px">
-      <div class="mini-card"><div class="lbl">有效天数</div><div class="val" style="color:var(--hp)">${activeDays.length}<span style="font-size:12px;opacity:.6">/${lastDay}天</span></div></div>
-      <div class="mini-card"><div class="lbl">总时钟${tipIcon('clock')}</div><div class="val c-clock">${fmtHrs(totals.clockMin)}</div><div class="sub">休息 ${fmtMin(totals.restMin)} · 日均 ${fmtMin(totals.avgClock)} · CV ${fmtCV(moStatsClock.cv)}</div></div>
-      <div class="mini-card"><div class="lbl">总有效时钟${tipIcon('effectiveClock')}</div><div class="val c-clock">${fmtHrs(totals.effectiveClockMin)}</div><div class="sub">日均 ${fmtMin(totals.avgEffClock)} · CV ${fmtCV(moStatsEffClock.cv)}</div></div>
-      <div class="mini-card"><div class="lbl">总名义${tipIcon('nominal')}</div><div class="val c-nominal">${fmtHrs(totals.nominalMin)}</div><div class="sub">日均 ${fmtMin(totals.avgNominal)} · CV ${fmtCV(moStatsNominal.cv)}</div></div>
-      <div class="mini-card"><div class="lbl">总实际专注${tipIcon('actual')}</div><div class="val c-actual">${fmtHrs(totals.actualMin)}</div><div class="sub">日均 ${fmtMin(totals.avgActual)} · CV ${fmtCV(moStatsActual.cv)}</div></div>
-      <div class="mini-card"><div class="lbl">总任务时长${tipIcon('taskMin')}</div><div class="val" style="color:var(--word)">${fmtHrs(totals.taskMin)}</div><div class="sub">日均 ${fmtMin(totals.avgTask)} · CV ${fmtCV(moStatsTask.cv)}</div></div>
-    </div>
-
-    <div class="chart-grid">
-      <div class="chart-card full">
-        <div class="chart-title">每日三维时间趋势</div>
-        <div class="chart-sub">填充折线图 · 时钟（虚线）/ 有效时钟 / 名义（蓝）/ 实际（绿）· ◆特殊天 · ▲不评分 · ★特殊天且不评分</div>
-        <canvas id="monthThreeChart" height="80"></canvas>
-      </div>
-      <div class="chart-card">
-        <div class="chart-title">月度类别分布</div>
-        <div class="chart-sub">各类别累计时长</div>
-        <canvas id="monthCatChart" height="200"></canvas>
-      </div>
-      <div class="chart-card">
-        <div class="chart-title">每日实际专注分布</div>
-        <div class="chart-sub">实际专注时长柱状图 · ◆特殊天 · ▲不评分 · ★特殊天且不评分</div>
-        <canvas id="monthActualChart" height="200"></canvas>
-      </div>
-      <div class="chart-card full">
-        <div class="chart-title">月度每日汇总表</div>
-        <div class="chart-sub">点击行跳转日览</div>
-        <div class="table-wrap" style="max-height:480px">
-          <table>
-            <thead><tr>
-              <th>日期</th><th>起床</th><th>睡觉</th>
-              <th class="c-clock">时钟${tipIcon('clock')}</th><th class="c-clock">有效${tipIcon('effectiveClock')}</th><th>休息${tipIcon('rest')}</th><th class="c-nominal">名义${tipIcon('nominal')}</th><th class="c-actual">实际${tipIcon('actual')}</th>
-              <th>偏差率${tipIcon('deviation')}</th><th>效率${tipIcon('efficiency')}</th><th>不可用占比${tipIcon('util')}</th><th>评价</th>
-            </tr></thead>
-            <tbody>
-              ${dayStats.filter(d => d.clockMin > 0 || d.taskMin > 0 || state.data[d.dateStr]?.wakeTime).map(d => {
-    const dayObj = getDay(d.dateStr);
-    let sc = 0;
-    if (d.actualMin >= 480) sc++;
-    if (d.actualVsNominal != null && d.actualVsNominal >= -10) sc++;
-    if (dayObj.wakeTime && parseMin(dayObj.wakeTime) <= 8 * 60) sc++;
-    if (d.utilPct != null && d.utilPct <= SETTINGS.ratingUtilPct) sc++;
-    const rating = dayObj.excludeFromRating ? '<span class="c-muted">不评分</span>' : sc >= 3 ? '⭐' : sc >= 2 ? '👌' : sc >= 1 ? '⚠️' : '';
-    return `<tr style="cursor:pointer" onclick="state.selectedDate='${d.dateStr}';showTab('day')">
-                  <td class="fw-mono">${formatShort(d.dateStr)}</td>
-                  <td class="fw-mono c-wake">${dayObj.wakeTime || '-'}</td>
-                  <td class="fw-mono c-sleep">${dayObj.sleepTime || '-'}</td>
-                  <td class="fw-mono c-clock">${fmtMin(d.clockMin, true)}</td>
-                  <td class="fw-mono c-clock">${fmtMin(d.effectiveClockMin, true)}</td>
-                  <td class="fw-mono">${fmtMin(d.restMin, true)}</td>
-                  <td class="fw-mono c-nominal">${fmtMin(d.nominalMin, true)}</td>
-                  <td class="fw-mono c-actual">${fmtMin(d.actualMin, true)}</td>
-                  <td class="fw-mono ${devClass(d.actualVsNominal)}">${devStr(d.actualVsNominal)}</td>
-                  <td class="fw-mono ${d.focusEfficiency >= 80 ? 'c-green' : d.focusEfficiency >= 60 ? 'c-wake' : 'c-red'}">${d.focusEfficiency != null ? d.focusEfficiency + '%' : '-'}</td>
-                  <td class="fw-mono ${d.utilPct == null ? 'c-muted' : d.utilPct <= 30 ? 'c-green' : d.utilPct <= 50 ? 'c-wake' : 'c-red'}">${d.utilPct != null ? d.utilPct + '%' : '-'}</td>
-                  <td>${rating}</td>
-                </tr>`;
-  }).join('')}
-            </tbody>
-            <tfoot><tr>
-              <td colspan="3">月合计</td>
-              <td class="c-clock">${fmtMin(totals.clockMin, true)}</td>
-              <td class="c-clock">${fmtMin(totals.effectiveClockMin, true)}</td>
-              <td>${fmtMin(totals.restMin, true)}</td>
-              <td class="c-nominal">${fmtMin(totals.nominalMin, true)}</td>
-              <td class="c-actual">${fmtMin(totals.actualMin, true)}</td>
-              <td class="${devClass(totals.actualVsNominal)}">${devStr(totals.actualVsNominal)}</td>
-              <td class="${totals.focusEfficiency >= 80 ? 'c-green' : totals.focusEfficiency >= 60 ? 'c-wake' : 'c-red'}">${totals.focusEfficiency != null ? totals.focusEfficiency + '%' : '-'}</td>
-              <td colspan="2"></td>
-            </tr><tr style="color:var(--muted)">
-              <td colspan="3">日均 (${totals.daysWithData}天)</td>
-              <td>${fmtMin(totals.avgClock)}</td>
-              <td>${fmtMin(totals.avgEffClock)}</td>
-              <td>${fmtMin(totals.avgRest)}</td>
-              <td>${fmtMin(totals.avgNominal)}</td>
-              <td>${fmtMin(totals.avgActual)}</td>
-              <td colspan="4"></td>
-            </tr><tr style="color:var(--dim);font-size:11px">
-              <td colspan="3">σ${tipIcon('stdDev')} / CV${tipIcon('cv')}</td>
-              <td>${fmtSD(moStatsClock.stdDev)} / ${fmtCV(moStatsClock.cv)}</td>
-              <td>${fmtSD(moStatsEffClock.stdDev)} / ${fmtCV(moStatsEffClock.cv)}</td>
-              <td>${fmtSD(moStatsRest.stdDev)} / ${fmtCV(moStatsRest.cv)}</td>
-              <td>${fmtSD(moStatsNominal.stdDev)} / ${fmtCV(moStatsNominal.cv)}</td>
-              <td>${fmtSD(moStatsActual.stdDev)} / ${fmtCV(moStatsActual.cv)}</td>
-              <td colspan="4"></td>
-            </tr></tfoot>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- 📝 月度任务记录汇总 -->
-    <div class="card entry-table-card" style="margin-top:16px">
-      <div class="card-header">
-        <div><div class="card-title">📝 本月任务记录</div><div class="card-sub">共 ${allMonthTasks.length} 条 · ${fmtMin(monthTaskTotalMin)}</div></div>
-      </div>
-      ${allMonthTasks.length === 0
-      ? '<div class="empty-state"><p>本月暂无任务记录</p></div>'
-      : `${taskFilterHtml('month', allMonthTasks)}
-        <div class="table-wrap" style="max-height:520px">
-          <table>
-            <thead><tr>
-              <th>日期</th><th>任务名称</th><th>活动类型</th><th>时长</th><th>数量</th><th>效率</th><th>正确率</th><th>备注</th><th>操作</th>
-            </tr></thead>
-            <tbody>${filterTasksByView(allMonthTasks, 'month').map(t => {
-        const visibleQty = visibleTaskQuantity(t);
-        const visibleUnit = visibleTaskQuantityUnit(t);
-        const rate = visibleQty && t.minutes ? (visibleQty / Number(t.minutes)).toFixed(2) : null;
-        const actColor = getActColor(t.activityType);
-        return `<tr>
-              <td class="fw-mono" style="white-space:nowrap;cursor:pointer;color:var(--hp)" onclick="state.selectedDate='${t._date}';showTab('day')">${formatShort(t._date)}</td>
-              <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtmlApp(t.name)}">${escHtmlApp(t.name)}</td>
-              <td><span class="badge" style="background:${actColor.color}22;color:${actColor.color};border:1px solid ${actColor.color}44">${t.activityType || '-'}</span></td>
-              <td class="fw-mono">${fmtMin(Number(t.minutes) || 0, true)}</td>
-              <td class="fw-mono">${visibleQty ? visibleQty + (visibleUnit ? ' ' + visibleUnit : '') : '-'}</td>
-              <td class="fw-mono">${rate ? rate + (visibleUnit ? ' ' + visibleUnit + '/min' : '/min') : '-'}</td>
-              <td class="fw-mono ${t.accuracy >= 80 ? 'c-green' : t.accuracy >= 60 ? 'c-wake' : t.accuracy ? 'c-red' : ''}">${t.accuracy != null && t.accuracy !== '' ? t.accuracy + '%' : '-'}</td>
-              <td class="c-muted" style="font-size:11px">${t.note || ''}</td>
-              <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="monthEditTask('${t._date}','${t.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="monthDeleteTask('${t._date}','${t.id}')">删除</button></td>
-            </tr>`;
-      }).join('')}</tbody>
-            <tfoot><tr>
-              <td colspan="3">合计</td>
-              <td class="fw-mono">${fmtMin(filterTasksByView(allMonthTasks, 'month').reduce((s, t) => s + (Number(t.minutes) || 0), 0), true)}</td>
-              <td colspan="5"></td>
-            </tr></tfoot>
-          </table>
-        </div>`}
-    </div>
-
-    <!-- ⏱ 本月专注时段 -->
-    <div class="card entry-table-card" style="margin-top:16px">
-      <div class="card-header">
-        <div><div class="card-title">⏱ 本月专注时段</div><div class="card-sub">共 ${allMonthSessions.length} 段 · 时钟 ${fmtMin(monthSessTotalClock)} · 实际 ${fmtMin(monthSessTotalActual)}</div></div>
-      </div>
-      ${allMonthSessions.length === 0
-      ? '<div class="empty-state"><p>本月暂无专注时段</p></div>'
-      : `<div class="table-wrap" style="max-height:520px">
-          <table>
-            <thead><tr>
-              <th>日期</th><th>类型</th><th>开始</th><th>结束</th>
-              <th class="c-clock">时钟${tipIcon('clock')}</th><th class="c-nominal">名义${tipIcon('nominal')}</th><th class="c-actual">实际${tipIcon('actual')}</th>
-              <th>休息${tipIcon('rest')}</th><th>效率${tipIcon('efficiency')}</th><th>备注</th><th>操作</th>
-            </tr></thead>
-            <tbody>${allMonthSessions.map(sess => {
-        const cl = sessionClock(sess);
-        const isSpec = isUnavailableSession(sess);
-        const isSpecialStudy = isSpecialStudySession(sess);
-        const typeMeta = sessionTypeMeta(sess);
-        const actual = Number(sess.actualMinutes) || 0;
-        const rest = Number(sess.restMinutes) || 0;
-        const eff = (!isSpec && !isSpecialStudy && (cl - rest) > 0) ? Math.round(actual / (cl - rest) * 100) : null;
-        return `<tr${typeMeta.bg ? ` style="background:${typeMeta.bg}"` : ''}>
-              <td class="fw-mono" style="white-space:nowrap;cursor:pointer;color:var(--hp)" onclick="state.selectedDate='${sess._date}';showTab('day')">${formatShort(sess._date)}</td>
-              <td>${isSpec || isSpecialStudy ? `<span style="font-size:10px;background:${typeMeta.color}22;color:${typeMeta.color};padding:1px 6px;border-radius:3px">${escHtmlApp(typeMeta.label)}</span>` : '普通'}</td>
-              <td class="fw-mono">${sess.startTime || '-'}</td><td class="fw-mono">${sess.endTime || '-'}</td>
-              <td class="fw-mono c-clock">${fmtMin(cl, true)}</td>
-              <td class="fw-mono c-nominal">${isSpec || isSpecialStudy ? '-' : fmtMin(Number(sess.nominalMinutes) || 0, true)}</td>
-              <td class="fw-mono c-actual">${isSpec ? '-' : fmtMin(actual, true)}</td>
-              <td class="fw-mono">${isSpec || isSpecialStudy ? '-' : fmtMin(rest, true)}</td>
-              <td class="fw-mono ${eff >= 80 ? 'c-green' : eff >= 60 ? 'c-wake' : eff != null ? 'c-red' : ''}">${eff != null ? eff + '%' : '-'}</td>
-              <td class="c-muted" style="font-size:11px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${sess.note || ''}</td>
-              <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="monthEditSession('${sess._date}','${sess.id}')" style="margin-right:4px">编辑</button><button class="btn btn-danger btn-sm" onclick="monthDeleteSession('${sess._date}','${sess.id}')">删除</button></td>
-            </tr>`;
-      }).join('')}</tbody>
-          </table>
-        </div>`}
-    </div>
-  `;
-
-  const labels = dayStats.map(d => formatShort(d.dateStr));
-  const monthStatusMeta = {
-    normal: { symbol: '', label: '', color: '', background: '' },
-    special: { symbol: '◆', label: '特殊天', color: '#b388ff', background: 'rgba(179,136,255,.5)', rank: 1 },
-    excluded: { symbol: '▲', label: '不参与评分', color: '#ffb74d', background: 'rgba(255,183,77,.5)', rank: 2 },
-    'special-excluded': { symbol: '★', label: '特殊天且不参与评分', color: '#ef9a9a', background: 'rgba(239,154,154,.55)', rank: 3 },
-  };
-  const monthMetaAt = index => monthStatusMeta[monthDayStatuses[index]] || monthStatusMeta.normal;
-  const monthSegmentMeta = context => {
-    const first = monthMetaAt(context.p0DataIndex);
-    const second = monthMetaAt(context.p1DataIndex);
-    return (first.rank || 0) >= (second.rank || 0) ? first : second;
-  };
-  const monthTrendAccent = baseColor => ({
-    pointRadius: monthDayStatuses.map(status => status === 'normal' ? 2 : 4),
-    pointStyle: monthDayStatuses.map(status =>
-      status === 'special-excluded' ? 'star' : status === 'excluded' ? 'triangle' : status === 'special' ? 'rectRot' : 'circle'),
-    pointBackgroundColor: monthDayStatuses.map((status, index) => monthMetaAt(index).color || baseColor),
-    pointBorderColor: monthDayStatuses.map((status, index) => monthMetaAt(index).color || baseColor),
-    segment: {
-      borderColor: context => monthSegmentMeta(context).color || baseColor,
-    },
-  });
-  const monthXAxisTicks = () => ({
-    color: context => monthMetaAt(context.index).color || '#6b7a9e',
-    callback: (value, index) => {
-      const meta = monthMetaAt(index);
-      return `${meta.symbol ? `${meta.symbol} ` : ''}${labels[index]}`;
-    },
-    maxRotation: 45,
-  });
-  mkChart('monthThreeChart', {
-    type: 'line', data: {
-      labels, datasets: [
-        {
-          label: '时钟',
-          data: dayStats.map(d => +(d.clockMin / 60).toFixed(2)),
-          borderColor: '#80deea',
-          backgroundColor: 'rgba(128,222,234,.12)',
-          borderWidth: 1.5,
-          borderDash: [4, 4],
-          ...monthTrendAccent('#80deea'),
+  if (buckets.length) {
+    const overviewTaskDates = buckets.map(bucket => bucket.key);
+    const overviewTaskValues = buckets.map(bucket => Number((bucket.totals.taskMin / 60).toFixed(2)));
+    const taskDurationColor = getChartSeriesColor('taskDuration');
+    mkChart('overviewTaskChart', {
+      type: 'line',
+      data: {
+        labels: buckets.map(bucket => bucket.label),
+        datasets: [{
+          label: rangeChartView('overview', 'task') === 'cumulativeAverage' ? '累计平均任务时长(h)' : '任务时长(h)',
+          data: rangeChartView('overview', 'task') === 'cumulativeAverage'
+            ? cumulativePositiveAverage(overviewTaskValues, overviewTaskDates)
+            : chartMaskRecordedValues(overviewTaskDates, overviewTaskValues),
+          backgroundColor: hexRgba(taskDurationColor, .2),
+          borderColor: taskDurationColor,
+          pointBackgroundColor: taskDurationColor,
+          borderWidth: 2,
+          pointRadius: recordedBuckets.length > 30 ? 1.5 : 3,
+          pointHoverRadius: 5,
           tension: .3,
-          fill: 'origin',
-          spanGaps: false
-        },
-        { label: '有效时钟', data: dayStats.map(d => +(d.effectiveClockMin / 60).toFixed(2)), borderColor: '#80deea', backgroundColor: 'rgba(128,222,234,.18)', borderWidth: 1.5, ...monthTrendAccent('#80deea'), tension: .3, fill: 'origin', spanGaps: false },
-        { label: '名义', data: dayStats.map(d => +(d.nominalMin / 60).toFixed(2)), borderColor: '#4fc3f7', backgroundColor: 'rgba(79,195,247,.18)', borderWidth: 1.5, ...monthTrendAccent('#4fc3f7'), tension: .3, fill: 'origin', spanGaps: false },
-        { label: '实际', data: dayStats.map(d => +(d.actualMin / 60).toFixed(2)), borderColor: '#69f0ae', backgroundColor: 'rgba(105,240,174,.22)', borderWidth: 2, ...monthTrendAccent('#69f0ae'), tension: .3, fill: 'origin', spanGaps: false },
-      ]
-    },
-    options: {
-      responsive: true,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: { labels: { color: '#6b7a9e' } }, filler: { propagate: false },
-        tooltip: {
-          callbacks: {
-            title: items => {
-              if (!items.length) return '';
-              const index = items[0].dataIndex;
-              const meta = monthMetaAt(index);
-              return meta.label ? `${labels[index]} · ${meta.symbol} ${meta.label}` : labels[index];
-            },
-            label: ctx => {
-              const v = ctx.parsed.y;
-              if (v == null) return null;
-              return `${ctx.dataset.label}: ${fmtMin(Math.round(v * 60), true)}`;
-            }
-          }
-        }
+          fill: true,
+          spanGaps: false,
+        }],
       },
-      scales: {
-        x: {
-          ticks: monthXAxisTicks(),
-          grid: gridCfg
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        onClick: (_event, elements) => {
+          const bucket = buckets[elements[0]?.index];
+          if (bucket?.recorded) overviewOpenDay(bucket.key);
         },
-        y: { ticks: { color: '#6b7a9e', callback: v => v + 'h' }, grid: gridCfg, title: { display: true, text: '小时', color: '#6b7a9e' }, min: 0 }
-      }
-    }
-  });
-
-  if (actDataM.length > 0) {
-    mkChart('monthCatChart', {
-      type: 'doughnut',
-      data: { labels: actDataM, datasets: [{ data: actDataM.map(k => mActMin[k]), backgroundColor: actDataM.map(k => getActColor(k).color + 'cc'), borderColor: actDataM.map(k => getActColor(k).color), borderWidth: 1 }] },
-      options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#6b7a9e', boxWidth: 10, padding: 8 } }, tooltip: { callbacks: { label: ctx => `${ctx.label}: ${fmtMin(ctx.raw)}` } } } }
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: {
+            title: contexts => {
+              const bucket = buckets[contexts[0]?.dataIndex];
+              if (!bucket) return '';
+              const meta = dayTypeDisplayMeta(state.data[bucket.key]);
+              return meta.name ? `${bucket.label} · ${meta.symbol} ${meta.name}` : bucket.label;
+            },
+            label: context => `任务时长：${fmtMin(Math.round((Number(context.raw) || 0) * 60), true)}`,
+          } },
+        },
+        scales: {
+          x: { ticks: { color: '#6b7a9e', autoSkip: true, maxTicksLimit: 18, maxRotation: 35 }, grid: { display: false } },
+          y: { beginAtZero: true, ticks: { color: '#6b7a9e', callback: value => `${value}h` }, grid: gridCfg, title: { display: true, text: '任务时长（小时）', color: '#6b7a9e' } },
+        },
+      },
+      plugins: [noRecordRegionPlugin(overviewTaskDates)],
     });
   }
 
-  mkChart('monthActualChart', {
-    type: 'bar', data: {
-      labels, datasets: [
-        {
-          label: '实际专注(h)', data: dayStats.map(d => +(d.actualMin / 60).toFixed(2)),
-          backgroundColor: dayStats.map((d, index) => monthMetaAt(index).background || (d.actualMin >= 480 ? 'rgba(105,240,174,.5)' : d.actualMin >= 300 ? 'rgba(79,195,247,.4)' : d.actualMin > 0 ? 'rgba(255,183,77,.4)' : 'rgba(120,144,156,.2)')),
-          borderColor: dayStats.map((d, index) => monthMetaAt(index).color || (d.actualMin >= 480 ? '#69f0ae' : d.actualMin >= 300 ? '#4fc3f7' : d.actualMin > 0 ? '#ffb74d' : '#78909c')),
-          borderWidth: 1, borderRadius: 3
-        },
-        { type: 'line', label: '目标8h', data: dayStats.map(() => 8), borderColor: 'rgba(105,240,174,.3)', borderDash: [4, 4], borderWidth: 1, pointRadius: 0 }
-      ]
-    },
-    options: {
-      responsive: true, plugins: { legend: { labels: { color: '#6b7a9e' } } },
-      scales: { x: { ticks: monthXAxisTicks(), grid: gridCfg }, y: { ticks: { color: '#6b7a9e', callback: v => v + 'h' }, grid: gridCfg, min: 0 } }
-    }
-  });
 }
-function monthNav(n) {
-  state.monthView.month += n;
-  if (state.monthView.month < 0) { state.monthView.month = 11; state.monthView.year--; }
-  if (state.monthView.month > 11) { state.monthView.month = 0; state.monthView.year++; }
-  renderMonthOverview();
-}
-function monthGoToday() { const d = new Date(); state.monthView = { year: d.getFullYear(), month: d.getMonth() }; renderMonthOverview(); }
 
 function monthEditTask(dateStr, taskId) {
   state.selectedDate = dateStr;
@@ -4849,389 +6915,746 @@ function monthEditTask(dateStr, taskId) {
   setTimeout(() => editTask(dateStr, taskId), 100);
 }
 
-async function monthDeleteTask(dateStr, taskId) {
-  if (!confirm('确定删除该任务？')) return;
-  const day = getDay(dateStr);
-  day.tasks = day.tasks.filter(t => t.id !== taskId);
-  cacheToLocal();
-  await apiFetch(`/api/data/${dateStr}/tasks/${taskId}`, { method: 'DELETE' });
-  renderMonthOverview();
-  renderHeader();
-}
-
 // ============================================================
 // SLEEP TAB
 // ============================================================
-function renderSleep() {
-  // 作息页保留所有单边记录：只填起床或只填睡觉的日期也必须展示。
-  const dates = getAllDates().filter(d => state.data[d]?.wakeTime || state.data[d]?.sleepTime);
-  const sleepDays = dates.map(dateStr => {
-    const day = state.data[dateStr];
+function sleepRangeMeta() {
+  const shared = analysisRangeMeta('sleep');
+  const allDates = analysisRangeRecordDates('sleep');
+  const relevantSet = new Set(allDates);
+  const dates = shared.analysisDates.filter(date => relevantSet.has(date));
+  return {
+    ...shared,
+    dates,
+    allDates,
+    dayTypeContext: shared.context,
+    firstRecord: allDates[0] || getTodayStr(),
+    lastRecord: allDates[allDates.length - 1] || getTodayStr(),
+  };
+}
+
+function sleepNormalizedBedtimeMinute(value) {
+  if (value == null) return null;
+  let adjusted = Number(value);
+  // 兼容旧录入：12:00-12:59 曾被作息页按次日 00:00-00:59 解释。
+  if (adjusted >= 12 * 60 && adjusted < 13 * 60) adjusted -= 12 * 60;
+  return adjusted < 12 * 60 ? adjusted + 1440 : adjusted;
+}
+
+function sleepBuildDays(dates) {
+  return (dates || []).map(dateStr => {
+    const day = state.data[dateStr] || {};
     const wakeMin = parseMin(day.wakeTime);
     const sleepMin = parseMin(day.sleepTime);
     let awakeMin = null;
     if (wakeMin != null && sleepMin != null) {
-      // 修正12小时制输入：如果睡觉时间为12:00-12:59，视为00:00-00:59（次日凌晨）
-      let adjSleepMin = sleepMin;
-      if (adjSleepMin >= 720 && adjSleepMin < 780) adjSleepMin -= 720;
-      awakeMin = adjSleepMin - wakeMin;
+      awakeMin = sleepNormalizedBedtimeMinute(sleepMin) - wakeMin;
       if (awakeMin <= 0) awakeMin += 1440;
     }
-    const nextDate = addDays(dateStr, 1);
-    const nextDay = state.data[nextDate];
-    let sleepDur = null;
-    if (sleepMin != null && nextDay?.wakeTime) {
-      const nextWakeMin = parseMin(nextDay.wakeTime);
-      sleepDur = 1440 - sleepMin + nextWakeMin;
-    }
     const stats = computeDay(dateStr);
-    return { dateStr, wakeTime: day.wakeTime, sleepTime: day.sleepTime, wakeMin, sleepMin, awakeMin, sleepDur, actualMin: stats.actualMin, utilPct: stats.utilPct };
+    return {
+      dateStr,
+      wakeTime: day.wakeTime || '',
+      sleepTime: day.sleepTime || '',
+      wakeNote: String(day.wakeNote || ''),
+      sleepNote: String(day.sleepNote || ''),
+      wakeMin,
+      sleepMin,
+      awakeMin,
+      actualMin: stats.actualMin,
+      unavailableMin: stats.unavailableMin,
+      utilPct: stats.utilPct,
+      dayType: day.dayType || '',
+      excludeFromRating: Boolean(day.dayType && day.excludeFromRating),
+    };
   });
+}
 
-  // 一个图表点代表“一晚”：前一日记录的睡觉时间 + 次日记录的起床时间。
-  // 以起床日期作为横轴日期，避免把同一天早晨起床和当天深夜睡觉误画成一个睡眠周期。
-  const cycleByWakeDate = new Map();
-  function ensureSleepCycle(wakeDate) {
-    if (!cycleByWakeDate.has(wakeDate)) {
-      cycleByWakeDate.set(wakeDate, {
-        wakeDate,
-        sleepDate: addDays(wakeDate, -1),
-        wakeTime: '',
-        sleepTime: '',
-        wakeMin: null,
-        sleepMin: null,
-      });
+function sleepBuildCycles(dates, preserveDateAxis = false) {
+  const cycles = new Map();
+  const ensure = wakeDate => {
+    if (!cycles.has(wakeDate)) {
+      cycles.set(wakeDate, { wakeDate, sleepDate: addDays(wakeDate, -1), wakeTime: '', sleepTime: '', wakeMin: null, sleepMin: null });
     }
-    return cycleByWakeDate.get(wakeDate);
-  }
-  dates.forEach(dateStr => {
+    return cycles.get(wakeDate);
+  };
+  if (preserveDateAxis) (dates || []).forEach(dateStr => ensure(dateStr));
+  (dates || []).forEach(dateStr => {
     const day = state.data[dateStr] || {};
     if (day.wakeTime) {
-      const cycle = ensureSleepCycle(dateStr);
+      const cycle = ensure(dateStr);
       cycle.wakeTime = day.wakeTime;
       cycle.wakeMin = parseMin(day.wakeTime);
     }
     if (day.sleepTime) {
-      const cycle = ensureSleepCycle(addDays(dateStr, 1));
+      const cycle = ensure(addDays(dateStr, 1));
       cycle.sleepTime = day.sleepTime;
       cycle.sleepMin = parseMin(day.sleepTime);
       cycle.sleepDate = dateStr;
     }
   });
-  const sleepCycles = Array.from(cycleByWakeDate.values())
-    .sort((a, b) => a.wakeDate.localeCompare(b.wakeDate));
+  return [...cycles.values()].sort((a, b) => a.wakeDate.localeCompare(b.wakeDate));
+}
 
-  document.getElementById('tab-sleep').innerHTML = `
-    <div class="mini-grid" style="margin-bottom:16px">
-      <div class="mini-card"><div class="lbl">记录天数</div><div class="val c-hp">${sleepDays.length}</div></div>
-      <div class="mini-card"><div class="lbl">平均起床</div><div class="val c-wake">${sleepDays.length ? avgTime(sleepDays.map(d => d.wakeMin).filter(x => x != null)) : '-'}</div></div>
-      <div class="mini-card"><div class="lbl">平均睡觉</div><div class="val c-sleep">${sleepDays.length ? avgTime(sleepDays.map(d => d.sleepMin).filter(x => x != null), 18 * 60) : '-'}</div></div>
-      <div class="mini-card"><div class="lbl">平均清醒</div><div class="val" style="color:var(--muted)">${sleepDays.filter(d => d.awakeMin != null).length ? fmtMin(Math.round(sleepDays.filter(d => d.awakeMin != null).reduce((s, d) => s + d.awakeMin, 0) / sleepDays.filter(d => d.awakeMin != null).length)) : '-'}</div></div>
-      <div class="mini-card"><div class="lbl">平均不可用占比</div><div class="val c-pol">${sleepDays.filter(d => d.utilPct != null).length ? Math.round(sleepDays.filter(d => d.utilPct != null).reduce((s, d) => s + d.utilPct, 0) / sleepDays.filter(d => d.utilPct != null).length) + '%' : '-'}</div></div>
-    </div>
+function sleepClockLabel(minutes) {
+  const normalized = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(normalized / 60)).padStart(2, '0')}:${String(normalized % 60).padStart(2, '0')}`;
+}
 
-    <div class="chart-grid">
-      <div class="chart-card full">
-        <div class="chart-title">每晚睡眠与次日起床趋势</div>
-        <div class="chart-sub">横轴按起床日期归属 · 紫线=前一晚睡觉 · 黄线=次日起床 · 半透明柱=完整睡眠区间 · 单边记录仍会显示</div>
-        <canvas id="sleepTimelineChart" height="120"></canvas>
-      </div>
-      <div class="chart-card">
-        <div class="chart-title">起床时间分布</div>
-        <div class="chart-sub">各时段起床次数</div>
-        <canvas id="wakeDistChart" height="200"></canvas>
-      </div>
-      <div class="chart-card">
-        <div class="chart-title">清醒时长 vs 学习时长</div>
-        <div class="chart-sub">灰柱=清醒 · 蓝柱=实际专注 · 橙线=不可用时间占比%</div>
-        <canvas id="awakeStudyChart" height="200"></canvas>
-      </div>
-      <div class="chart-card full">
-        <div class="chart-title">作息数据明细</div>
-        <div class="chart-sub">包含起床/睡觉/清醒/学习/不可用时间占比</div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr>
-              <th>日期</th><th class="c-wake">起床</th><th class="c-sleep">睡觉</th>
-              <th>清醒时长${tipIcon('awake')}</th><th class="c-actual">学习时长${tipIcon('actual')}</th><th>不可用占比${tipIcon('util')}</th><th>评价</th>
-            </tr></thead>
-            <tbody>
-              ${sleepDays.map(d => {
-    const wakeClass = d.wakeMin != null ? (d.wakeMin <= 7 * 60 ? 'c-green' : d.wakeMin <= 8 * 60 ? 'c-wake' : 'c-red') : '';
-    const sleepClass = d.sleepMin != null ? (d.sleepMin <= 0 || d.sleepMin >= 23 * 60 ? 'c-green' : d.sleepMin <= 0.5 * 60 || d.sleepMin >= 22.5 * 60 ? 'c-wake' : 'c-red') : '';
-    return `<tr>
-                  <td class="fw-mono">${formatShort(d.dateStr)}</td>
-                  <td class="fw-mono ${wakeClass}">${d.wakeTime || '-'}</td>
-                  <td class="fw-mono ${sleepClass}">${d.sleepTime || '-'}</td>
-                  <td class="fw-mono">${fmtMin(d.awakeMin)}</td>
-                  <td class="fw-mono c-actual">${fmtMin(d.actualMin, true)}</td>
-                  <td class="fw-mono ${d.utilPct == null ? 'c-muted' : d.utilPct <= 30 ? 'c-green' : d.utilPct <= 50 ? 'c-wake' : 'c-red'}">${d.utilPct != null ? d.utilPct + '%' : '-'}</td>
-                  <td>${d.wakeMin != null && d.wakeMin <= 7 * 60 ? '🌅' : d.wakeMin != null && d.wakeMin <= 8 * 60 ? '☀️' : d.wakeMin != null ? '😴' : '-'}</td>
-                </tr>`;
-  }).join('')}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  `;
+const SLEEP_INTERVAL_WIDTHS = { 1: 120, 2: 90, 3: 60, 4: 30, 5: 15 };
 
-  if (sleepDays.length === 0) return;
+function sleepIntervalGranularity(value) {
+  const level = Math.round(Number(value) || 3);
+  return Math.max(1, Math.min(5, level));
+}
 
-  const labels = sleepDays.map(d => formatShort(d.dateStr));
-  // ── 夜间作息趋势图：前一晚睡觉在下，次日起床在上 ──
-  (function () {
-    // 睡觉时间属于前一晚：18:00 后保持原值，凌晨时间顺延到 24:00 以后。
-    const sleepHour = min => {
-      const hour = min / 60;
-      return hour < 18 ? hour + 24 : hour;
-    };
-    // 起床发生在次日，因此统一顺延 24 小时。
-    const wakeHour = min => min / 60 + 24;
-    const sleepData = sleepCycles.map(c => c.sleepMin == null ? null : sleepHour(c.sleepMin));
-    const wakeData = sleepCycles.map(c => c.wakeMin == null ? null : wakeHour(c.wakeMin));
-    const intervalData = sleepCycles.map((c, i) => {
-      if (sleepData[i] == null || wakeData[i] == null || wakeData[i] < sleepData[i]) return null;
-      return [sleepData[i], wakeData[i]];
-    });
-    const wakeColors = sleepCycles.map(c => c.wakeMin == null ? 'transparent' : c.wakeMin <= 7 * 60 ? '#69f0ae' : c.wakeMin <= 8 * 60 ? '#ffd54f' : '#f44336');
-    const sleepColors = sleepCycles.map(c => {
-      if (c.sleepMin == null) return 'transparent';
-      const hour = sleepHour(c.sleepMin);
-      return hour <= 24.01 ? '#69f0ae' : hour <= 24.5 ? '#ffd54f' : '#f44336';
-    });
-    const goalWakeData = sleepCycles.map(() => 31);
-    const goalSleepData = sleepCycles.map(() => 24);
-    const cycleLabels = sleepCycles.map(c => formatShort(c.wakeDate));
+function sleepIntervalDistribution(values, bedtime = false, granularity = 3) {
+  const level = sleepIntervalGranularity(granularity);
+  const width = SLEEP_INTERVAL_WIDTHS[level];
+  const normalized = (values || [])
+    .filter(value => value != null)
+    .map(value => bedtime ? sleepNormalizedBedtimeMinute(value) : sleepNormalizedWakeMinute(value))
+    .sort((a, b) => a - b);
+  if (!normalized.length) return { level, width, values: [], bins: [], items: [], total: 0, average: null, dominant: null };
+  const first = Math.floor(normalized[0] / width) * width;
+  const lastValue = normalized[normalized.length - 1];
+  const end = Math.max(first + width, Math.ceil((lastValue + Number.EPSILON) / width) * width);
+  const binCount = Math.max(1, Math.ceil((end - first) / width));
+  const bins = Array.from({ length: binCount }, (_, index) => {
+    const min = first + index * width;
+    const max = min + width;
+    const count = normalized.filter(value => value >= min && (index === binCount - 1 ? value <= max : value < max)).length;
+    return { min, max, count, label: `${sleepClockLabel(min)}–${sleepClockLabel(max)}` };
+  });
+  const total = normalized.length;
+  const items = bins.map((bin, index) => ({
+    ...bin,
+    pct: total ? bin.count / total * 100 : 0,
+    color: getChartSeriesColor(`distribution${index % 8 + 1}`),
+  }));
+  const dominant = bins.reduce((best, bin) => bin.count > best.count ? bin : best, bins[0]);
+  return {
+    level,
+    width,
+    values: normalized,
+    bins,
+    items,
+    total,
+    average: normalized.reduce((sum, value) => sum + value, 0) / normalized.length,
+    dominant,
+  };
+}
 
-    // 默认展示 21:00 至次日 09:00；异常早睡或晚起数据会自动扩展范围，不会被裁掉。
-    const allY = [...sleepData, ...wakeData].filter(v => v != null);
-    const yMin = Math.floor((Math.min(21, ...allY) - 0.5) * 2) / 2;
-    const yMax = Math.ceil((Math.max(33, ...allY) + 0.5) * 2) / 2;
+function previewSleepIntervalGranularity(kind, value) {
+  if (!['wake', 'bedtime'].includes(kind)) return;
+  const level = sleepIntervalGranularity(value);
+  const output = document.getElementById(`sleep-${kind}-interval-granularity-output`);
+  if (output) output.textContent = `第 ${level} 档 · ${SLEEP_INTERVAL_WIDTHS[level]} 分钟 / 格`;
+}
 
-    /** 将小时数转为 HH:MM 字符串（支持 >24h 自动 mod 24） */
-    function hToTime(h) {
-      const hh = ((Math.floor(h) % 24) + 24) % 24;
-      const mm = Math.round((h - Math.floor(h)) * 60);
-      return String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
+function setSleepIntervalGranularity(kind, value) {
+  const level = sleepIntervalGranularity(value);
+  if (kind === 'wake') state.sleepWakeDistributionGranularity = level;
+  else if (kind === 'bedtime') state.sleepBedtimeDistributionGranularity = level;
+  else return;
+  renderSleep();
+}
+
+function switchSleepDistributionView(kind, view) {
+  if (!['wake', 'bedtime'].includes(kind) || !['pie', 'interval'].includes(view)) return;
+  if (kind === 'wake') state.sleepWakeDistributionView = view;
+  else state.sleepBedtimeDistributionView = view;
+  renderSleep();
+}
+
+function sleepCumulativeUtilSeries(days) {
+  let totalUnavailable = 0;
+  let totalAwake = 0;
+  return (days || []).map(day => {
+    const recorded = chartDateStatus(day.dateStr) === 'recorded';
+    const valid = day.awakeMin > 0 && day.unavailableMin != null;
+    if (valid) {
+      totalUnavailable += Math.max(0, Number(day.unavailableMin) || 0);
+      totalAwake += Number(day.awakeMin) || 0;
     }
+    return {
+      dateStr: day.dateStr,
+      label: formatShort(day.dateStr),
+      daily: recorded && valid ? Number((Math.max(0, Number(day.unavailableMin) || 0) / day.awakeMin * 100).toFixed(2)) : null,
+      cumulative: recorded && totalAwake > 0 ? Number((totalUnavailable / totalAwake * 100).toFixed(2)) : null,
+    };
+  });
+}
 
-    mkChart('sleepTimelineChart', {
+function sleepCumulativeAverageSeries(days) {
+  let totalAwake = 0;
+  let totalActual = 0;
+  let validDays = 0;
+  return (days || []).map(day => {
+    const recorded = chartDateStatus(day.dateStr) === 'recorded';
+    if (day.awakeMin > 0) {
+      totalAwake += Number(day.awakeMin) || 0;
+      totalActual += Math.max(0, Number(day.actualMin) || 0);
+      validDays += 1;
+    }
+    return {
+      label: formatShort(day.dateStr),
+      dateStr: day.dateStr,
+      awakeAverage: recorded && validDays ? Number((totalAwake / validDays / 60).toFixed(2)) : null,
+      actualAverage: recorded && validDays ? Number((totalActual / validDays / 60).toFixed(2)) : null,
+    };
+  });
+}
+
+function sleepNormalizedWakeMinute(value) {
+  if (value == null) return null;
+  const adjusted = Number(value);
+  return adjusted < 18 * 60 ? adjusted + 1440 : adjusted;
+}
+
+function sleepTimePointStats(values, bedtime = false) {
+  const normalized = (values || [])
+    .filter(value => value != null)
+    .map(value => bedtime ? sleepNormalizedBedtimeMinute(value) : sleepNormalizedWakeMinute(value));
+  return calcStats(normalized);
+}
+
+function sleepCumulativeTimePointSeries(cycles) {
+  let sleepTotal = 0, sleepCount = 0, wakeTotal = 0, wakeCount = 0;
+  return (cycles || []).map(cycle => {
+    if (cycle.sleepMin != null) {
+      sleepTotal += sleepNormalizedBedtimeMinute(cycle.sleepMin);
+      sleepCount += 1;
+    }
+    if (cycle.wakeMin != null) {
+      wakeTotal += sleepNormalizedWakeMinute(cycle.wakeMin);
+      wakeCount += 1;
+    }
+    return {
+      sleep: chartDateStatus(cycle.wakeDate) === 'recorded' && sleepCount ? sleepTotal / sleepCount : null,
+      wake: chartDateStatus(cycle.wakeDate) === 'recorded' && wakeCount ? wakeTotal / wakeCount : null,
+    };
+  });
+}
+
+function sleepCycleDuration(cycle) {
+  if (cycle?.sleepMin == null || cycle?.wakeMin == null) return null;
+  const sleep = sleepNormalizedBedtimeMinute(cycle.sleepMin);
+  let wake = cycle.wakeMin + 1440;
+  if (wake < sleep) wake += 1440;
+  const duration = wake - sleep;
+  return duration > 0 && duration <= 24 * 60 ? duration : null;
+}
+
+function sleepHeroHtml(meta) {
+  return `<section class="sleep-hero">
+    <div class="sleep-hero-copy">
+      <div class="sleep-eyebrow">SLEEP & RHYTHM</div>
+      <h2>作息仪表盘</h2>
+      <p>统一查看睡觉、起床、清醒、实际专注和不可用时间结构。</p>
+    </div>
+    <div class="sleep-range-workspace">${analysisRangePlannerHtml('sleep', meta)}</div>
+  </section>`;
+}
+
+function sleepSummaryHtml(days, cycles) {
+  const wakeMins = days.map(day => day.wakeMin).filter(value => value != null);
+  const sleepMins = days.map(day => day.sleepMin).filter(value => value != null);
+  const wakeStats = sleepTimePointStats(wakeMins);
+  const bedtimeStats = sleepTimePointStats(sleepMins, true);
+  const awakeDays = days.filter(day => day.awakeMin != null);
+  const durations = cycles.map(sleepCycleDuration).filter(value => value != null);
+  const totalActual = days.reduce((sum, day) => sum + (Number(day.actualMin) || 0), 0);
+  const utilDays = days.filter(day => day.awakeMin > 0 && day.unavailableMin != null);
+  const totalAwake = utilDays.reduce((sum, day) => sum + day.awakeMin, 0);
+  const totalUnavailable = utilDays.reduce((sum, day) => sum + Math.max(0, Number(day.unavailableMin) || 0), 0);
+  const weightedUtil = totalAwake > 0 ? Math.round(totalUnavailable / totalAwake * 100) : null;
+  return `<section class="sleep-summary">
+    <div class="sleep-primary-kpis">
+      <div><span>平均起床</span><strong class="c-wake">${wakeStats.n ? sleepClockLabel(wakeStats.mean) : '-'}</strong><small>${wakeStats.n} 条记录 · CV ${fmtCV(wakeStats.cv)} · σ ${wakeStats.n ? fmtMin(Math.round(wakeStats.stdDev), true) : '-'}</small></div>
+      <div><span>平均睡觉</span><strong class="c-sleep">${bedtimeStats.n ? sleepClockLabel(bedtimeStats.mean) : '-'}</strong><small>${bedtimeStats.n} 条记录 · CV ${fmtCV(bedtimeStats.cv)} · σ ${bedtimeStats.n ? fmtMin(Math.round(bedtimeStats.stdDev), true) : '-'}</small></div>
+      <div><span>平均睡眠时长</span><strong>${durations.length ? fmtMin(Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length)) : '-'}</strong><small>${durations.length} 个完整睡眠周期</small></div>
+    </div>
+    <div class="sleep-secondary-kpis">
+      <div><span>记录天数</span><b>${days.length}</b></div>
+      <div><span>平均清醒</span><b>${awakeDays.length ? fmtMin(Math.round(awakeDays.reduce((sum, day) => sum + day.awakeMin, 0) / awakeDays.length)) : '-'}</b></div>
+      <div><span>平均实际专注</span><b>${days.length ? fmtMin(Math.round(totalActual / days.length), true) : '-'}</b></div>
+      <div><span>平均不可用占比</span><b>${weightedUtil == null ? '-' : `${weightedUtil}%`}</b></div>
+    </div>
+  </section>`;
+}
+
+function sleepDistributionHtml(kind, title, subtitle, chartId, distribution, view) {
+  if (!distribution.items.length) {
+    return `<article class="sleep-distribution-panel"><div class="sleep-panel-head"><div><h3>${title}</h3><p>${subtitle}</p></div></div><div class="sleep-panel-empty">当前范围没有可用记录</div></article>`;
+  }
+  const outputId = `sleep-${kind}-interval-granularity-output`;
+  return `<article class="sleep-distribution-panel">
+    <div class="sleep-panel-head"><div><h3>${title}</h3><p>${subtitle}</p></div><span>${distribution.total} 次</span></div>
+    <div class="task-distribution-controls" style="margin-top:12px">
+      <div class="task-distribution-scale-head"><span>区间精细度</span><output id="${outputId}">第 ${distribution.level} 档 · ${distribution.width} 分钟 / 格</output></div>
+      <input type="range" min="1" max="5" step="1" value="${distribution.level}" aria-label="${title}区间精细度" oninput="previewSleepIntervalGranularity('${kind}',this.value)" onchange="setSleepIntervalGranularity('${kind}',this.value)">
+      <div class="task-distribution-scale-labels"><span>宽泛 · 120分钟</span><span>精细 · 15分钟</span></div>
+      <div class="sleep-util-tabs">
+        <button type="button" class="${view === 'pie' ? 'active' : ''}" onclick="switchSleepDistributionView('${kind}','pie')">饼图</button>
+        <button type="button" class="${view === 'interval' ? 'active' : ''}" onclick="switchSleepDistributionView('${kind}','interval')">区间分布图</button>
+      </div>
+    </div>
+    ${view === 'pie' ? `<div class="sleep-distribution-body">
+      <div class="sleep-doughnut-stage"><canvas id="${chartId}"></canvas></div>
+      <div class="sleep-distribution-legend">${distribution.items.map(item => `<div><i style="--legend-color:${item.color}"></i><b>${item.label}</b><span>${item.count} 次 · ${item.pct.toFixed(1)}%</span></div>`).join('')}</div>
+    </div>` : `<div class="task-distribution-chart-head"><span><b>${title}</b></span><small>平均 ${sleepClockLabel(distribution.average)} · 最集中于 ${distribution.dominant.label}</small></div><div class="task-distribution-chart-stage"><canvas id="${chartId}"></canvas></div>`}
+  </article>`;
+}
+
+function sleepDetailHtml(days, meta) {
+  const completeCount = days.filter(day => day.wakeMin != null && day.sleepMin != null).length;
+  return `<details class="sleep-detail-panel">
+    <summary><span><b>作息数据明细</b><small>${meta.start} 至 ${meta.end}</small></span><span>${days.length} 天 · ${completeCount} 天完整作息</span></summary>
+    <div class="sleep-detail-table-wrap"><table class="sleep-detail-table" data-sort-table="sleep-detail">
+      <thead><tr>${sortableTableHeaderHtml('sleep-detail', 'date', '日期', 'date')}${sortableTableHeaderHtml('sleep-detail', 'wake', '起床', 'time', 'c-wake')}<th>起床备注</th>${sortableTableHeaderHtml('sleep-detail', 'sleep', '睡觉', 'time', 'c-sleep')}<th>睡觉备注</th>${sortableTableHeaderHtml('sleep-detail', 'awake', '清醒时长')}${sortableTableHeaderHtml('sleep-detail', 'actual', '实际专注', 'number', 'c-actual')}${sortableTableHeaderHtml('sleep-detail', 'util', '不可用占比')}</tr></thead>
+      <tbody>${days.map((day, rowIndex) => `<tr ${sortableTableRowAttrs({
+        date: day.dateStr,
+        wake: day.wakeMin,
+        sleep: day.sleepMin == null ? null : sleepNormalizedBedtimeMinute(day.sleepMin),
+        awake: day.awakeMin,
+        actual: Number(day.actualMin) || 0,
+        util: day.utilPct,
+      }, rowIndex)}>
+        <td class="fw-mono"><button type="button" class="sleep-detail-date-link" onclick="openEntryDate('${day.dateStr}')">${formatShort(day.dateStr)}</button>${day.dayType ? dayTypeBadgeHtml({ dayType: day.dayType, excludeFromRating: day.excludeFromRating }) : ''}</td>
+        <td class="fw-mono c-wake">${day.wakeTime || '-'}</td><td class="c-muted">${day.wakeNote ? escHtmlApp(day.wakeNote) : '-'}</td><td class="fw-mono c-sleep">${day.sleepTime || '-'}</td><td class="c-muted">${day.sleepNote ? escHtmlApp(day.sleepNote) : '-'}</td>
+        <td class="fw-mono">${fmtMin(day.awakeMin)}</td><td class="fw-mono c-actual">${fmtMin(day.actualMin, true)}</td>
+        <td class="fw-mono c-muted">${day.utilPct != null ? `${day.utilPct}%` : '-'}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+  </details>`;
+}
+
+function renderSleep() {
+  ['sleepTimelineChart', 'sleepWakeDistributionChart', 'sleepBedtimeDistributionChart', 'sleepAwakeFocusChart', 'sleepUnavailableChart', 'wakeDistChart', 'awakeStudyChart'].forEach(destroyChart);
+  const rangeMeta = sleepRangeMeta();
+  const dates = rangeMeta.dates;
+  const sleepDays = sleepBuildDays(dates);
+  const sleepChartDays = sleepBuildDays(rangeMeta.analysisDates);
+  const sleepCycles = sleepBuildCycles(dates);
+  const sleepTimelineCycles = sleepBuildCycles(rangeMeta.dayTypeContext.displayDates, true);
+  state.sleepWakeDistributionGranularity = sleepIntervalGranularity(state.sleepWakeDistributionGranularity);
+  state.sleepBedtimeDistributionGranularity = sleepIntervalGranularity(state.sleepBedtimeDistributionGranularity);
+  state.sleepWakeDistributionView = ['pie', 'interval'].includes(state.sleepWakeDistributionView) ? state.sleepWakeDistributionView : 'pie';
+  state.sleepBedtimeDistributionView = ['pie', 'interval'].includes(state.sleepBedtimeDistributionView) ? state.sleepBedtimeDistributionView : 'pie';
+  const wakeDistribution = sleepIntervalDistribution(sleepDays.map(day => day.wakeMin), false, state.sleepWakeDistributionGranularity);
+  const bedtimeDistribution = sleepIntervalDistribution(sleepDays.map(day => day.sleepMin), true, state.sleepBedtimeDistributionGranularity);
+  const utilSeries = sleepCumulativeUtilSeries(sleepChartDays);
+
+  const focusView = ['duration', 'average'].includes(state.sleepFocusView) ? state.sleepFocusView : 'duration';
+  state.sleepFocusView = focusView;
+  const timelineView = ['daily', 'cumulativeAverage'].includes(state.sleepTimelineView) ? state.sleepTimelineView : 'daily';
+  state.sleepTimelineView = timelineView;
+  const utilView = ['daily', 'cumulative'].includes(state.sleepUtilView) ? state.sleepUtilView : 'daily';
+  state.sleepUtilView = utilView;
+  const host = document.getElementById('tab-sleep');
+  host.innerHTML = `<div class="sleep-dashboard">
+    ${sleepHeroHtml(rangeMeta)}
+    ${sleepDays.length ? `
+      ${sleepSummaryHtml(sleepDays, sleepCycles)}
+      <section class="sleep-panel sleep-timeline-panel">
+        <div class="sleep-panel-head"><div><div class="sleep-eyebrow">SLEEP CYCLE</div><h3>睡觉与次日起床时间轴</h3><p id="sleep-timeline-mode-note">${timelineView === 'daily' ? '按起床日期配对前一晚睡觉记录；时间越晚，位置越靠下。' : '分别显示截至当天已有睡觉与起床记录的累计平均时间点。'}</p></div>
+          <div class="sleep-timeline-tools">
+            <div class="sleep-util-tabs sleep-timeline-tabs"><button type="button" class="${timelineView === 'daily' ? 'active' : ''}" data-sleep-timeline-view="daily" onclick="switchSleepTimelineView('daily')">每日时间</button><button type="button" class="${timelineView === 'cumulativeAverage' ? 'active' : ''}" data-sleep-timeline-view="cumulativeAverage" onclick="switchSleepTimelineView('cumulativeAverage')">累计平均</button></div>
+            <div class="sleep-timeline-legend">
+              <span class="sleep-timeline-count">${sleepTimelineCycles.filter(cycle => cycle.sleepMin != null || cycle.wakeMin != null).length} 个周期点</span>
+              <span class="sleep-timeline-key sleep" style="--sleep-key-color:${getChartSeriesColor('bedtime')}"><i></i>${timelineView === 'daily' ? '睡觉' : '平均睡觉'}</span>
+              <span class="sleep-timeline-key wake" style="--sleep-key-color:${getChartSeriesColor('wake')}"><i></i>${timelineView === 'daily' ? '起床' : '平均起床'}</span>
+              <span class="sleep-timeline-key band" style="--sleep-key-color:${getChartSeriesColor('sleepBand')}"><i></i>${timelineView === 'daily' ? '睡眠区间' : '平均区间'}</span>
+            </div>
+          </div>
+        </div>
+        <div class="sleep-chart-canvas timeline"><canvas id="sleepTimelineChart"></canvas></div>
+      </section>
+      <section class="sleep-distribution-section">
+        <div class="sleep-section-heading"><div><div class="sleep-eyebrow">SCHEDULE DISTRIBUTION</div><h3>作息时间分布</h3></div><p>区间精细度同时控制饼图和区间分布图，可在同一面板内切换视图。</p></div>
+        <div class="sleep-distribution-grid">
+          ${sleepDistributionHtml('wake', '起床时间分布', '按可调时间区间统计起床频次', 'sleepWakeDistributionChart', wakeDistribution, state.sleepWakeDistributionView)}
+          ${sleepDistributionHtml('bedtime', '睡觉时间分布', '跨午夜连续排序后按可调区间统计', 'sleepBedtimeDistributionChart', bedtimeDistribution, state.sleepBedtimeDistributionView)}
+        </div>
+      </section>
+      <section class="sleep-panel">
+        <div class="sleep-panel-head"><div><div class="sleep-eyebrow">AWAKE & FOCUS</div><h3>清醒时长与实际专注</h3><p id="sleep-focus-mode-note">${focusView === 'duration' ? '两条覆盖折线使用相同的小时坐标轴，缺失清醒数据保留断点。' : '分别显示截至当天的累计日均清醒时长与累计日均实际专注时长。'}</p></div>
+          <div class="sleep-util-tabs sleep-focus-tabs">
+            <button type="button" class="${focusView === 'duration' ? 'active' : ''}" data-sleep-focus-view="duration" onclick="switchSleepFocusView('duration')">时长趋势</button>
+            <button type="button" class="${focusView === 'average' ? 'active' : ''}" data-sleep-focus-view="average" onclick="switchSleepFocusView('average')">累计平均</button>
+          </div>
+        </div>
+        <div class="sleep-chart-canvas"><canvas id="sleepAwakeFocusChart"></canvas></div>
+      </section>
+      <section class="sleep-panel sleep-util-panel">
+        <div class="sleep-panel-head"><div><div class="sleep-eyebrow">UNAVAILABLE RATIO</div><h3>不可用时间占比</h3><p id="sleep-util-mode-note">${utilView === 'daily' ? '显示每天不可用时间占清醒时间的比例。' : '显示截至当天的累计不可用分钟 ÷ 累计清醒分钟。'}</p></div>
+          <div class="sleep-util-tabs">
+            <button type="button" class="${utilView === 'daily' ? 'active' : ''}" data-sleep-util-view="daily" onclick="switchSleepUtilView('daily')">单日占比</button>
+            <button type="button" class="${utilView === 'cumulative' ? 'active' : ''}" data-sleep-util-view="cumulative" onclick="switchSleepUtilView('cumulative')">累计占比</button>
+          </div>
+        </div>
+        ${utilSeries.length ? '<div class="sleep-chart-canvas util"><canvas id="sleepUnavailableChart"></canvas></div>' : '<div class="sleep-panel-empty">当前范围没有完整的清醒与不可用时间数据</div>'}
+      </section>
+      ${sleepDetailHtml(sleepDays, rangeMeta)}
+    ` : `<div class="sleep-empty-state"><b>当前范围没有作息记录</b><span>可以切换日期范围，或先在录入页填写起床、睡觉时间。</span></div>`}
+  </div>`;
+
+  if (!sleepDays.length) return;
+  requestAnimationFrame(() => renderSleepCharts({ sleepDays: sleepChartDays, sleepTimelineCycles, wakeDistribution, bedtimeDistribution, utilSeries }));
+  return;
+
+}
+function renderSleepCharts(context) {
+  renderSleepTimelineChart(context.sleepTimelineCycles);
+  renderSleepDistributionChart('sleepWakeDistributionChart', context.wakeDistribution, state.sleepWakeDistributionView, getChartSeriesColor('wake'), '起床次数');
+  renderSleepDistributionChart('sleepBedtimeDistributionChart', context.bedtimeDistribution, state.sleepBedtimeDistributionView, getChartSeriesColor('bedtime'), '睡觉次数');
+  renderSleepAwakeFocusChart(context.sleepDays);
+  renderSleepUnavailableChart(context.utilSeries);
+}
+
+function renderSleepTimelineChart(cycles) {
+  if (!document.getElementById('sleepTimelineChart')) return;
+  const cumulativeAverage = state.sleepTimelineView === 'cumulativeAverage';
+  const cumulative = cumulativeAverage ? sleepCumulativeTimePointSeries(cycles) : null;
+  const sleepData = cumulativeAverage
+    ? cumulative.map(item => item.sleep == null ? null : item.sleep / 60)
+    : cycles.map(cycle => cycle.sleepMin == null ? null : sleepNormalizedBedtimeMinute(cycle.sleepMin) / 60);
+  const wakeData = cumulativeAverage
+    ? cumulative.map(item => item.wake == null ? null : item.wake / 60)
+    : cycles.map(cycle => cycle.wakeMin == null ? null : sleepNormalizedWakeMinute(cycle.wakeMin) / 60);
+  const values = [...sleepData, ...wakeData].filter(value => value != null);
+  const yMin = Math.floor((Math.min(18, ...values) - .5) * 2) / 2;
+  const yMax = Math.ceil((Math.max(33, ...values) + .5) * 2) / 2;
+  const toTime = value => sleepClockLabel(Math.round(value * 60));
+  const bedtimeColor = getChartSeriesColor('bedtime');
+  const wakeColor = getChartSeriesColor('wake');
+  const bandColor = getChartSeriesColor('sleepBand');
+  mkChart('sleepTimelineChart', {
+    type: 'line',
+    data: {
+      labels: cycles.map(cycle => formatShort(cycle.wakeDate)),
+      datasets: [
+        {
+          label: cumulativeAverage ? '累计平均睡觉' : '睡觉',
+          data: sleepData,
+          borderColor: bedtimeColor,
+          backgroundColor: hexRgba(bedtimeColor, .06),
+          pointBackgroundColor: bedtimeColor,
+          pointBorderColor: '#111827',
+          pointBorderWidth: 2,
+          borderWidth: 2.2,
+          pointRadius: cycles.length > 60 ? 2 : 4,
+          pointHoverRadius: 6,
+          tension: .12,
+          fill: false,
+          spanGaps: false,
+        },
+        {
+          label: cumulativeAverage ? '累计平均起床' : '起床',
+          data: wakeData,
+          borderColor: wakeColor,
+          backgroundColor: hexRgba(bandColor, .08),
+          pointBackgroundColor: wakeColor,
+          pointBorderColor: '#111827',
+          pointBorderWidth: 2,
+          borderWidth: 2.2,
+          pointRadius: cycles.length > 60 ? 2 : 4,
+          pointHoverRadius: 6,
+          tension: .12,
+          fill: { target: '-1', above: hexRgba(bandColor, .08), below: hexRgba(bandColor, .08) },
+          spanGaps: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: items => {
+            const cycle = cycles[items[0]?.dataIndex];
+            return cycle ? (cumulativeAverage ? `截至 ${formatShort(cycle.wakeDate)}` : `${formatShort(cycle.sleepDate)} 夜 → ${formatShort(cycle.wakeDate)} 晨`) : '';
+          },
+          label: item => {
+            if (item.raw == null) return null;
+            return `${item.dataset.label}: ${toTime(Number(item.raw))}`;
+          },
+        } },
+      },
+      scales: {
+        x: { ticks: { color: '#6b7a9e', autoSkip: true, autoSkipPadding: 18, maxRotation: 35 }, grid: { display: false }, title: { display: true, text: '起床日期', color: '#6b7a9e' } },
+        y: { min: yMin, max: yMax, reverse: true, ticks: { color: '#7f8fb3', stepSize: 1, callback: toTime }, grid: { color: 'rgba(30,36,56,.72)' }, title: { display: true, text: '时间（越晚越靠下）', color: '#7f8fb3' } },
+      },
+    },
+    plugins: [noRecordRegionPlugin(cycles.map(cycle => cycle.wakeDate))],
+  });
+}
+
+function switchSleepTimelineView(view) {
+  if (!['daily', 'cumulativeAverage'].includes(view)) return;
+  state.sleepTimelineView = view;
+  document.querySelectorAll('[data-sleep-timeline-view]').forEach(button => {
+    button.classList.toggle('active', button.dataset.sleepTimelineView === view);
+  });
+  const note = document.getElementById('sleep-timeline-mode-note');
+  if (note) note.textContent = view === 'daily'
+    ? '按起床日期配对前一晚睡觉记录；时间越晚，位置越靠下。'
+    : '分别显示截至当天已有睡觉与起床记录的累计平均时间点。';
+  const sleepKey = document.querySelector('.sleep-timeline-key.sleep');
+  const wakeKey = document.querySelector('.sleep-timeline-key.wake');
+  const bandKey = document.querySelector('.sleep-timeline-key.band');
+  if (sleepKey) sleepKey.innerHTML = `<i></i>${view === 'daily' ? '睡觉' : '平均睡觉'}`;
+  if (wakeKey) wakeKey.innerHTML = `<i></i>${view === 'daily' ? '起床' : '平均起床'}`;
+  if (bandKey) bandKey.innerHTML = `<i></i>${view === 'daily' ? '睡眠区间' : '平均区间'}`;
+  const rangeMeta = sleepRangeMeta();
+  renderSleepTimelineChart(sleepBuildCycles(rangeMeta.dayTypeContext.displayDates));
+}
+
+function renderSleepDistributionChart(chartId, distribution, view = 'pie', color = '#80deea', label = '次数') {
+  if (!document.getElementById(chartId) || !distribution.items.length) return;
+  if (view === 'interval') {
+    renderSleepIntervalDistributionChart(chartId, distribution, color, label);
+    return;
+  }
+  mkChart(chartId, {
+    type: 'doughnut',
+    data: {
+      labels: distribution.items.map(item => item.label),
+      datasets: [{
+        data: distribution.items.map(item => item.count),
+        backgroundColor: distribution.items.map(item => `${item.color}cc`),
+        borderColor: distribution.items.map(item => item.color),
+        borderWidth: 1.5,
+        hoverOffset: 4,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '64%',
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: context => {
+          const item = distribution.items[context.dataIndex];
+          return `${item.label}: ${item.count} 次（${item.pct.toFixed(1)}%）`;
+        } } },
+      },
+    },
+  });
+}
+
+function renderSleepAwakeFocusChart(days) {
+  if (!document.getElementById('sleepAwakeFocusChart')) return;
+  destroyChart('sleepAwakeFocusChart');
+  const cumulativeAverage = state.sleepFocusView === 'average';
+  const pointRadius = days.length > 60 ? 1.5 : 3.5;
+  const awakeColor = getSystemSeriesColor('awake');
+  const actualColor = getChartSeriesColor('actual');
+  if (cumulativeAverage) {
+    const series = sleepCumulativeAverageSeries(days);
+    mkChart('sleepAwakeFocusChart', {
       type: 'line',
       data: {
-        labels: cycleLabels,
+        labels: series.map(item => item.label),
         datasets: [
-          {
-            type: 'bar',
-            label: '睡眠区间',
-            data: intervalData,
-            backgroundColor: 'rgba(179,136,255,.12)',
-            borderColor: 'rgba(179,136,255,.28)',
-            borderWidth: 1,
-            borderSkipped: false,
-            borderRadius: 5,
-            barThickness: 12,
-            order: 4
-          },
-          {
-            label: '起床', data: wakeData,
-            borderColor: '#ffd54f', backgroundColor: 'rgba(255,213,79,.08)',
-            borderWidth: 2.5, pointRadius: 6, pointBackgroundColor: wakeColors,
-            tension: .3, fill: false, spanGaps: false, order: 1
-          },
-          {
-            label: '睡觉', data: sleepData,
-            borderColor: '#b388ff', backgroundColor: 'rgba(179,136,255,.08)',
-            borderWidth: 2.5, pointRadius: 6, pointBackgroundColor: sleepColors,
-            tension: .3, fill: false, spanGaps: false, order: 1
-          },
-          {
-            label: '目标起床7:00', data: goalWakeData,
-            borderColor: 'rgba(105,240,174,.3)', borderDash: [5, 4],
-            borderWidth: 1, pointRadius: 0, fill: false, order: 2
-          },
-          {
-            label: '目标睡觉0:00', data: goalSleepData,
-            borderColor: 'rgba(179,136,255,.3)', borderDash: [5, 4],
-            borderWidth: 1, pointRadius: 0, fill: false, order: 2
-          },
-        ]
+          { label: '累计日均清醒', data: series.map(item => item.awakeAverage), borderColor: awakeColor, backgroundColor: hexRgba(awakeColor, .1), pointBackgroundColor: awakeColor, borderWidth: 2, pointRadius: series.length > 60 ? 1.5 : 3.5, tension: .2, fill: true },
+          { label: '累计日均实际专注', data: series.map(item => item.actualAverage), borderColor: actualColor, backgroundColor: hexRgba(actualColor, .1), pointBackgroundColor: actualColor, borderWidth: 2.2, pointRadius: series.length > 60 ? 1.5 : 3.5, tension: .2, fill: true },
+        ],
       },
       options: {
         responsive: true,
+        maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
-        plugins: {
-          legend: { labels: { color: '#6b7a9e' } },
-          tooltip: {
-            callbacks: {
-              title: (items) => {
-                if (!items.length) return '';
-                const cycle = sleepCycles[items[0].dataIndex];
-                return cycle ? `${formatShort(cycle.sleepDate)} 夜 → ${formatShort(cycle.wakeDate)} 晨` : '';
-              },
-              label: (item) => {
-                if (item.raw == null) return null;
-                if (item.dataset.label === '睡眠区间' && Array.isArray(item.raw)) {
-                  const duration = Math.round((item.raw[1] - item.raw[0]) * 60);
-                  return `睡眠区间: ${hToTime(item.raw[0])} → ${hToTime(item.raw[1])}（${fmtMin(duration)}）`;
-                }
-                return `${item.dataset.label}: ${hToTime(Number(item.raw))}`;
-              }
-            }
-          }
-        },
-        scales: {
-          x: {
-            ticks: {
-              color: '#6b7a9e',
-              maxRotation: 45,
-              autoSkip: true,
-              maxTicksLimit: 15
-            },
-            grid: gridCfg,
-            title: { display: true, text: '起床日期', color: '#6b7a9e' }
-          },
-          y: {
-            type: 'linear',
-            reverse: false,
-            ticks: {
-              color: '#6b7a9e',
-              stepSize: 1,
-              callback: function (v) { return hToTime(v); }
-            },
-            grid: gridCfg,
-            title: { display: true, text: '时间', color: '#6b7a9e' },
-            min: yMin,
-            max: yMax
-          }
-        }
-      }
+        plugins: { legend: { labels: { color: '#6b7a9e', boxWidth: 10, padding: 12 } }, tooltip: { callbacks: { label: context => `${context.dataset.label}: ${Number(context.parsed.y).toFixed(2)}h` } } },
+        scales: { x: { ticks: { color: '#6b7a9e', autoSkip: true, autoSkipPadding: 18, maxRotation: 35 }, grid: gridCfg }, y: { beginAtZero: true, ticks: { color: '#6b7a9e', callback: value => `${value}h` }, grid: gridCfg, title: { display: true, text: '累计日均时长（小时）', color: '#6b7a9e' } } },
+      },
+      plugins: [noRecordRegionPlugin(series.map(item => item.dateStr))],
     });
-  })();
-
-  const wakeBins = { '7:00前': 0, '7:00-7:59': 0, '8:00-8:59': 0, '9:00-9:59': 0, '10:00+': 0 };
-  sleepDays.forEach(d => {
-    if (d.wakeMin == null) return;
-    const h = d.wakeMin / 60;
-    if (h < 7) wakeBins['7:00前']++;
-    else if (h < 8) wakeBins['7:00-7:59']++;
-    else if (h < 9) wakeBins['8:00-8:59']++;
-    else if (h < 10) wakeBins['9:00-9:59']++;
-    else wakeBins['10:00+']++;
-  });
-  mkChart('wakeDistChart', {
-    type: 'doughnut', data: {
-      labels: Object.keys(wakeBins),
-      datasets: [{ data: Object.values(wakeBins), backgroundColor: ['#69f0aecc', '#69f0ae88', '#ffd54fcc', '#ffb74dcc', '#f44336cc'], borderColor: ['#69f0ae', '#69f0ae', '#ffd54f', '#ffb74d', '#f44336'], borderWidth: 1 }]
-    },
-    options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#6b7a9e', boxWidth: 10, padding: 8 } } } }
-  });
-
-  mkChart('awakeStudyChart', {
-    type: 'bar', data: {
-      labels, datasets: [
-        { label: '清醒时长(h)', data: sleepDays.map(d => d.awakeMin != null ? +(d.awakeMin / 60).toFixed(1) : 0), backgroundColor: 'rgba(120,144,156,.3)', borderColor: '#78909c', borderWidth: 1 },
-        { label: '实际专注(h)', data: sleepDays.map(d => +(d.actualMin / 60).toFixed(1)), backgroundColor: 'rgba(79,195,247,.35)', borderColor: '#4fc3f7', borderWidth: 1 },
-        { type: 'line', label: '不可用占比%', data: sleepDays.map(d => d.utilPct ?? 0), borderColor: '#ffb74d', borderWidth: 2, pointRadius: 4, pointBackgroundColor: sleepDays.map(d => d.utilPct == null ? '#78909c' : d.utilPct <= 30 ? '#69f0ae' : d.utilPct <= 50 ? '#ffd54f' : '#f44336'), tension: .3, yAxisID: 'y1' },
-      ]
+    return;
+  }
+  mkChart('sleepAwakeFocusChart', {
+    type: 'line',
+    data: {
+      labels: days.map(day => formatShort(day.dateStr)),
+      datasets: [
+        { label: '清醒时长', data: days.map(day => day.awakeMin == null ? null : Number((day.awakeMin / 60).toFixed(2))), borderColor: awakeColor, backgroundColor: hexRgba(awakeColor, .12), pointBackgroundColor: awakeColor, borderWidth: 2, pointRadius, tension: .2, fill: true, spanGaps: false },
+        { label: '实际专注', data: days.map(day => chartDateStatus(day.dateStr) === 'recorded' ? Number((day.actualMin / 60).toFixed(2)) : null), borderColor: actualColor, backgroundColor: hexRgba(actualColor, .12), pointBackgroundColor: actualColor, borderWidth: 2.2, pointRadius, tension: .2, fill: true, spanGaps: false },
+      ],
     },
     options: {
-      responsive: true, plugins: { legend: { labels: { color: '#6b7a9e' } } },
-      scales: { x: { ticks: { color: '#6b7a9e', maxRotation: 45 }, grid: gridCfg }, y: { ticks: { color: '#6b7a9e', callback: v => v + 'h' }, grid: gridCfg, position: 'left' }, y1: { ticks: { color: '#ffb74d', callback: v => v + '%' }, grid: { drawOnChartArea: false }, position: 'right', min: 0, max: 100 } }
-    }
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { color: '#6b7a9e', boxWidth: 10, padding: 12 } }, tooltip: { callbacks: { label: context => `${context.dataset.label}: ${context.parsed.y == null ? '-' : `${context.parsed.y.toFixed(2)}h`}` } } },
+      scales: { x: { ticks: { color: '#6b7a9e', autoSkip: true, autoSkipPadding: 18, maxRotation: 35 }, grid: gridCfg }, y: { beginAtZero: true, ticks: { color: '#6b7a9e', callback: value => `${value}h` }, grid: gridCfg, title: { display: true, text: '小时', color: '#6b7a9e' } } },
+    },
+    plugins: [noRecordRegionPlugin(days.map(day => day.dateStr))],
   });
 }
-function avgTime(minutes) {
-  if (!minutes.length) return '-';
-  const wrapStartMin = arguments.length > 1 ? arguments[1] : null;
-  const normalized = wrapStartMin == null
-    ? minutes
-    : minutes.map(value => value < wrapStartMin ? value + 1440 : value);
-  const avg = Math.round(normalized.reduce((s, v) => s + v, 0) / normalized.length) % 1440;
-  return `${Math.floor(avg / 60).toString().padStart(2, '0')}:${(avg % 60).toString().padStart(2, '0')}`;
+
+function switchSleepFocusView(view) {
+  if (!['duration', 'average'].includes(view)) return;
+  state.sleepFocusView = view;
+  document.querySelectorAll('[data-sleep-focus-view]').forEach(button => {
+    button.classList.toggle('active', button.dataset.sleepFocusView === view);
+  });
+  const note = document.getElementById('sleep-focus-mode-note');
+  if (note) note.textContent = view === 'duration'
+    ? '两条覆盖折线使用相同的小时坐标轴，缺失清醒数据保留断点。'
+    : '分别显示截至当天的累计日均清醒时长与累计日均实际专注时长。';
+  renderSleepAwakeFocusChart(sleepBuildDays(sleepRangeMeta().analysisDates));
+}
+
+function renderSleepUnavailableChart(series) {
+  if (!document.getElementById('sleepUnavailableChart') || !series.length) return;
+  destroyChart('sleepUnavailableChart');
+  const cumulative = state.sleepUtilView === 'cumulative';
+  const unavailableColor = getChartSeriesColor('unavailable');
+  mkChart('sleepUnavailableChart', {
+    type: 'line',
+    data: {
+      labels: series.map(item => item.label),
+      datasets: [{
+        label: cumulative ? '累计不可用占比' : '单日不可用占比',
+        data: series.map(item => cumulative ? item.cumulative : item.daily),
+        borderColor: unavailableColor,
+        backgroundColor: hexRgba(unavailableColor, .12),
+        pointBackgroundColor: unavailableColor,
+        borderWidth: 2.2,
+        pointRadius: series.length > 60 ? 1.5 : 3.5,
+        tension: .2,
+        fill: true,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: context => `${context.dataset.label}: ${Number(context.parsed.y).toFixed(2)}%` } } },
+      scales: { x: { ticks: { color: '#6b7a9e', autoSkip: true, autoSkipPadding: 18, maxRotation: 35 }, grid: gridCfg }, y: { beginAtZero: true, min: 0, max: 100, ticks: { color: '#6b7a9e', callback: value => `${value}%` }, grid: gridCfg, title: { display: true, text: '不可用占比 (%)', color: '#6b7a9e' } } },
+    },
+    plugins: [noRecordRegionPlugin(series.map(item => item.dateStr))],
+  });
+}
+
+function switchSleepUtilView(view) {
+  if (!['daily', 'cumulative'].includes(view)) return;
+  state.sleepUtilView = view;
+  document.querySelectorAll('[data-sleep-util-view]').forEach(button => {
+    button.classList.toggle('active', button.dataset.sleepUtilView === view);
+  });
+  const note = document.getElementById('sleep-util-mode-note');
+  if (note) note.textContent = view === 'daily'
+    ? '显示每天不可用时间占清醒时间的比例。'
+    : '显示截至当天的累计不可用分钟 ÷ 累计清醒分钟。';
+  renderSleepUnavailableChart(sleepCumulativeUtilSeries(sleepBuildDays(sleepRangeMeta().analysisDates)));
 }
 
 // ============================================================
 // EXPORT TAB
 // ============================================================
-function renderExport() {
-  const dates = getAllDates();
-  const firstDate = dates.length ? dates[0] : getTodayStr();
-  const lastDate = dates.length ? dates[dates.length - 1] : getTodayStr();
-
-  document.getElementById('tab-export').innerHTML = `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:800px">
-      <div class="card">
-        <div class="card-title" style="margin-bottom:12px">💾 导出数据 (JSON)</div>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:14px">将所有数据导出为 JSON 文件，可保存到 OneDrive</p>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn btn-primary" onclick="downloadJSON()">📥 下载 JSON</button>
-          <button class="btn btn-ghost" onclick="copyJSON()">📋 复制到剪贴板</button>
-        </div>
-        <div style="margin-top:12px;font-family:var(--mono);font-size:11px;color:var(--muted)">
-          记录天数: ${dates.length} 天 · 数据大小: ~${Math.round(JSON.stringify(state.data).length / 1024)} KB
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title" style="margin-bottom:12px">📤 导入数据 (JSON)</div>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:14px">从 JSON 文件导入，可从 OneDrive 选取</p>
-        <div class="import-drop" onclick="document.getElementById('importFile').click()">
-          <div style="font-size:24px">📁</div>
-          <p>点击选择 JSON 文件</p>
-        </div>
-        <input type="file" id="importFile" accept=".json" style="display:none" onchange="importJSON(this)">
-        <p style="font-size:11px;color:var(--dim);margin-top:8px">导入将合并已有数据（相同日期会被覆盖）</p>
-      </div>
-
-      <div class="card">
-        <div class="card-title" style="margin-bottom:12px">🖨️ 打印报告</div>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:14px">选择日期范围打印</p>
-        <div class="form-grid" style="grid-template-columns:1fr 1fr">
-          <div class="form-group"><label>开始日期</label>${editableDateInputHtml('printFrom', firstDate)}</div>
-          <div class="form-group"><label>结束日期</label>${editableDateInputHtml('printTo', lastDate)}</div>
-        </div>
-        <button class="btn btn-primary" style="margin-top:4px" onclick="window.print()">🖨️ 打印/导出PDF</button>
-      </div>
-
-      <div class="card">
-        <div class="card-title" style="margin-bottom:12px">📄 导出 HTML 报告</div>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:14px">生成独立 HTML 文件，内含完整图表，浏览器直接打开即可查看（无需后端）</p>
-        <div class="form-grid" style="grid-template-columns:1fr 1fr">
-          <div class="form-group"><label>开始日期</label>${editableDateInputHtml('htmlFrom', firstDate)}</div>
-          <div class="form-group"><label>结束日期</label>${editableDateInputHtml('htmlTo', lastDate)}</div>
-        </div>
-        <button class="btn btn-success" style="margin-top:4px" onclick="exportHTMLReport()">📄 下载 HTML 报告</button>
-      </div>
-
-
-    </div>
-    <div id="exportStatus" style="margin-top:12px;font-family:var(--mono);font-size:12px;color:var(--pol)"></div>
-  `;
+function exportDataRangeMeta() {
+  const validRanges = ['7d', '30d', '60d', '90d', 'year', 'custom'];
+  const range = validRanges.includes(state.exportDataRange) ? state.exportDataRange : '30d';
+  state.exportDataRange = range;
+  const today = getTodayStr();
+  const allDates = getAllDates();
+  if (!state.exportCustomStart) state.exportCustomStart = allDates[0] || today;
+  if (!state.exportCustomEnd) state.exportCustomEnd = today;
+  let start = addDays(today, -29);
+  let end = today;
+  if (range === '7d') start = addDays(today, -6);
+  else if (range === '60d') start = addDays(today, -59);
+  else if (range === '90d') start = addDays(today, -89);
+  else if (range === 'year') start = `${today.slice(0, 4)}-01-01`;
+  else if (range === 'custom') {
+    start = state.exportCustomStart;
+    end = state.exportCustomEnd;
+  }
+  const dates = allDates.filter(dateStr => dateStr >= start && dateStr <= end);
+  const labels = { '7d': '近7天', '30d': '近30天', '60d': '近60天', '90d': '近90天', year: '本年', custom: '自定义' };
+  return { range, start, end, dates, label: labels[range] };
 }
 
-async function copyJSON() {
-  await navigator.clipboard.writeText(JSON.stringify(state.data, null, 2));
-  document.getElementById('exportStatus').textContent = '✅ 已复制到剪贴板';
+function exportDataPayload(meta = exportDataRangeMeta()) {
+  const dateSet = new Set(meta.dates);
+  const payload = {};
+  Object.entries(state.data).forEach(([key, value]) => {
+    if (key.startsWith('__') || dateSet.has(key)) payload[key] = value;
+  });
+  return payload;
+}
+
+function setExportDataRange(range) {
+  if (!['7d', '30d', '60d', '90d', 'year', 'custom'].includes(range)) return;
+  state.exportDataRange = range;
+  renderExport();
+}
+
+function applyExportCustomRange() {
+  const start = document.getElementById('export_custom_start')?.value || '';
+  const end = document.getElementById('export_custom_end')?.value || '';
+  if (!start || !end) {
+    alert('请选择完整的开始日期和结束日期。');
+    return;
+  }
+  if (start > end) {
+    alert('开始日期不能晚于结束日期。');
+    return;
+  }
+  state.exportCustomStart = start;
+  state.exportCustomEnd = end;
+  state.exportDataRange = 'custom';
+  renderExport();
+}
+
+function renderExport() {
+  const meta = exportDataRangeMeta();
+  const payload = exportDataPayload(meta);
+  const payloadSize = Math.max(1, Math.round(JSON.stringify(payload).length / 1024));
+  const rangeOptions = [['7d', '近7天'], ['30d', '近30天'], ['60d', '近60天'], ['90d', '近90天'], ['year', '本年'], ['custom', '自定义']];
+  document.getElementById('tab-export').innerHTML = `<div class="export-data-page">
+    <section class="export-data-hero"><div><span>DATA PORTABILITY</span><h2>数据导入与导出</h2><p>按日期范围导出记录；模板、分类和设置会随文件保留。</p></div><div class="export-data-hero-stat"><span>当前范围</span><b>${meta.label}</b><small>${meta.start} 至 ${meta.end}</small></div></section>
+    <div class="export-data-grid">
+      <section class="card export-data-panel">
+        <div class="export-data-panel-head"><div><div class="card-title">导出数据</div><p>生成可重新导入本记录器的 JSON 文件。</p></div><span>${meta.dates.length} 天</span></div>
+        <div class="export-range-tabs">${rangeOptions.map(([value, label]) => `<button type="button" class="${meta.range === value ? 'active' : ''}" onclick="setExportDataRange('${value}')">${label}</button>`).join('')}</div>
+        ${meta.range === 'custom' ? `<div class="export-custom-range"><label><span>开始日期</span><input type="date" id="export_custom_start" value="${escHtmlApp(state.exportCustomStart)}"></label><label><span>结束日期</span><input type="date" id="export_custom_end" value="${escHtmlApp(state.exportCustomEnd)}"></label><button type="button" class="btn btn-primary btn-sm" onclick="applyExportCustomRange()">应用范围</button></div>` : ''}
+        <div class="export-range-summary"><div><span>记录日期</span><b>${meta.dates.length} 天</b></div><div><span>预计大小</span><b>约 ${payloadSize} KB</b></div><div><span>全局配置</span><b>一并保留</b></div></div>
+        <div class="export-data-actions"><button class="btn btn-primary" onclick="downloadJSON()">下载 JSON</button></div>
+      </section>
+      <section class="card export-data-panel import-panel">
+        <div class="export-data-panel-head"><div><div class="card-title">导入数据</div><p>选择此前导出的 JSON 文件。</p></div></div>
+        <div class="export-import-warning"><b>覆盖规则</b><span>导入会与现有数据合并；相同日期将被导入文件中的整日数据覆盖。真正写入前会再次要求确认。</span></div>
+        <button type="button" class="import-drop" onclick="document.getElementById('importFile').click()"><span>选择 JSON 文件</span><small>解析完成后先显示覆盖确认</small></button>
+        <input type="file" id="importFile" accept=".json,application/json" hidden onchange="importJSON(this)">
+      </section>
+    </div>
+    <div id="exportStatus" class="export-data-status" aria-live="polite"></div>
+  </div>`;
 }
 
 function downloadJSON() {
   try {
-    const content = JSON.stringify(state.data, null, 2);
+    const meta = exportDataRangeMeta();
+    if (!meta.dates.length) { alert('当前日期范围内没有可导出的记录。'); return; }
+    const content = JSON.stringify(exportDataPayload(meta), null, 2);
     const blob = new Blob([content], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
-    const today = getTodayStr();
     const a = document.createElement('a');
     a.href = url;
-    a.download = `学习数据_${today}.json`;
+    a.download = `学习数据_${meta.start}_${meta.end}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    document.getElementById('exportStatus').textContent = '✅ JSON 文件已下载';
+    document.getElementById('exportStatus').textContent = `已下载 ${meta.dates.length} 天的数据。`;
   } catch (e) {
     console.error('下载失败', e);
-    document.getElementById('exportStatus').textContent = '❌ 下载失败: ' + e.message;
+    document.getElementById('exportStatus').textContent = '下载失败：' + e.message;
   }
 }
 
@@ -5241,10 +7664,20 @@ async function importJSON(input) {
   reader.onload = async e => {
     try {
       const imported = JSON.parse(e.target.result);
+      if (!imported || typeof imported !== 'object' || Array.isArray(imported)) throw new Error('INVALID_JSON_ROOT');
+      const importedDates = Object.keys(imported).filter(key => !key.startsWith('__'));
+      const conflictDates = importedDates.filter(dateStr => Object.prototype.hasOwnProperty.call(state.data, dateStr));
+      const importedConfigCount = Object.keys(imported).filter(key => key.startsWith('__')).length;
+      const confirmed = confirm(`即将导入 ${importedDates.length} 天的数据。\n\n其中 ${conflictDates.length} 个相同日期会被导入文件中的整日数据覆盖${importedConfigCount ? `，并更新 ${importedConfigCount} 项模板或设置配置` : ''}。\n此操作会立即保存，是否继续？`);
+      if (!confirmed) {
+        input.value = '';
+        return;
+      }
       Object.assign(state.data, imported);
       if (!Object.prototype.hasOwnProperty.call(imported, '__ordinalUnitList__')) {
         delete state.data.__ordinalUnitList__;
       }
+      migrateSessionTemplateTypes();
       migrateForecastUnitModel();
       migrateTaskTemplateIds();
       state.forecastEditingId = null;
@@ -5253,8 +7686,12 @@ async function importJSON(input) {
       cacheToLocal();
       await apiFetch('/api/data', { method: 'POST', body: JSON.stringify(state.data) });
       renderExport(); renderHeader();
-      document.getElementById('exportStatus').textContent = `✅ 导入成功！合并了 ${Object.keys(imported).length} 天的数据`;
-    } catch { alert('JSON 格式错误，请检查文件'); }
+      document.getElementById('exportStatus').textContent = `导入完成：${importedDates.length} 天，覆盖 ${conflictDates.length} 个相同日期。`;
+      input.value = '';
+    } catch {
+      input.value = '';
+      alert('JSON 格式错误，请检查文件。');
+    }
   };
   reader.readAsText(file);
 }
@@ -5292,298 +7729,379 @@ async function clearAllData() {
 }
 
 // ============================================================
-// HTML REPORT EXPORT
-// ============================================================
-function exportHTMLReport() {
-  const fromDate = document.getElementById('htmlFrom')?.value;
-  const toDate = document.getElementById('htmlTo')?.value;
-  if (!fromDate || !toDate) { alert('请选择日期范围'); return; }
-  if (fromDate > toDate) { alert('开始日期不能晚于结束日期'); return; }
-
-  // 收集日期范围内的数据
-  const exportData = {};
-  const allDates = [];
-  const cur = new Date(fromDate);
-  const end = new Date(toDate);
-  while (cur <= end) {
-    const ds = dateToStr(cur);
-    const day = state.data[ds];
-    if (day && ((day.sessions && day.sessions.length) || (day.tasks && day.tasks.length) || day.wakeTime || day.sleepTime)) {
-      exportData[ds] = JSON.parse(JSON.stringify(day));
-    }
-    allDates.push(ds);
-    cur.setDate(cur.getDate() + 1);
-  }
-
-  const datesWithData = Object.keys(exportData).sort();
-  if (datesWithData.length === 0) {
-    alert('所选日期范围内没有数据');
-    return;
-  }
-
-  const dataJSON = JSON.stringify(exportData);
-  const title = fromDate.slice(0, 7) === toDate.slice(0, 7)
-    ? fromDate.slice(0, 4) + '年' + parseInt(fromDate.slice(5, 7)) + '月 学习数据报告'
-    : fromDate + ' — ' + toDate + ' 学习数据报告';
-
-  // 收集活动类别颜色映射
-  const actColorMap = {};
-  const ACT_COLORS_EXPORT = [
-    '#69f0ae', '#4fc3f7', '#ce93d8', '#ffb74d', '#ef9a9a',
-    '#78909c', '#80deea', '#b388ff', '#ffd54f'
-  ];
-  const l1Names = getLevel1Names();
-  l1Names.forEach((name, i) => {
-    actColorMap[name] = ACT_COLORS_EXPORT[i % ACT_COLORS_EXPORT.length];
-  });
-
-  const html = buildReportHTML(title, fromDate, toDate, dataJSON, JSON.stringify(actColorMap));
-
-  // 下载
-  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = title.replace(/\s/g, '_') + '.html';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-
-  const st = document.getElementById('exportStatus');
-  if (st) { st.textContent = '✅ HTML 报告已下载'; st.style.color = 'var(--pol)'; }
-}
-
-function buildReportHTML(title, fromDate, toDate, dataJSON, colorMapJSON) {
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>${title}</title>
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"><\/script>
-<style>
-:root{--bg:#07090f;--bg2:#0d1018;--card:#111520;--card2:#161b2a;--border:#1e2438;--border2:#2a3050;--text:#dce4f5;--muted:#6b7a9e;--dim:#3d4a6a;--hp:#4fc3f7;--pol:#69f0ae;--word:#ce93d8;--thesis:#ffb74d;--code:#ef9a9a;--other:#78909c;--red:#f44336;--green:#66bb6a;--sleep:#b388ff;--wake:#ffd54f;--clock:#80deea;--nominal:#4fc3f7;--actual:#69f0ae;--mono:'Space Mono',monospace;--sans:'Noto Sans SC',sans-serif}
-*{box-sizing:border-box;margin:0;padding:0}html{scroll-behavior:smooth}body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;min-height:100vh;line-height:1.6}
-.header{background:linear-gradient(135deg,#0d1018 0%,#111828 50%,#0d1018 100%);border-bottom:1px solid var(--border);padding:24px 32px 20px;position:relative;overflow:hidden}
-.header::before{content:'';position:absolute;top:-60px;right:-60px;width:300px;height:300px;background:radial-gradient(circle,rgba(79,195,247,.06) 0%,transparent 70%);pointer-events:none}
-.header h1{font-size:22px;font-weight:700;margin-bottom:4px}.header-meta{font-size:12px;color:var(--muted)}
-.period-badge{background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:6px 14px;font-family:var(--mono);font-size:13px;color:var(--hp);font-weight:700}
-.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;padding:16px 32px}
-.stat-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 14px;text-align:center}
-.stat-label{font-size:11px;color:var(--muted);margin-bottom:3px}.stat-value{font-size:20px;font-weight:700;font-family:var(--mono)}.stat-sub{font-size:9px;color:var(--dim);margin-top:2px}
-.tabs-wrapper{display:flex;gap:4px;padding:8px 32px;background:var(--bg2);border-bottom:1px solid var(--border);overflow-x:auto}
-.tab{padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:all .2s;white-space:nowrap;user-select:none}
-.tab:hover{background:var(--card);color:var(--text)}.tab.active{background:var(--card2);color:var(--hp);font-weight:500;border:1px solid var(--border2)}
-.tab-content{display:none;padding:24px 32px}.tab-content.active{display:block}
-.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.chart-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}.chart-card.full{grid-column:1/-1}
-.chart-title{font-size:14px;font-weight:600;margin-bottom:4px}.chart-sub{font-size:11px;color:var(--dim);margin-bottom:12px}
-.mini-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px}
-.mini-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center}
-.mini-card .lbl{font-size:10px;color:var(--muted);margin-bottom:2px}.mini-card .val{font-size:18px;font-weight:700;font-family:var(--mono)}.mini-card .sub{font-size:9px;color:var(--dim);margin-top:2px}
-table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:6px 10px;border:1px solid var(--border);text-align:center;white-space:nowrap}
-th{background:var(--card2);color:var(--muted);font-weight:500;font-size:11px;position:sticky;top:0;z-index:1}td{color:var(--text)}tfoot td{background:var(--card2);font-weight:600}
-.table-wrap{overflow-x:auto;max-height:600px;overflow-y:auto;border-radius:8px;border:1px solid var(--border)}
-.fw-mono{font-family:var(--mono)}.c-green{color:var(--green)}.c-red{color:var(--red)}.c-wake{color:var(--wake)}.c-hp{color:var(--hp)}
-.c-clock{color:var(--clock)}.c-nominal{color:var(--nominal)}.c-actual{color:var(--actual)}.c-muted{color:var(--muted)}
-.dev-pos{color:var(--green)}.dev-neg{color:var(--red)}.dev-zero{color:var(--muted)}
-.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px}
-.card-title{font-size:14px;font-weight:600}.card-sub{font-size:11px;color:var(--dim)}
-.tip-icon{display:inline-block;cursor:help;font-size:12px;color:var(--dim);margin-left:3px;vertical-align:middle;opacity:.7}.tip-icon:hover{opacity:1;color:var(--hp)}
-.global-tip{position:fixed;z-index:9999;max-width:320px;padding:12px 16px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;font-size:12px;line-height:1.6;color:var(--text);white-space:pre-line;box-shadow:0 8px 32px rgba(0,0,0,.5);pointer-events:none;display:none}
-.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:8px}
-.cal-hdr{text-align:center;font-size:11px;color:var(--muted);padding:4px 0;font-weight:500}
-.cal-day{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:6px 4px;text-align:center;font-size:11px;font-family:var(--mono);min-height:48px}
-.cal-day.has-data{border-color:var(--hp);background:rgba(79,195,247,.05)}.cal-day .cal-d{font-weight:600;margin-bottom:2px}.cal-day .cal-v{font-size:10px;color:var(--pol)}
-.generated-note{text-align:center;padding:24px;font-size:11px;color:var(--dim);border-top:1px solid var(--border)}
-@media(max-width:768px){.stats-grid,.mini-grid{grid-template-columns:1fr 1fr}.chart-grid{grid-template-columns:1fr}.tab-content{padding:16px}}
-</style>
-</head>
-<body>
-<div class="header"><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-<div><h1>\u{1F4CA} ${title}</h1><div class="header-meta">数据报告 \xB7 三维时间分析 \xB7 效率可视化 \xB7 只读模式</div></div>
-<div class="period-badge">${fromDate} \u2014 ${toDate}</div></div></div>
-<div class="stats-grid" id="statsGrid"></div>
-<div class="tabs-wrapper">
-  <div class="tab active" onclick="showTab('overview')">\u{1F4CA} 总览</div>
-  <div class="tab" onclick="showTab('calendar')">\u{1F4C6} 日历</div>
-  <div class="tab" onclick="showTab('sessions')">\u23F1 专注时段</div>
-  <div class="tab" onclick="showTab('daily')">\u{1F4CB} 任务记录</div>
-  <div class="tab" onclick="showTab('sessAna')">\u23F1 时段分析</div>
-  <div class="tab" onclick="showTab('taskAna')">\u{1F4DD} 任务分析</div>
-  <div class="tab" onclick="showTab('stacked')">\u{1F4CA} 堆积图</div>
-  <div class="tab" onclick="showTab('sleep')">\u{1F319} 作息</div>
-</div>
-<div class="tab-content active" id="tab-overview"></div>
-<div class="tab-content" id="tab-calendar"></div>
-<div class="tab-content" id="tab-sessions"></div>
-<div class="tab-content" id="tab-daily"></div>
-<div class="tab-content" id="tab-sessAna"></div>
-<div class="tab-content" id="tab-taskAna"></div>
-<div class="tab-content" id="tab-stacked"></div>
-<div class="tab-content" id="tab-sleep"></div>
-<div class="generated-note">此报告由「学习追踪器」自动生成 \xB7 生成时间：${new Date().toLocaleString('zh-CN')}</div>
-<script>
-var DATA=${dataJSON},ACT_COLOR_MAP=${colorMapJSON};
-var GC='rgba(30,36,56,1)',gridCfg={color:GC},cReg={};
-var TIPS={clock:'\u23F1 时钟时长',effectiveClock:'\u23F1 有效时钟=时钟\u2212休息',nominal:'\u{1F4CB} 名义=计划时长',actual:'\u2705 实际=真实专注',efficiency:'\u{1F3AF} 效率=实际/(时钟\u2212休息)',rest:'\u{1F634} 休息',distract:'\u{1F636} 分心=时钟\u2212实际\u2212休息',awake:'\u{1F324} 清醒=睡觉\u2212起床',util:'\u{1F4CA} 不可用时间占比=不可用时长/清醒时长，越低表示可支配时间越多',taskMin:'\u{1F4DD} 任务时长',cv:'\u{1F4CA} CV=\u03C3/\u03BC',stdDev:'\u{1F4CF} \u03C3',stackAwake:'\u{1F324} 清醒',stackTask:'\u{1F4DD} 任务',stackSpecial:'\u{1F538} 特殊',stackRest:'\u{1F634} 休息',stackDistract:'\u{1F636} 分心',stackIdle:'\u2B1C 空闲'};
-function tipIcon(k){var t=TIPS[k];if(!t)return '';return '<span class="tip-icon" data-tip="'+t+'" onmouseenter="showTip(event,this)" onmouseleave="hideTip()" onmousemove="moveTip(event)">\u24D8</span>';}
-function showTip(e,el){var t=document.getElementById('_gTip');if(!t){t=document.createElement('div');t.id='_gTip';t.className='global-tip';document.body.appendChild(t);}t.textContent=el.dataset.tip;t.style.display='block';moveTip(e);}
-function moveTip(e){var t=document.getElementById('_gTip');if(!t||t.style.display==='none')return;t.style.left=Math.min(e.clientX+16,window.innerWidth-300)+'px';t.style.top=Math.min(e.clientY+16,window.innerHeight-120)+'px';}
-function hideTip(){var t=document.getElementById('_gTip');if(t)t.style.display='none';}
-function destroyChart(id){if(cReg[id]){cReg[id].destroy();delete cReg[id];}}
-function mkChart(id,cfg){destroyChart(id);var el=document.getElementById(id);if(!el)return;cReg[id]=new Chart(el,cfg);return cReg[id];}
-function parseMin(t){if(!t)return null;var p=t.split(':').map(Number);return p[0]*60+(p[1]||0);}
-function fmtMin(m,z){if(m==null||(m===0&&!z))return '-';var s=m<0?'-':'',a=Math.abs(m),h=Math.floor(a/60),n=a%60;if(h===0)return s+n+'m';if(n===0)return s+h+'h';return s+h+'h'+n+'m';}
-function fmtHrs(m){return (m/60).toFixed(1)+'h';}
-function sessionClock(s){var a=parseMin(s.startTime),b=parseMin(s.endTime);if(a==null||b==null)return 0;var d=b-a;if(d<0)d+=1440;return d;}
-function devClass(p){if(p==null)return 'c-muted';return p>5?'dev-pos':p<-5?'dev-neg':'dev-zero';}
-function devStr(p){if(p==null)return '-';return(p>=0?'+':'')+p+'%';}
-function fmtShort(ds){var p=ds.split('-').map(Number);return p[1]+'/'+p[2];}
-function getActColor(n){if(!n)return '#78909c';return ACT_COLOR_MAP[n.split(' > ')[0]]||'#78909c';}
-function hexRgba(h,a){if(!h||h[0]!=='#')return 'rgba(120,144,156,'+a+')';return 'rgba('+parseInt(h.slice(1,3),16)+','+parseInt(h.slice(3,5),16)+','+parseInt(h.slice(5,7),16)+','+a+')';}
-function calcS(vals){var v=vals.filter(function(x){return x>0;}),n=v.length;if(!n)return{n:0,mean:0,sd:0,cv:null};var m=v.reduce(function(s,x){return s+x;},0)/n;var vr=v.reduce(function(s,x){return s+Math.pow(x-m,2);},0)/n;var sd=Math.sqrt(vr);return{n:n,mean:m,sd:sd,cv:m>0?(sd/m*100).toFixed(1)+'%':'-'};}
-function fmtCV(s){return s.cv||'-';}
-var SP=['#4fc3f7','#69f0ae','#ce93d8','#ffb74d','#ef9a9a','#80deea','#ffd54f','#a5d6a7','#f48fb1','#90caf9','#b39ddb','#ffcc80','#80cbc4'];
-function computeDay(ds){var day=DATA[ds]||{sessions:[],tasks:[]},ss=day.sessions||[],ts=day.tasks||[];var ck=0,study=0,nm=0,ac=0,sp=0,ssc=0,ssa=0,un=0,rs=0,di=0,span=0;ss.forEach(function(s){var sc=sessionClock(s),actual=Number(s.actualMinutes)||0,rest=Number(s.restMinutes)||0;span+=sc;ck+=sc;if(s.type==='special'){sp+=sc;un+=sc;return;}if(s.type==='special-study'){ssc+=sc;ssa+=actual;study+=actual;ac+=actual;un+=Math.max(0,sc-actual);return;}study+=sc;nm+=Number(s.nominalMinutes)||0;ac+=actual;rs+=rest;di+=Math.max(0,sc-actual-rest);});var tk=ts.reduce(function(s,t){return s+(Number(t.minutes)||0);},0);var wm=parseMin(day.wakeTime),sm=parseMin(day.sleepTime),aw=null;if(wm!=null&&sm!=null){var aj=sm;if(aj>=720&&aj<780)aj-=720;aw=aj-wm;if(aw<=0)aw+=1440;}var dp=aw!=null?Math.max(0,aw-un):null;var ut=(dp&&ac)?Math.round(ac/dp*100):null;var ec=Math.max(0,study-rs);var fe=ec>0?Math.round(ac/ec*100):null;var av=nm>0?Math.round((ac-nm)/nm*100):null;var am={};ts.forEach(function(t){var a=t.activityType||'';am[a]=(am[a]||0)+(Number(t.minutes)||0);});var tm={},spm={},frs=0,fdi=0;ts.forEach(function(t){var a=t.activityType||'';tm[a]=(tm[a]||0)+(Number(t.minutes)||0);});ss.forEach(function(s){var sc=sessionClock(s),actual=Number(s.actualMinutes)||0,rest=Number(s.restMinutes)||0;if(s.type==='special'){spm[s.name||'\u7279\u6B8A']=(spm[s.name||'\u7279\u6B8A']||0)+sc;}else if(s.type==='special-study'){var k=(s.name||'\u7279\u6B8A\u5B66\u4E60')+'\uFF08\u4E0D\u53EF\u7528\u90E8\u5206\uFF09';spm[k]=(spm[k]||0)+Math.max(0,sc-actual);}else{frs+=rest;fdi+=Math.max(0,sc-actual-rest);}});var id=aw!=null?Math.max(0,aw-tk-un-frs-fdi):0;return{clockMin:ck,trackedSpanMin:span,studyClockMin:study,effectiveClockMin:ec,nominalMin:nm,actualMin:ac,restMin:rs,distractMin:di,taskMin:tk,awakeMin:aw,specialMin:sp,specialStudyClockMin:ssc,specialStudyActualMin:ssa,unavailableMin:un,disposableMin:dp,utilPct:ut,actualVsNominal:av,focusEfficiency:fe,actMin:am,taskMap:tm,specialMap:spm,focusRestMin:frs,focusDistractMin:fdi,totalTaskMin:tk,totalSpecialMin:un,idleMin:id,wakeTime:day.wakeTime,sleepTime:day.sleepTime,sessions:ss,tasks:ts};}
-var computeDayBase=computeDay;computeDay=function(ds){var result=computeDayBase(ds);result.utilPct=result.awakeMin!=null&&result.awakeMin>0?Math.round(result.unavailableMin/result.awakeMin*100):null;return result;};
-var TAB_IDS=['overview','calendar','sessions','daily','sessAna','taskAna','stacked','sleep'];
-function showTab(id){TAB_IDS.forEach(function(t){var el=document.getElementById('tab-'+t);if(el)el.classList.toggle('active',t===id);});document.querySelectorAll('.tab').forEach(function(t,i){t.classList.toggle('active',TAB_IDS[i]===id);});}
-document.addEventListener('DOMContentLoaded',function(){
-Chart.defaults.color='#6b7a9e';Chart.defaults.borderColor=GC;Chart.defaults.font.family="'Noto Sans SC',sans-serif";
-var dates=Object.keys(DATA).sort(),dayStats=dates.map(function(ds){return Object.assign({dateStr:ds},computeDay(ds));}),dwd=dayStats.filter(function(d){return d.clockMin>0||d.actualMin>0||d.taskMin>0;}),n=dwd.length||1;
-var tCk=0,tNm=0,tAc=0,tRs=0,tEf=0,tTk=0;dayStats.forEach(function(d){tCk+=d.clockMin;tNm+=d.nominalMin;tAc+=d.actualMin;tRs+=d.restMin;tEf+=d.effectiveClockMin;tTk+=d.taskMin;});
-var fp=tEf>0?Math.round(tAc/tEf*100):null;
-var sCk=calcS(dayStats.map(function(d){return d.clockMin;})),sEf=calcS(dayStats.map(function(d){return d.effectiveClockMin;})),sNm=calcS(dayStats.map(function(d){return d.nominalMin;})),sAc=calcS(dayStats.map(function(d){return d.actualMin;})),sTk=calcS(dayStats.map(function(d){return d.taskMin;}));
-var labels=dates.map(fmtShort);
-document.getElementById('statsGrid').innerHTML='<div class="stat-card"><div class="stat-label">\u8BB0\u5F55\u5929\u6570</div><div class="stat-value" style="color:var(--hp)">'+dwd.length+'</div></div><div class="stat-card"><div class="stat-label">\u603B\u65F6\u949F'+tipIcon('clock')+'</div><div class="stat-value" style="color:var(--clock)">'+fmtHrs(tCk)+'</div><div class="stat-sub">\u4F11\u606F '+fmtMin(tRs)+' \xB7 \u65E5\u5747 '+fmtMin(Math.round(tCk/n))+' \xB7 CV '+fmtCV(sCk)+'</div></div><div class="stat-card"><div class="stat-label">\u603B\u6709\u6548\u65F6\u949F'+tipIcon('effectiveClock')+'</div><div class="stat-value" style="color:var(--clock)">'+fmtHrs(tEf)+'</div><div class="stat-sub">\u65E5\u5747 '+fmtMin(Math.round(tEf/n))+' \xB7 CV '+fmtCV(sEf)+'</div></div><div class="stat-card"><div class="stat-label">\u603B\u540D\u4E49'+tipIcon('nominal')+'</div><div class="stat-value" style="color:var(--nominal)">'+fmtHrs(tNm)+'</div><div class="stat-sub">\u65E5\u5747 '+fmtMin(Math.round(tNm/n))+' \xB7 CV '+fmtCV(sNm)+'</div></div><div class="stat-card"><div class="stat-label">\u603B\u5B9E\u9645'+tipIcon('actual')+'</div><div class="stat-value" style="color:var(--actual)">'+fmtHrs(tAc)+'</div><div class="stat-sub">\u65E5\u5747 '+fmtMin(Math.round(tAc/n))+' \xB7 CV '+fmtCV(sAc)+'</div></div><div class="stat-card"><div class="stat-label">\u603B\u4EFB\u52A1'+tipIcon('taskMin')+'</div><div class="stat-value" style="color:var(--word)">'+fmtHrs(tTk)+'</div><div class="stat-sub">\u65E5\u5747 '+fmtMin(Math.round(tTk/n))+' \xB7 CV '+fmtCV(sTk)+'</div></div><div class="stat-card"><div class="stat-label">\u4E13\u6CE8\u6548\u7387'+tipIcon('efficiency')+'</div><div class="stat-value" style="color:'+(fp>=80?'var(--green)':fp>=60?'var(--wake)':'var(--red)')+'">'+((fp!=null)?fp+'%':'-')+'</div></div>';
-var aAM={};dayStats.forEach(function(d){Object.keys(d.actMin).forEach(function(k){aAM[k]=(aAM[k]||0)+d.actMin[k];});});var aK=Object.keys(aAM).filter(function(k){return aAM[k]>0;}).sort(function(a,b){return aAM[b]-aAM[a];});
-document.getElementById('tab-overview').innerHTML='<div class="chart-grid"><div class="chart-card full"><div class="chart-title">\u6BCF\u65E5\u4E09\u7EF4\u65F6\u95F4\u8D8B\u52BF</div><div class="chart-sub">\u586B\u5145\u6298\u7EBF\u56FE \xB7 \u65F6\u949F\uFF08\u865A\u7EBF\uFF09/ \u6709\u6548\u65F6\u949F / \u540D\u4E49\uFF08\u84DD\uFF09/ \u5B9E\u9645\uFF08\u7EFF\uFF09</div><canvas id="rC1" height="80"></canvas></div><div class="chart-card"><div class="chart-title">\u7C7B\u522B\u65F6\u95F4\u5206\u5E03</div><div class="chart-sub">\u5404\u7C7B\u522B\u7D2F\u8BA1</div><canvas id="rC2" height="200"></canvas></div><div class="chart-card"><div class="chart-title">\u6BCF\u65E5\u4E13\u6CE8\u6548\u7387</div><div class="chart-sub">\u5B9E\u9645/\u6709\u6548\u65F6\u949F %</div><canvas id="rC3" height="200"></canvas></div><div class="chart-card full"><div class="chart-title">\u6BCF\u65E5\u6C47\u603B\u8868</div><div class="table-wrap"><table><thead><tr><th>\u65E5\u671F</th><th>\u8D77\u5E8A</th><th>\u7761\u89C9</th><th class="c-clock">\u65F6\u949F</th><th class="c-clock">\u6709\u6548</th><th>\u4F11\u606F</th><th class="c-nominal">\u540D\u4E49</th><th class="c-actual">\u5B9E\u9645</th><th>\u504F\u5DEE</th><th>\u6548\u7387</th><th>\u5229\u7528\u7387</th></tr></thead><tbody>'+dayStats.map(function(d){return '<tr><td class="fw-mono">'+fmtShort(d.dateStr)+'</td><td class="fw-mono c-wake">'+(d.wakeTime||'-')+'</td><td class="fw-mono" style="color:var(--sleep)">'+(d.sleepTime||'-')+'</td><td class="fw-mono c-clock">'+fmtMin(d.clockMin,true)+'</td><td class="fw-mono c-clock">'+fmtMin(d.effectiveClockMin,true)+'</td><td class="fw-mono">'+fmtMin(d.restMin,true)+'</td><td class="fw-mono c-nominal">'+fmtMin(d.nominalMin,true)+'</td><td class="fw-mono c-actual">'+fmtMin(d.actualMin,true)+'</td><td class="fw-mono '+devClass(d.actualVsNominal)+'">'+devStr(d.actualVsNominal)+'</td><td class="fw-mono '+(d.focusEfficiency>=80?'c-green':d.focusEfficiency>=60?'c-wake':'c-red')+'">'+(d.focusEfficiency!=null?d.focusEfficiency+'%':'-')+'</td><td class="fw-mono '+(d.utilPct>=50?'c-green':d.utilPct>=30?'c-wake':'c-red')+'">'+(d.utilPct!=null?d.utilPct+'%':'-')+'</td></tr>';}).join('')+'</tbody><tfoot><tr><td colspan="3">\u5408\u8BA1/\u65E5\u5747</td><td class="c-clock">'+fmtMin(tCk,true)+'</td><td class="c-clock">'+fmtMin(tEf,true)+'</td><td>'+fmtMin(tRs,true)+'</td><td class="c-nominal">'+fmtMin(tNm,true)+'</td><td class="c-actual">'+fmtMin(tAc,true)+'</td><td colspan="3"></td></tr><tr style="color:var(--dim);font-size:11px"><td colspan="3">\u03C3 / CV</td><td>'+fmtMin(Math.round(sCk.sd))+' / '+fmtCV(sCk)+'</td><td>'+fmtMin(Math.round(sEf.sd))+' / '+fmtCV(sEf)+'</td><td></td><td>'+fmtMin(Math.round(sNm.sd))+' / '+fmtCV(sNm)+'</td><td>'+fmtMin(Math.round(sAc.sd))+' / '+fmtCV(sAc)+'</td><td colspan="3"></td></tr></tfoot></table></div></div></div>';
-mkChart('rC1',{type:'line',data:{labels:labels,datasets:[{label:'\u65F6\u949F',data:dayStats.map(function(d){return +(d.clockMin/60).toFixed(2);}),borderColor:'#80deea',backgroundColor:'rgba(128,222,234,.15)',borderWidth:1.5,borderDash:[4,4],pointRadius:dates.length>14?1:2,tension:.3,fill:'origin'},{label:'\u6709\u6548\u65F6\u949F',data:dayStats.map(function(d){return +(d.effectiveClockMin/60).toFixed(2);}),borderColor:'#80deea',backgroundColor:'rgba(128,222,234,.2)',borderWidth:1.5,pointRadius:dates.length>14?1:3,tension:.3,fill:'origin'},{label:'\u540D\u4E49',data:dayStats.map(function(d){return +(d.nominalMin/60).toFixed(2);}),borderColor:'#4fc3f7',backgroundColor:'rgba(79,195,247,.2)',borderWidth:1.5,pointRadius:dates.length>14?1:3,tension:.3,fill:'origin'},{label:'\u5B9E\u9645',data:dayStats.map(function(d){return +(d.actualMin/60).toFixed(2);}),borderColor:'#69f0ae',backgroundColor:'rgba(105,240,174,.25)',borderWidth:2,pointRadius:dates.length>14?1:3,tension:.3,fill:'origin'}]},options:{responsive:true,interaction:{mode:'index',intersect:false},plugins:{legend:{labels:{color:'#6b7a9e'}},filler:{propagate:false},tooltip:{callbacks:{label:function(c){var v=c.parsed.y;if(!v)return null;return c.dataset.label+': '+fmtMin(Math.round(v*60));}}}},scales:{x:{ticks:{color:'#6b7a9e',maxRotation:dates.length>14?45:0},grid:gridCfg},y:{ticks:{color:'#6b7a9e',callback:function(v){return v+'h';}},grid:gridCfg,min:0}}}});
-if(aK.length>0)mkChart('rC2',{type:'doughnut',data:{labels:aK,datasets:[{data:aK.map(function(k){return aAM[k];}),backgroundColor:aK.map(function(k){return hexRgba(getActColor(k),.75);}),borderWidth:1}]},options:{responsive:true,plugins:{legend:{position:'right',labels:{color:'#6b7a9e',boxWidth:10}},tooltip:{callbacks:{label:function(c){return c.label+': '+fmtMin(c.raw);}}}}}});
-mkChart('rC3',{type:'bar',data:{labels:labels,datasets:[{label:'%',data:dayStats.map(function(d){return d.focusEfficiency||0;}),backgroundColor:dayStats.map(function(d){return(d.focusEfficiency||0)>=80?'rgba(105,240,174,.4)':(d.focusEfficiency||0)>=60?'rgba(255,213,79,.4)':'rgba(244,67,54,.3)';}),borderRadius:3}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#6b7a9e',maxRotation:dates.length>14?45:0},grid:gridCfg},y:{ticks:{color:'#6b7a9e',callback:function(v){return v+'%';}},grid:gridCfg,min:0,max:100}}}});
-var fy=parseInt(dates[0]),fm=parseInt(dates[0].slice(5,7))-1,ly=parseInt(dates[dates.length-1]),lm=parseInt(dates[dates.length-1].slice(5,7))-1;
-var cH='';for(var cy=fy;cy<=ly;cy++){var sm=cy===fy?fm:0,em=cy===ly?lm:11;for(var cm=sm;cm<=em;cm++){cH+='<div class="card"><div class="card-title">'+cy+'\u5E74'+(cm+1)+'\u6708</div><div class="cal-grid"><div class="cal-hdr">\u4E00</div><div class="cal-hdr">\u4E8C</div><div class="cal-hdr">\u4E09</div><div class="cal-hdr">\u56DB</div><div class="cal-hdr">\u4E94</div><div class="cal-hdr">\u516D</div><div class="cal-hdr">\u65E5</div>';var f1=new Date(cy,cm,1),ld=new Date(cy,cm+1,0),sd=f1.getDay();sd=sd===0?6:sd-1;for(var p=0;p<sd;p++)cH+='<div class="cal-day" style="opacity:.1"></div>';for(var di=1;di<=ld.getDate();di++){var dds=cy+'-'+(cm+1<10?'0':'')+(cm+1)+'-'+(di<10?'0':'')+di;var dd=DATA[dds],hd=dd&&((dd.sessions&&dd.sessions.length)||(dd.tasks&&dd.tasks.length)||dd.wakeTime),dS=hd?computeDay(dds):null;cH+='<div class="cal-day'+(hd?' has-data':'')+'"><div class="cal-d">'+di+'</div>';if(dS&&dS.actualMin>0)cH+='<div class="cal-v">'+fmtMin(dS.actualMin)+'</div>';cH+='</div>';}cH+='</div></div>';}}
-document.getElementById('tab-calendar').innerHTML=cH;
-var aS=[];dates.forEach(function(ds){(DATA[ds].sessions||[]).forEach(function(s){aS.push(Object.assign({},s,{_d:ds}));});});var stC=aS.reduce(function(s,x){return s+sessionClock(x);},0),stA=aS.filter(function(x){return x.type!=='special';}).reduce(function(s,x){return s+(Number(x.actualMinutes)||0);},0);
-document.getElementById('tab-sessions').innerHTML='<div class="card"><div class="card-title" style="margin-bottom:8px">\u23F1 \u4E13\u6CE8\u65F6\u6BB5\u660E\u7EC6 <span style="color:var(--muted);font-size:12px">'+aS.length+' \u6BB5 \xB7 \u65F6\u949F '+fmtMin(stC)+' \xB7 \u5B9E\u9645 '+fmtMin(stA)+'</span></div>'+(aS.length===0?'<p style="color:var(--dim)">\u6682\u65E0</p>':'<div class="table-wrap"><table><thead><tr><th>\u65E5\u671F</th><th>\u7C7B\u578B</th><th>\u5F00\u59CB</th><th>\u7ED3\u675F</th><th class="c-clock">\u65F6\u949F</th><th class="c-nominal">\u540D\u4E49</th><th class="c-actual">\u5B9E\u9645</th><th>\u4F11\u606F</th><th>\u6548\u7387</th><th>\u5907\u6CE8</th></tr></thead><tbody>'+aS.map(function(s){var cl=sessionClock(s),sp=s.type==='special',ss=s.type==='special-study',ac=Number(s.actualMinutes)||0,rs=Number(s.restMinutes)||0,ef=(!sp&&(ss?ac:(cl-rs))>0)?Math.round(ac/(ss?ac:(cl-rs))*100):null;var ty=sp?'<span style="font-size:10px;background:rgba(206,147,216,.2);color:#ce93d8;padding:1px 6px;border-radius:3px">'+(s.name||'\u7279\u6B8A')+'</span>':ss?'<span style="font-size:10px;background:rgba(105,240,174,.15);color:#69f0ae;padding:1px 6px;border-radius:3px">\u7279\u6B8A\u5B66\u4E60\xB7'+(s.name||'\u672A\u547D\u540D')+'</span>':'\u666E\u901A';return '<tr'+((sp||ss)?' style="background:rgba(206,147,216,.06)"':'')+'><td class="fw-mono">'+fmtShort(s._d)+'</td><td>'+ty+'</td><td class="fw-mono">'+(s.startTime||'-')+'</td><td class="fw-mono">'+(s.endTime||'-')+'</td><td class="fw-mono c-clock">'+fmtMin(cl,true)+'</td><td class="fw-mono c-nominal">'+((sp||ss)?'-':fmtMin(Number(s.nominalMinutes)||0,true))+'</td><td class="fw-mono c-actual">'+(sp?'-':fmtMin(ac,true))+'</td><td class="fw-mono">'+((sp||ss)?'-':fmtMin(rs,true))+'</td><td class="fw-mono '+(ef>=80?'c-green':ef>=60?'c-wake':ef!=null?'c-red':'')+'">'+(ef!=null?ef+'%':'-')+'</td><td class="c-muted" style="font-size:11px">'+(s.note||'')+'</td></tr>';}).join('')+'</tbody></table></div>')+'</div>';
-var aT=[];dates.forEach(function(ds){(DATA[ds].tasks||[]).forEach(function(t){aT.push(Object.assign({},t,{_d:ds}));});});var tTt=aT.reduce(function(s,t){return s+(Number(t.minutes)||0);},0);
-document.getElementById('tab-daily').innerHTML='<div class="card"><div class="card-title" style="margin-bottom:8px">\u{1F4DD} \u4EFB\u52A1\u8BB0\u5F55 <span style="color:var(--muted);font-size:12px">'+aT.length+' \u6761 \xB7 '+fmtMin(tTt)+'</span></div>'+(aT.length===0?'<p style="color:var(--dim)">\u6682\u65E0</p>':'<div class="table-wrap"><table><thead><tr><th>\u65E5\u671F</th><th>\u540D\u79F0</th><th>\u7C7B\u578B</th><th>\u65F6\u957F</th><th>\u6570\u91CF</th><th>\u6548\u7387</th><th>\u6B63\u786E\u7387</th><th>\u5907\u6CE8</th></tr></thead><tbody>'+aT.map(function(t){var c=getActColor(t.activityType),q=visibleTaskQuantity(t),u=visibleTaskQuantityUnit(t),r=(q&&t.minutes)?(q/Number(t.minutes)).toFixed(2):null;return '<tr><td class="fw-mono">'+fmtShort(t._d)+'</td><td style="max-width:250px;overflow:hidden;text-overflow:ellipsis">'+(t.name||'')+'</td><td><span class="badge" style="background:'+hexRgba(c,.13)+';color:'+c+';border:1px solid '+hexRgba(c,.27)+'">'+(t.activityType||'-')+'</span></td><td class="fw-mono">'+fmtMin(Number(t.minutes)||0,true)+'</td><td class="fw-mono">'+(q?q+(u?' '+u:''):'-')+'</td><td class="fw-mono">'+(r?r+(u?' '+u+'/min':'/min'):'-')+'</td><td class="fw-mono '+(t.accuracy>=80?'c-green':t.accuracy>=60?'c-wake':t.accuracy?'c-red':'')+'">'+(t.accuracy!=null&&t.accuracy!==''?t.accuracy+'%':'-')+'</td><td class="c-muted" style="font-size:11px">'+(t.note||'')+'</td></tr>';}).join('')+'</tbody></table></div>')+'</div>';
-
-
-// ═══ TAB: 时段分析 (interactive) ═══
-var sessCatMap={};var totSC=0,totSCk=0,totSAc=0,totSRs=0;
-dates.forEach(function(ds){var day=DATA[ds]||{};(day.sessions||[]).forEach(function(s){totSC++;var ck=sessionClock(s),nm=Number(s.nominalMinutes)||0,ac=Number(s.actualMinutes)||0,rs=Number(s.restMinutes)||0;var cat=s.type==='special'?(s.name||'\u7279\u6B8A'):s.type==='special-study'?'\u7279\u6B8A\u5B66\u4E60\xB7'+(s.name||'\u672A\u547D\u540D'):'\u666E\u901A\u4E13\u6CE8';totSCk+=ck;totSAc+=ac;totSRs+=rs;if(!sessCatMap[cat])sessCatMap[cat]={};if(!sessCatMap[cat][ds])sessCatMap[cat][ds]={ck:0,nm:0,ac:0,rs:0,ct:0};sessCatMap[cat][ds].ck+=ck;sessCatMap[cat][ds].nm+=nm;sessCatMap[cat][ds].ac+=ac;sessCatMap[cat][ds].rs+=rs;sessCatMap[cat][ds].ct++;});});
-var sessCats=Object.keys(sessCatMap).sort(function(a,b){return a==='\u666E\u901A\u4E13\u6CE8'?-1:b==='\u666E\u901A\u4E13\u6CE8'?1:a.localeCompare(b);});
-var dwS=dates.filter(function(ds){return(DATA[ds].sessions||[]).length>0;}).length;
-var sessEff=(totSCk-totSRs)>0?Math.round(totSAc/(totSCk-totSRs)*100):null;
-var sessCatStats=sessCats.map(function(cat){var ct=0,ck=0,nm=0,ac=0,rs=0;Object.values(sessCatMap[cat]).forEach(function(v){ct+=v.ct;ck+=v.ck;nm+=v.nm;ac+=v.ac;rs+=v.rs;});var isSp=ac===0&&ck>0,met=isSp?ck:ac;var ef=!isSp&&(ck-rs)>0?Math.round(ac/(ck-rs)*100):null;var avg=dwS>0?Math.round(met/dwS):0;var dv=dates.map(function(ds){var d=sessCatMap[cat][ds];return d?(isSp?d.ck:d.ac):0;});var st=calcS(dv);return{cat:cat,ct:ct,ck:ck,nm:nm,ac:ac,rs:rs,ef:ef,isSp:isSp,avgAct:ct>0?Math.round(met/ct):0,avgDay:avg,cv:st.cv};});
-function renderSessAna(filt){
-  var cL,cDS;
-  if(filt&&sessCatMap[filt]){var fd=dates.filter(function(ds){return sessCatMap[filt][ds];});cL=fd.map(fmtShort);var ci=sessCats.indexOf(filt);var hex=filt==='\u666E\u901A\u4E13\u6CE8'?'#69f0ae':SP[ci%SP.length];cDS=[{label:filt,data:fd.map(function(ds){var d=sessCatMap[filt][ds];return +((d.ac||d.ck)/60).toFixed(2);}),borderColor:hex,backgroundColor:hexRgba(hex,.2),borderWidth:2,pointRadius:4,tension:.3,fill:'origin'}];
-  }else{cL=labels;cDS=sessCats.map(function(cat,ci){var hex=cat==='\u666E\u901A\u4E13\u6CE8'?'#69f0ae':SP[ci%SP.length];return{label:cat,data:dates.map(function(ds){var d=sessCatMap[cat][ds];if(!d)return 0;return +((d.ac||d.ck)/60).toFixed(2);}),borderColor:hex,backgroundColor:hexRgba(hex,.2),borderWidth:2,pointRadius:dates.length>14?1:3,tension:.3,fill:'origin'};});}
-  var fS=filt?calcS(dates.map(function(ds){var d=sessCatMap[filt]?sessCatMap[filt][ds]:null;if(!d)return 0;return d.ac||d.ck;})):null;
-  var opts=sessCats.map(function(c){return '<option value="'+c+'"'+(filt===c?' selected':'')+'>'+c+'</option>';}).join('');
-  var cvI=filt&&fS?'<span style="font-size:11px;color:var(--muted)">CV: <b>'+fmtCV(fS)+'</b> (n='+fS.n+')</span>':'';
-  var tbl=sessCatStats.map(function(c){return '<tr><td style="font-weight:500">'+c.cat+'</td><td class="fw-mono">'+c.ct+'</td><td class="fw-mono c-clock">'+fmtMin(c.ck,true)+'</td><td class="fw-mono c-nominal">'+fmtMin(c.nm,true)+'</td><td class="fw-mono c-actual">'+fmtMin(c.ac,true)+'</td><td class="fw-mono">'+fmtMin(c.rs,true)+'</td><td class="fw-mono '+(c.ef>=80?'c-green':c.ef>=60?'c-wake':c.ef!=null?'c-red':'')+'">'+(c.ef!=null?c.ef+'%':'-')+'</td><td class="fw-mono">'+fmtMin(c.avgAct)+'</td><td class="fw-mono c-muted">'+fmtMin(c.avgDay)+'</td><td class="fw-mono">'+(c.cv||'-')+'</td></tr>';}).join('');
-  document.getElementById('tab-sessAna').innerHTML='<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap"><span style="font-size:11px;color:var(--muted)">\u7C7B\u522B\uFF1A</span><select onchange="renderSessAna(this.value)" style="font-size:12px;padding:3px 8px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px"><option value="">\u5168\u90E8 ('+sessCats.length+')</option>'+opts+'</select>'+cvI+'</div><div class="mini-grid" style="margin-bottom:16px"><div class="mini-card"><div class="lbl">\u65F6\u6BB5\u6570</div><div class="val c-hp">'+totSC+'</div><div class="sub">'+dwS+'\u5929</div></div><div class="mini-card"><div class="lbl">\u603B\u5B9E\u9645</div><div class="val c-actual">'+fmtMin(totSAc,true)+'</div><div class="sub">\u65E5\u5747 '+fmtMin(dwS>0?Math.round(totSAc/dwS):0)+'</div></div><div class="mini-card"><div class="lbl">\u603B\u65F6\u949F</div><div class="val c-clock">'+fmtMin(totSCk,true)+'</div></div><div class="mini-card"><div class="lbl">\u6548\u7387</div><div class="val '+(sessEff>=80?'c-green':sessEff>=60?'c-wake':'c-red')+'">'+(sessEff!=null?sessEff+'%':'-')+'</div></div></div><div class="chart-grid"><div class="chart-card full"><div class="chart-title">\u6BCF\u65E5\u4E13\u6CE8\u65F6\u957F'+(filt?'\uFF08'+filt+'\uFF09':'\uFF08\u6309\u7C7B\u522B\uFF09')+'</div><div class="chart-sub">'+(filt?'\u4EC5\u663E\u793A\u6709\u6570\u636E\u7684\u5929':'\u586B\u5145\u6298\u7EBF\u56FE')+'</div><canvas id="rSessTrend" height="100"></canvas></div><div class="chart-card full"><div class="chart-title">\u7C7B\u522B\u6C47\u603B\u660E\u7EC6</div><div class="table-wrap"><table><thead><tr><th>\u7C7B\u522B</th><th>\u65F6\u6BB5\u6570</th><th>\u65F6\u949F</th><th>\u540D\u4E49</th><th>\u5B9E\u9645</th><th>\u4F11\u606F</th><th>\u6548\u7387</th><th>\u6BCF\u6BB5\u5E73\u5747</th><th>\u65E5\u5747</th><th>CV</th></tr></thead><tbody>'+tbl+'</tbody></table></div></div></div>';
-  mkChart('rSessTrend',{type:'line',data:{labels:cL,datasets:cDS},options:{responsive:true,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'bottom',labels:{color:'#6b7a9e',boxWidth:12}},filler:{propagate:false}},scales:{x:{ticks:{color:'#6b7a9e',maxRotation:cL.length>14?45:0},grid:gridCfg},y:{ticks:{color:'#6b7a9e',callback:function(v){return v+'h';}},grid:gridCfg,min:0}}}});
-}
-renderSessAna('');
-window.renderSessAna=renderSessAna;
-
-// ═══ TAB: 任务分析 (interactive) ═══
-function truncAct(s,lv){if(!s)return '\u672A\u5206\u7C7B';var p=s.split(' > ');return p.slice(0,lv).join(' > ');}
-var _tkS={level:1,cf:'',es:'linear',ey:'',ecf:''};
-function tkSetLevel(l){_tkS.level=l;_tkS.cf='';renderTaskAna();}
-function tkSetCF(v){_tkS.cf=v;renderTaskAna();}
-function tkSetES(v){_tkS.es=v;renderTaskAna();}
-function tkSetEY(v){_tkS.ey=v;renderTaskAna();}
-function tkSetECF(v){_tkS.ecf=v;renderTaskAna();}
-function renderTaskAna(){
-  var lv=_tkS.level,cf=_tkS.cf,es=_tkS.es,ey=_tkS.ey,ecf=_tkS.ecf;
-  var cm={},totC=0,totM=0;
-  dates.forEach(function(ds){(DATA[ds].tasks||[]).forEach(function(t){totC++;var mn=Number(t.minutes)||0,qt=visibleTaskQuantity(t),qu=visibleTaskQuantityUnit(t);totM+=mn;var cat=truncAct(t.activityType,lv);if(!cm[cat])cm[cat]={};if(!cm[cat][ds])cm[cat][ds]={mn:0,qt:0,ct:0,u:''};cm[cat][ds].mn+=mn;cm[cat][ds].qt+=qt;cm[cat][ds].ct++;if(qu)cm[cat][ds].u=qu;});});
-  var cats=Object.keys(cm).sort(),dwT2=dates.filter(function(ds){return(DATA[ds].tasks||[]).length>0;}).length;
-  var cL2,cDS2;
-  if(cf&&cm[cf]){var fd2=dates.filter(function(ds){return cm[cf][ds];});cL2=fd2.map(fmtShort);var hx=lv===1?getActColor(cf):SP[cats.indexOf(cf)%SP.length];cDS2=[{label:cf,data:fd2.map(function(ds){return +(cm[cf][ds].mn/60).toFixed(2);}),borderColor:hx,borderWidth:2,pointRadius:4,tension:.3,fill:false}];
-  }else{cL2=labels;cDS2=cats.map(function(cat,ci){var hx=lv===1?getActColor(cat):SP[ci%SP.length];return{label:cat,data:dates.map(function(ds){return +((cm[cat]&&cm[cat][ds]?cm[cat][ds].mn:0)/60).toFixed(2);}),borderColor:hx,borderWidth:2,pointRadius:dates.length>14?1:3,tension:.3,fill:false};});}
-  var cs2=cats.map(function(cat){var ct=0,mn=0,qt=0,u='';Object.values(cm[cat]).forEach(function(v){ct+=v.ct;mn+=v.mn;qt+=v.qt;if(v.u)u=v.u;});var st=calcS(dates.map(function(ds){return cm[cat]&&cm[cat][ds]?cm[cat][ds].mn:0;}));return{cat:cat,ct:ct,mn:mn,qt:qt,u:u,avgMn:ct>0?Math.round(mn/ct):0,avgD:dwT2>0?Math.round(mn/dwT2):0,avgE:(qt&&mn)?+(qt/mn).toFixed(2):null,cv:st.cv};});
-  var pieD=cats.map(function(c){return cs2.find(function(x){return x.cat===c;}).mn;}),pieC=cats.map(function(c){return hexRgba(lv===1?getActColor(c):SP[cats.indexOf(c)%SP.length],.75);});
-  var dcnt=dates.map(function(ds){return(DATA[ds].tasks||[]).length;}),dmin=dates.map(function(ds){return +((DATA[ds].tasks||[]).reduce(function(s,t){return s+(Number(t.minutes)||0);},0)/60).toFixed(2);});
-  var em={};dates.forEach(function(ds){(DATA[ds].tasks||[]).forEach(function(t){var qt=visibleTaskQuantity(t),qu=visibleTaskQuantityUnit(t),mn=Number(t.minutes)||0;if(!qt||!mn)return;var c3=truncAct(t.activityType,3);if(!em[c3])em[c3]={};if(!em[c3][ds])em[c3][ds]={qt:0,mn:0,u:''};em[c3][ds].qt+=qt;em[c3][ds].mn+=mn;if(qu)em[c3][ds].u=qu;});});
-  var eC=Object.keys(em).sort(),eCL,eDS;
-  if(ecf&&em[ecf]){var efd=dates.filter(function(ds){return em[ecf][ds];});eCL=efd.map(fmtShort);var eh=SP[eC.indexOf(ecf)%SP.length],eu='';Object.values(em[ecf]).forEach(function(v){if(v.u)eu=v.u;});eDS=[{label:ecf+(eu?' ('+eu+'/min)':' (/min)'),data:efd.map(function(ds){return +(em[ecf][ds].qt/em[ecf][ds].mn).toFixed(3);}),borderColor:eh,backgroundColor:eh,borderWidth:2,pointRadius:4,tension:.3,fill:false}];
-  }else{eCL=labels;eDS=eC.map(function(cat,ci){var eh=SP[ci%SP.length],eu='';Object.values(em[cat]).forEach(function(v){if(v.u)eu=v.u;});return{label:cat+(eu?' ('+eu+'/min)':' (/min)'),data:dates.map(function(ds){var d=em[cat]?em[cat][ds]:null;if(!d)return null;return +(d.qt/d.mn).toFixed(3);}),borderColor:eh,backgroundColor:eh,borderWidth:2,pointRadius:3,tension:.3,fill:false,spanGaps:true};});}
-  var effDisp=ecf?calcS(dates.map(function(ds){var d=em[ecf]?em[ecf][ds]:null;return d?d.qt/d.mn:0;})):null;
-  var eChDS=eDS,yTit='\u6548\u7387(\u6570\u91CF/\u5206\u949F)',yTy='linear',yMn2=0,yMx3=ey?parseFloat(ey):undefined;
-  var eFmt=function(c){var v=c.parsed.y;if(v==null)return null;return c.dataset.label+': '+v.toFixed(3);};
-  if(es==='log'){yTy='logarithmic';yMn2=undefined;yMx3=undefined;yTit+='\xB7\u5BF9\u6570';}
-  else if(es==='normalize'){yTit='\u5F52\u4E00\u5316(% of max)';yMx3=105;eChDS=eDS.map(function(ds){var vals=ds.data.filter(function(v){return v!=null;});var mx=vals.length?Math.max.apply(null,vals):1;return Object.assign({},ds,{data:ds.data.map(function(v){return v==null?null:+(v/mx*100).toFixed(1);})});});eFmt=function(c){var v=c.parsed.y;if(v==null)return null;return c.dataset.label+': '+v.toFixed(1)+'%';};}
-  var bc=function(v,cur){return 'style="padding:3px 10px;border-radius:6px;border:1px solid var(--border);cursor:pointer;font-size:11px;'+(v===cur?'background:var(--hp);color:#000;font-weight:600':'background:var(--card);color:var(--muted)')+'"';};
-  var h='<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap"><span style="font-size:11px;color:var(--muted)">\u5C42\u7EA7\uFF1A</span>';
-  h+='<span '+bc(1,lv)+' onclick="tkSetLevel(1)">\u4E00\u7EA7</span><span '+bc(2,lv)+' onclick="tkSetLevel(2)">\u4E8C\u7EA7</span><span '+bc(3,lv)+' onclick="tkSetLevel(3)">\u4E09\u7EA7</span>';
-  h+='<span style="color:var(--dim);font-size:11px">\u2502</span><span style="font-size:11px;color:var(--muted)">\u7B5B\u9009\uFF1A</span><select onchange="tkSetCF(this.value)" style="font-size:12px;padding:3px 8px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px"><option value="">\u5168\u90E8 ('+cats.length+')</option>';
-  cats.forEach(function(c){h+='<option value="'+c+'"'+(cf===c?' selected':'')+'>'+c+'</option>';});h+='</select></div>';
-  h+='<div class="mini-grid" style="margin-bottom:16px"><div class="mini-card"><div class="lbl">\u4EFB\u52A1\u603B\u6570</div><div class="val c-hp">'+totC+'</div><div class="sub">'+dwT2+'\u5929 \xB7 '+cats.length+'\u7C7B</div></div><div class="mini-card"><div class="lbl">\u603B\u65F6\u957F</div><div class="val c-actual">'+fmtMin(totM,true)+'</div><div class="sub">\u65E5\u5747 '+fmtMin(dwT2>0?Math.round(totM/dwT2):0)+'</div></div><div class="mini-card"><div class="lbl">\u6BCF\u6761\u5E73\u5747</div><div class="val c-muted">'+fmtMin(totC>0?Math.round(totM/totC):0)+'</div></div></div>';
-  h+='<div class="chart-grid"><div class="chart-card full"><div class="chart-title">\u6BCF\u65E5\u4EFB\u52A1\u65F6\u957F'+(cf?'\uFF08'+cf+'\uFF09':'\uFF08\u6309\u7C7B\u522B\uFF09')+'</div><div class="chart-sub">'+(cf?'\u4EC5\u663E\u793A\u6709\u6570\u636E\u7684\u5929':'\u6298\u7EBF\u56FE')+'</div><canvas id="rTkTrend" height="100"></canvas></div>';
-  h+='<div class="chart-card"><div class="chart-title">\u7C7B\u522B\u65F6\u95F4\u5360\u6BD4</div><canvas id="rTkPie" height="200"></canvas></div><div class="chart-card"><div class="chart-title">\u6BCF\u65E5\u4EFB\u52A1\u6570\u91CF</div><canvas id="rTkCount" height="200"></canvas></div>';
-  if(eC.length>0){h+='<div class="chart-card full"><div class="chart-title">\u6548\u7387\u8D8B\u52BF\uFF08\u4E09\u7EA7\u5206\u7C7B\uFF09'+(ecf?' \u2014 '+ecf:'')+'</div><div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap"><span style="font-size:11px;color:var(--muted)">\u7EB5\u8F74\uFF1A</span>';
-  h+='<span '+bc('linear',es)+' onclick="tkSetES(&#39;linear&#39;)">\u7EBF\u6027</span><span '+bc('log',es)+' onclick="tkSetES(&#39;log&#39;)">\u5BF9\u6570</span><span '+bc('normalize',es)+' onclick="tkSetES(&#39;normalize&#39;)">\u5F52\u4E00\u5316</span>';
-  if(es==='linear')h+='<span style="font-size:11px;color:var(--muted)">Y\u4E0A\u9650\uFF1A</span><input type="number" value="'+ey+'" placeholder="\u81EA\u52A8" min="0" step="0.5" style="width:60px;padding:3px 6px;font-size:11px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px" onchange="tkSetEY(this.value)">';
-  if(eC.length>1){h+='<span style="color:var(--dim);font-size:11px">\u2502</span><span style="font-size:11px;color:var(--muted)">\u7B5B\u9009\uFF1A</span><select onchange="tkSetECF(this.value)" style="font-size:12px;padding:3px 8px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px"><option value="">\u5168\u90E8 ('+eC.length+')</option>';eC.forEach(function(c){h+='<option value="'+c+'"'+(ecf===c?' selected':'')+'>'+c+'</option>';});h+='</select>';}
-  h+='</div>';
-  if(effDisp)h+='<div style="font-size:12px;margin-bottom:8px;color:var(--muted)">CV: <b>'+fmtCV(effDisp)+'</b> (n='+effDisp.n+')</div>';
-  h+='<canvas id="rTkEff" height="100"></canvas></div>';}
-  h+='<div class="chart-card full"><div class="chart-title">\u7C7B\u522B\u6C47\u603B\u660E\u7EC6</div><div class="table-wrap"><table><thead><tr><th>\u7C7B\u522B</th><th>\u4EFB\u52A1\u6570</th><th>\u603B\u65F6\u957F</th><th>\u6BCF\u6761\u5E73\u5747</th><th>\u65E5\u5747</th>'+(lv===3?'<th>CV</th><th>\u603B\u6570\u91CF</th><th>\u5E73\u5747\u6548\u7387</th><th>\u6548\u7387CV</th>':'')+'</tr></thead><tbody>';
-  cs2.forEach(function(c){var hx=lv===1?getActColor(c.cat):SP[cats.indexOf(c.cat)%SP.length];var eCS=null;if(lv===3){var evs=[];dates.forEach(function(ds){var d=em[c.cat]?em[c.cat][ds]:null;if(d&&d.mn>0)evs.push(d.qt/d.mn);});if(evs.length)eCS=calcS(evs);}
-  h+='<tr><td><span class="badge" style="background:'+hexRgba(hx,.13)+';color:'+hx+'">'+c.cat+'</span></td><td class="fw-mono">'+c.ct+'</td><td class="fw-mono c-actual">'+fmtMin(c.mn,true)+'</td><td class="fw-mono">'+fmtMin(c.avgMn)+'</td><td class="fw-mono c-muted">'+fmtMin(c.avgD)+'</td>';
-  if(lv===3)h+='<td class="fw-mono">'+(c.cv||'-')+'</td><td class="fw-mono">'+(c.qt?c.qt+(c.u?' '+c.u:''):'-')+'</td><td class="fw-mono">'+(c.avgE!=null?c.avgE+(c.u?' '+c.u+'/min':'/min'):'-')+'</td><td class="fw-mono">'+(eCS?fmtCV(eCS):'-')+'</td>';
-  h+='</tr>';});
-  h+='</tbody></table></div></div></div>';
-  document.getElementById('tab-taskAna').innerHTML=h;
-  mkChart('rTkTrend',{type:'line',data:{labels:cL2,datasets:cDS2},options:{responsive:true,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'bottom',labels:{color:'#6b7a9e',boxWidth:12}}},scales:{x:{ticks:{color:'#6b7a9e',maxRotation:cL2.length>14?45:0},grid:gridCfg},y:{ticks:{color:'#6b7a9e',callback:function(v){return v+'h';}},grid:gridCfg,min:0}}}});
-  if(cats.length>0)mkChart('rTkPie',{type:'doughnut',data:{labels:cats,datasets:[{data:pieD,backgroundColor:pieC,borderWidth:1}]},options:{responsive:true,plugins:{legend:{position:'right',labels:{color:'#6b7a9e',boxWidth:10}},tooltip:{callbacks:{label:function(c){return c.label+': '+fmtMin(c.raw);}}}}}});
-  mkChart('rTkCount',{type:'bar',data:{labels:labels,datasets:[{label:'\u6761\u6570',data:dcnt,backgroundColor:'rgba(79,195,247,.35)',borderRadius:3,yAxisID:'y'},{type:'line',label:'h',data:dmin,borderColor:'#69f0ae',borderWidth:2,pointRadius:2,tension:.3,yAxisID:'y1'}]},options:{responsive:true,scales:{x:{ticks:{color:'#6b7a9e',maxRotation:dates.length>14?45:0},grid:gridCfg},y:{ticks:{color:'#6b7a9e'},grid:gridCfg,min:0},y1:{ticks:{color:'#69f0ae',callback:function(v){return v+'h';}},grid:{drawOnChartArea:false},position:'right',min:0}}}});
-  if(eC.length>0)mkChart('rTkEff',{type:'line',data:{labels:eCL,datasets:eChDS},options:{responsive:true,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'bottom',labels:{color:'#6b7a9e',boxWidth:12}},tooltip:{callbacks:{label:eFmt}}},scales:{x:{ticks:{color:'#6b7a9e',maxRotation:eCL.length>14?45:0},grid:gridCfg},y:{type:yTy,ticks:{color:'#6b7a9e'},grid:gridCfg,min:yMn2,max:yMx3,title:{display:true,text:yTit,color:'#6b7a9e'}}}}});
-}
-renderTaskAna();
-window.renderTaskAna=renderTaskAna;window.tkSetLevel=tkSetLevel;window.tkSetCF=tkSetCF;window.tkSetES=tkSetES;window.tkSetEY=tkSetEY;window.tkSetECF=tkSetECF;
-var tcM={},scM={};dayStats.forEach(function(d){Object.keys(d.taskMap).forEach(function(k){tcM[k]=1;});Object.keys(d.specialMap).forEach(function(k){scM[k]=1;});});var stK=Object.keys(tcM).sort(),spK=Object.keys(scM).sort();
-var abD=[],pcD=[],ci2=0;stK.forEach(function(c){var h=getActColor(c);abD.push({label:c,data:dayStats.map(function(d){return +((d.taskMap[c]||0)/60).toFixed(2);}),backgroundColor:hexRgba(h,.75),borderColor:hexRgba(h,.9),borderWidth:.5,fill:'origin',pointRadius:0,tension:.35});pcD.push({label:c,data:dayStats.map(function(d){return d.taskMap[c]||0;}),backgroundColor:hexRgba(h,.75),borderColor:hexRgba(h,.9),borderWidth:.5,fill:'origin',pointRadius:0,tension:.35});ci2++;});
-spK.forEach(function(c){var h=SP[ci2%SP.length];abD.push({label:'\u{1F538}'+c,data:dayStats.map(function(d){return +((d.specialMap[c]||0)/60).toFixed(2);}),backgroundColor:hexRgba(h,.6),borderColor:hexRgba(h,.8),borderWidth:.5,fill:'origin',pointRadius:0,tension:.35});pcD.push({label:'\u{1F538}'+c,data:dayStats.map(function(d){return d.specialMap[c]||0;}),backgroundColor:hexRgba(h,.6),borderColor:hexRgba(h,.8),borderWidth:.5,fill:'origin',pointRadius:0,tension:.35});ci2++;});
-abD.push({label:'\u{1F634} \u4F11\u606F',data:dayStats.map(function(d){return +(d.focusRestMin/60).toFixed(2);}),backgroundColor:'rgba(179,136,255,.55)',fill:'origin',pointRadius:0,tension:.35},{label:'\u{1F636} \u5206\u5FC3',data:dayStats.map(function(d){return +(d.focusDistractMin/60).toFixed(2);}),backgroundColor:'rgba(244,67,54,.45)',fill:'origin',pointRadius:0,tension:.35},{label:'\u2B1C \u7A7A\u95F2',data:dayStats.map(function(d){return +(d.idleMin/60).toFixed(2);}),backgroundColor:'rgba(61,74,106,.45)',fill:'origin',pointRadius:0,tension:.35});
-abD.push({label:'\u2500\u2500 \u6E05\u9192',data:dayStats.map(function(d){return d.awakeMin!=null?+(d.awakeMin/60).toFixed(1):null;}),borderColor:'#ffd54f',borderWidth:2.5,borderDash:[8,4],backgroundColor:'transparent',fill:false,pointRadius:3,pointBackgroundColor:'#ffd54f',tension:.35,yAxisID:'yR'});
-pcD.push({label:'\u{1F634} \u4F11\u606F',data:dayStats.map(function(d){return d.focusRestMin;}),backgroundColor:'rgba(179,136,255,.55)',fill:'origin',pointRadius:0,tension:.35},{label:'\u{1F636} \u5206\u5FC3',data:dayStats.map(function(d){return d.focusDistractMin;}),backgroundColor:'rgba(244,67,54,.45)',fill:'origin',pointRadius:0,tension:.35},{label:'\u2B1C \u7A7A\u95F2',data:dayStats.map(function(d){return d.idleMin;}),backgroundColor:'rgba(61,74,106,.45)',fill:'origin',pointRadius:0,tension:.35});
-pcD.forEach(function(ds){ds._rawData=ds.data.slice();});
-(function(){var ln=pcD[0]?pcD[0].data.length:0;for(var i=0;i<ln;i++){var sm2=0;pcD.forEach(function(ds){if(ds._rawData)sm2+=ds._rawData[i]||0;});pcD.forEach(function(ds){if(!ds._rawData)return;ds.data[i]=sm2>0?+((ds._rawData[i]/sm2)*100).toFixed(1):0;});}})();
-function rpc(ch){var dl=ch.data.datasets,ln=dl[0]?dl[0].data.length:0;for(var i=0;i<ln;i++){var sm2=0;dl.forEach(function(ds,di){if(!ds._rawData)return;if(!ch.getDatasetMeta(di).hidden)sm2+=ds._rawData[i]||0;});dl.forEach(function(ds,di){if(!ds._rawData)return;if(ch.getDatasetMeta(di).hidden)ds.data[i]=0;else ds.data[i]=sm2>0?+((ds._rawData[i]/sm2)*100).toFixed(1):0;});}ch.update('none');}
-var mxAw=Math.max.apply(null,dayStats.map(function(d){return(d.awakeMin||0)/60;}))||18,yU=Math.ceil(mxAw+1);
-var tAw=dayStats.reduce(function(s,d){return s+(d.awakeMin||0);},0),tTkS=dayStats.reduce(function(s,d){return s+d.totalTaskMin;},0),tSpS=dayStats.reduce(function(s,d){return s+d.totalSpecialMin;},0),tRsS=dayStats.reduce(function(s,d){return s+d.focusRestMin;},0),tDiS=dayStats.reduce(function(s,d){return s+d.focusDistractMin;},0),tIdS=dayStats.reduce(function(s,d){return s+d.idleMin;},0);
-function pOf(v){return tAw>0?Math.round(v/tAw*100):0;}
-document.getElementById('tab-stacked').innerHTML='<div class="mini-grid" style="margin-bottom:16px"><div class="mini-card"><div class="lbl">\u6E05\u9192\u603B\u65F6\u957F'+tipIcon('stackAwake')+'</div><div class="val" style="color:var(--wake)">'+fmtMin(tAw,true)+'</div></div><div class="mini-card"><div class="lbl">\u4EFB\u52A1\u8BB0\u5F55'+tipIcon('stackTask')+'</div><div class="val c-actual">'+fmtMin(tTkS,true)+'</div><div class="sub">'+pOf(tTkS)+'%</div></div><div class="mini-card"><div class="lbl">\u7279\u6B8A\u65F6\u6BB5'+tipIcon('stackSpecial')+'</div><div class="val c-nominal">'+fmtMin(tSpS,true)+'</div><div class="sub">'+pOf(tSpS)+'%</div></div><div class="mini-card"><div class="lbl">\u4F11\u606F'+tipIcon('stackRest')+'</div><div class="val" style="color:var(--sleep)">'+fmtMin(tRsS,true)+'</div><div class="sub">'+pOf(tRsS)+'%</div></div><div class="mini-card"><div class="lbl">\u5206\u5FC3'+tipIcon('stackDistract')+'</div><div class="val" style="color:var(--red)">'+fmtMin(tDiS,true)+'</div><div class="sub">'+pOf(tDiS)+'%</div></div><div class="mini-card"><div class="lbl">\u7A7A\u95F2'+tipIcon('stackIdle')+'</div><div class="val" style="color:var(--dim)">'+fmtMin(tIdS,true)+'</div><div class="sub">'+pOf(tIdS)+'%</div></div></div><div class="chart-grid"><div class="chart-card full"><div class="chart-title">\u7EDD\u5BF9\u503C</div><div class="chart-sub">\u7EB5\u8F74=\u5C0F\u65F6 \xB7 \u9EC4\u8272\u865A\u7EBF=\u6E05\u9192</div><canvas id="rSA" height="'+(dates.length>14?'160':'120')+'"></canvas></div><div class="chart-card full"><div class="chart-title">\u767E\u5206\u6BD4</div><div class="chart-sub">\u7EB5\u8F74=\u5360\u6E05\u9192%</div><canvas id="rSP" height="'+(dates.length>14?'160':'120')+'"></canvas></div></div>';
-mkChart('rSA',{type:'line',data:{labels:labels,datasets:abD},options:{responsive:true,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'bottom',labels:{color:'#6b7a9e',boxWidth:12,font:{size:11}}},tooltip:{callbacks:{label:function(c){var v=c.parsed.y;if(!v)return null;return c.dataset.label+': '+fmtMin(Math.round(v*60));}}},filler:{propagate:true}},scales:{x:{ticks:{color:'#6b7a9e',maxRotation:dates.length>14?45:0},grid:gridCfg},y:{stacked:true,ticks:{color:'#6b7a9e',callback:function(v){return v+'h';}},grid:gridCfg,min:0,max:yU},yR:{display:false,stacked:false,min:0,max:yU}}}});
-mkChart('rSP',{type:'line',data:{labels:labels,datasets:pcD},options:{responsive:true,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'bottom',labels:{color:'#6b7a9e',boxWidth:12,font:{size:11}},onClick:function(e,li,lg){var m=lg.chart.getDatasetMeta(li.datasetIndex);m.hidden=m.hidden===null?!lg.chart.data.datasets[li.datasetIndex].hidden:null;rpc(lg.chart);}},tooltip:{callbacks:{label:function(c){var v=c.parsed.y;if(!v)return null;return c.dataset.label+': '+v.toFixed(1)+'%';}}},filler:{propagate:true}},scales:{x:{ticks:{color:'#6b7a9e',maxRotation:dates.length>14?45:0},grid:gridCfg},y:{stacked:true,ticks:{color:'#6b7a9e',callback:function(v){return v+'%';}},grid:gridCfg,min:0,max:100}}}});
-var slD=dates.map(function(ds){var d=computeDay(ds);return{ds:ds,wt:d.wakeTime,st:d.sleepTime,wm:parseMin(d.wakeTime),sm:parseMin(d.sleepTime),am:d.awakeMin,ac:d.actualMin,ut:d.utilPct};}).filter(function(d){return d.wm!=null||d.sm!=null;});
-var aW=slD.filter(function(d){return d.wm!=null;}),aSl=slD.filter(function(d){return d.sm!=null;}),aAw=slD.filter(function(d){return d.am!=null;});
-var avW=aW.length?Math.round(aW.reduce(function(s,d){return s+d.wm;},0)/aW.length):null,avS=aSl.length?Math.round(aSl.reduce(function(s,d){return s+d.sm;},0)/aSl.length):null,avA=aAw.length?Math.round(aAw.reduce(function(s,d){return s+d.am;},0)/aAw.length):null;
-function mt(m){if(m==null)return '-';var h=Math.floor(m/60)%24,n2=m%60;return(h<10?'0':'')+h+':'+(n2<10?'0':'')+n2;}
-function hToT(h){var hh=((Math.floor(h)%24)+24)%24,mm=Math.round((h-Math.floor(h))*60);return(hh<10?'0':'')+hh+':'+(mm<10?'0':'')+mm;}
-document.getElementById('tab-sleep').innerHTML='<div class="mini-grid" style="margin-bottom:16px"><div class="mini-card"><div class="lbl">\u5E73\u5747\u8D77\u5E8A</div><div class="val" style="color:var(--wake)">'+mt(avW)+'</div></div><div class="mini-card"><div class="lbl">\u5E73\u5747\u7761\u89C9</div><div class="val" style="color:var(--sleep)">'+mt(avS)+'</div></div><div class="mini-card"><div class="lbl">\u5E73\u5747\u6E05\u9192</div><div class="val">'+(avA!=null?fmtMin(avA):'-')+'</div></div></div><div class="chart-grid"><div class="chart-card full"><div class="chart-title">\u8D77\u5E8A / \u7761\u89C9\u65F6\u95F4\u8D70\u52BF</div><div class="chart-sub">\u7EB5\u8F74=24h \xB7 mod-24\u6EDA\u52A8</div><canvas id="rSL" height="100"></canvas></div></div><div class="card" style="margin-top:16px"><div class="card-title" style="margin-bottom:8px">\u4F5C\u606F\u660E\u7EC6</div><div class="table-wrap"><table><thead><tr><th>\u65E5\u671F</th><th>\u8D77\u5E8A</th><th>\u7761\u89C9</th><th>\u6E05\u9192</th><th>\u5B9E\u9645</th><th>\u5229\u7528\u7387</th></tr></thead><tbody>'+slD.map(function(d){return '<tr><td class="fw-mono">'+fmtShort(d.ds)+'</td><td class="fw-mono" style="color:var(--wake)">'+(d.wt||'-')+'</td><td class="fw-mono" style="color:var(--sleep)">'+(d.st||'-')+'</td><td class="fw-mono">'+fmtMin(d.am)+'</td><td class="fw-mono c-actual">'+fmtMin(d.ac)+'</td><td class="fw-mono '+(d.ut>=50?'c-green':d.ut>=30?'c-wake':'c-red')+'">'+(d.ut!=null?d.ut+'%':'-')+'</td></tr>';}).join('')+'</tbody></table></div></div>';
-if(slD.length>0){var sL=slD.map(function(d){return fmtShort(d.ds);}),wD=slD.map(function(d){return d.wm!=null?+(d.wm/60).toFixed(2):null;}),sD2=slD.map(function(d){if(d.sm==null)return null;var h=d.sm/60;if(h<6)h+=24;return +h.toFixed(2);});var allY=wD.concat(sD2).filter(function(v){return v!=null;}),yMn=allY.length?Math.floor(Math.min.apply(null,allY)*2)/2-0.5:5,yMx2=allY.length?Math.ceil(Math.max.apply(null,allY)*2)/2+0.5:26;
-mkChart('rSL',{type:'line',data:{labels:sL,datasets:[{label:'\u8D77\u5E8A',data:wD,borderColor:'#ffd54f',backgroundColor:'#ffd54f',pointRadius:4,showLine:true,borderWidth:1.5,tension:.3,fill:false},{label:'\u7761\u89C9',data:sD2,borderColor:'#b388ff',backgroundColor:'#b388ff',pointRadius:4,showLine:true,borderWidth:1.5,tension:.3,fill:false}]},options:{responsive:true,plugins:{legend:{labels:{color:'#6b7a9e'}},tooltip:{callbacks:{label:function(c){var v=c.parsed.y;if(v==null)return null;return c.dataset.label+': '+hToT(v);}}}},scales:{x:{ticks:{color:'#6b7a9e',maxRotation:slD.length>14?45:0},grid:gridCfg},y:{ticks:{color:'#6b7a9e',stepSize:1,callback:function(v){return hToT(v);}},grid:gridCfg,min:yMn,max:yMx2}}}});}
-});
-<\/script>
-</body>
-</html>`;
-}
-
-// ============================================================
 // SETTINGS TAB
 // ============================================================
+const VISUAL_COLOR_GROUPS = [
+  { key: 'level1', label: '一级分类' },
+  { key: 'level2', label: '二级分类' },
+  { key: 'level3', label: '三级分类' },
+  { key: 'special', label: '特殊时段' },
+  { key: 'system', label: '系统系列' },
+  { key: 'chart', label: '通用图表' },
+];
+
+const VISUAL_SYSTEM_ENTRIES = [
+  { key: 'unclassified', label: '未分类任务' },
+  { key: 'specialDefault', label: '新特殊时段默认色' },
+  { key: 'taskTotal', label: '任务汇总' },
+  { key: 'specialTotal', label: '特殊时段汇总' },
+  { key: 'rest', label: '休息时间' },
+  { key: 'distract', label: '分心时间' },
+  { key: 'idle', label: '空闲/未记录' },
+  { key: 'awake', label: '清醒时长 / 参考线' },
+];
+
+const VISUAL_CHART_ENTRIES = [
+  { key: 'clock', label: '时钟时长' },
+  { key: 'effectiveClock', label: '有效时钟' },
+  { key: 'nominal', label: '名义时长' },
+  { key: 'actual', label: '实际专注' },
+  { key: 'taskDuration', label: '任务时长趋势' },
+  { key: 'bedtime', label: '睡觉时间' },
+  { key: 'wake', label: '起床时间' },
+  { key: 'sleepBand', label: '睡眠区间填充' },
+  { key: 'unavailable', label: '不可用时间占比' },
+  { key: 'chapterDuration', label: '章节完成耗时' },
+  { key: 'chapterEfficiency', label: '章节数量效率' },
+  { key: 'archived', label: '已归档章节' },
+  { key: 'workbookQuestions', label: '整册分段题数' },
+  { key: 'workbookCumulativeQuestions', label: '整册累计题数' },
+  { key: 'workbookErrorRate', label: '整册分段错误率' },
+  { key: 'workbookCumulativeErrorRate', label: '整册累计错误率' },
+  { key: 'workbookAverageErrorRate', label: '整册平均错误率参考线' },
+  ...Array.from({ length: 8 }, (_, index) => ({
+    key: `distribution${index + 1}`,
+    label: `分布图分段色 ${index + 1}`,
+  })),
+];
+
+function cloneVisualColorConfig(config) {
+  return JSON.parse(JSON.stringify(config || visualColorBaseConfig()));
+}
+
+function visualColorEditorDraft() {
+  if (!state.visualColorEditorDraft) {
+    state.visualColorEditorDraft = cloneVisualColorConfig(getVisualColorConfig());
+    state.visualColorEditorDirty = false;
+  }
+  return state.visualColorEditorDraft;
+}
+
+function visualColorGroupMap(config, group) {
+  if (group === 'special') return config.special;
+  if (group === 'system') return config.system;
+  if (group === 'chart') return config.chart;
+  return config.task[group];
+}
+
+function visualColorParentL1Options() {
+  const current = getCatList(1);
+  const names = new Set(current);
+  [1, 2, 3].forEach(level => {
+    collectVisualTaskPaths(level).forEach(path => {
+      const level1 = parseActPath(path)[0];
+      if (level1) names.add(level1);
+    });
+  });
+  return [...current, ...[...names].filter(name => !current.includes(name)).sort()]
+    .map(name => ({ value: name, label: name }));
+}
+
+function visualColorParentL2Options(level1) {
+  const sources = collectVisualTaskPathSources(2);
+  return [...sources.entries()]
+    .filter(([path]) => parseActPath(path)[0] === level1)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([path]) => {
+      const parts = parseActPath(path);
+      return {
+      value: path,
+      label: parts[1],
+    };
+    });
+}
+
+function visualColorEditorContext(group) {
+  const context = { level1Options: [], level2Options: [], level1: '', level2: '' };
+  if (!['level2', 'level3'].includes(group)) return context;
+  context.level1Options = visualColorParentL1Options();
+  const level1Values = context.level1Options.map(option => option.value);
+  if (!level1Values.includes(state.visualColorEditorParentL1)) {
+    const usedLevel = group === 'level3' ? 3 : 2;
+    const usedParents = new Set(collectVisualTaskPaths(usedLevel).map(path => parseActPath(path)[0]));
+    state.visualColorEditorParentL1 = level1Values.find(value => usedParents.has(value)) || level1Values[0] || '';
+  }
+  context.level1 = state.visualColorEditorParentL1;
+  if (group === 'level3') {
+    context.level2Options = visualColorParentL2Options(context.level1);
+    const level2Values = context.level2Options.map(option => option.value);
+    if (!level2Values.includes(state.visualColorEditorParentL2)) {
+      const usedParents = new Set(collectVisualTaskPaths(3).map(path => parseActPath(path).slice(0, 2).join(' > ')));
+      state.visualColorEditorParentL2 = level2Values.find(value => usedParents.has(value)) || level2Values[0] || '';
+    }
+    context.level2 = state.visualColorEditorParentL2;
+  }
+  return context;
+}
+
+function visualTaskColorEntries(level, context = visualColorEditorContext(`level${level}`)) {
+  const sources = collectVisualTaskPathSources(level);
+  return [...sources.entries()]
+    .filter(([path]) => {
+      const parts = parseActPath(path);
+      if (level === 2) return parts[0] === context.level1;
+      if (level === 3) return parts.slice(0, 2).join(' > ') === context.level2;
+      return true;
+    })
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([path], index) => {
+      const parts = parseActPath(path);
+      return {
+        key: path,
+        label: parts[level - 1],
+        breadcrumb: level > 1 ? path : '',
+        index: level === 1 ? getCatList(1).indexOf(path) : index,
+      };
+    });
+}
+
+function visualSpecialColorEntries() {
+  const names = new Set([...collectVisualSpecialNames(), ...Object.keys(getVisualColorConfig().special)]);
+  return [...names].sort().map(name => ({ key: name, label: name, index: -1 }));
+}
+
+function visualColorEntries(group, context = visualColorEditorContext(group)) {
+  if (group.startsWith('level')) return visualTaskColorEntries(Number(group.slice(-1)), context);
+  if (group === 'special') return visualSpecialColorEntries();
+  if (group === 'chart') return VISUAL_CHART_ENTRIES.map((entry, index) => ({ ...entry, index }));
+  return VISUAL_SYSTEM_ENTRIES.map((entry, index) => ({ ...entry, index }));
+}
+
+function visualColorEntryDefault(group, entry) {
+  if (group === 'system') return VISUAL_SYSTEM_DEFAULTS[entry.key];
+  if (group === 'chart') return VISUAL_CHART_DEFAULTS[entry.key];
+  if (group === 'special') return visualDefaultColor('special', entry.key);
+  return visualDefaultColor(group, entry.key, entry.index >= 0 ? entry.index : null);
+}
+
+function visualColorEditorRowHtml(group, entry, color) {
+  const encodedKey = encodeURIComponent(entry.key).replace(/'/g, '%27');
+  const rowId = `visual-color-row-${group}-${encodedKey}`;
+  return `<div class="visual-color-row" id="${rowId}" style="--row-color:${color}">
+    <div class="visual-color-name">
+      <i></i>
+      <div>
+        <span>${escHtmlApp(entry.label)}</span>
+        ${entry.breadcrumb ? `<em>${escHtmlApp(entry.breadcrumb)}</em>` : ''}
+      </div>
+    </div>
+    <div class="visual-color-controls">
+      <input type="color" id="${rowId}-picker" value="${color}"
+        aria-label="选择${escHtmlApp(entry.label)}颜色"
+        oninput="visualColorEditorSet('${group}','${encodedKey}',this.value)">
+      <input type="text" id="${rowId}-hex" class="visual-color-hex" value="${color.toUpperCase()}" maxlength="7"
+        aria-label="${escHtmlApp(entry.label)}十六进制颜色"
+        onchange="visualColorEditorSet('${group}','${encodedKey}',this.value,true)">
+      <button type="button" class="visual-color-reset" title="恢复此项默认颜色"
+        onclick="visualColorEditorResetItem('${group}','${encodedKey}')">↺</button>
+    </div>
+  </div>`;
+}
+
+function visualColorParentControlsHtml(group, context) {
+  if (!['level2', 'level3'].includes(group)) return '';
+  const level1Options = context.level1Options.map(option => {
+    const value = encodeURIComponent(option.value).replace(/'/g, '%27');
+    return `<option value="${value}" ${option.value === context.level1 ? 'selected' : ''}>${escHtmlApp(option.label)}</option>`;
+  }).join('');
+  const level2Control = group === 'level3'
+    ? `<label class="visual-color-parent">
+        <span>二级分类</span>
+        <select onchange="visualColorEditorSelectParent(2,this.value)" ${context.level2Options.length ? '' : 'disabled'}>
+          ${context.level2Options.length ? context.level2Options.map(option => {
+            const value = encodeURIComponent(option.value).replace(/'/g, '%27');
+            return `<option value="${value}" ${option.value === context.level2 ? 'selected' : ''}>${escHtmlApp(option.label)}</option>`;
+          }).join('') : '<option value="">暂无已使用二级路径</option>'}
+        </select>
+      </label>`
+    : '';
+  return `<div class="visual-color-parent-controls">
+    <label class="visual-color-parent">
+      <span>一级分类</span>
+      <select onchange="visualColorEditorSelectParent(1,this.value)" ${context.level1Options.length ? '' : 'disabled'}>
+        ${level1Options || '<option value="">暂无一级分类</option>'}
+      </select>
+    </label>
+    ${level2Control}
+  </div>`;
+}
+
+function visualColorPanelHtml() {
+  const validGroups = VISUAL_COLOR_GROUPS.map(group => group.key);
+  const group = validGroups.includes(state.visualColorEditorGroup) ? state.visualColorEditorGroup : 'level1';
+  state.visualColorEditorGroup = group;
+  const draft = visualColorEditorDraft();
+  const context = visualColorEditorContext(group);
+  const entries = visualColorEntries(group, context);
+  const colors = visualColorGroupMap(draft, group);
+  const preview = entries.slice(0, 12);
+  return `<section class="visual-color-panel" id="visual-color-panel">
+    <div class="visual-color-head">
+      <div>
+        <div class="settings-eyebrow">VISUAL COLOR SYSTEM</div>
+        <h3>图表与分类颜色</h3>
+        <p>统一管理分类、堆积系列及通用折线图、柱状图和分布图颜色，并随学习数据同步。</p>
+      </div>
+      <span class="visual-color-save-state ${state.visualColorEditorDirty ? 'dirty' : ''}" id="visual-color-save-state">
+        ${state.visualColorEditorDirty ? '有未保存修改' : '颜色已同步'}
+      </span>
+    </div>
+    <div class="visual-color-tabs">
+      ${VISUAL_COLOR_GROUPS.map(item => `<button type="button" class="${item.key === group ? 'active' : ''}"
+        onclick="visualColorEditorSwitchGroup('${item.key}')">${item.label}</button>`).join('')}
+    </div>
+    <div class="visual-color-toolbar">
+      ${visualColorParentControlsHtml(group, context)}
+      <span class="visual-color-count">${entries.length} 项</span>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="visualColorEditorAutoAssign()" ${entries.length ? '' : 'disabled'}>自动分配当前组</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="visualColorEditorResetGroup()" ${entries.length ? '' : 'disabled'}>恢复当前组默认值</button>
+    </div>
+    ${preview.length ? `<div class="visual-color-preview">
+      <span>预览</span>
+      ${preview.map(entry => {
+        const color = colors[entry.key] || visualColorEntryDefault(group, entry);
+        const encodedKey = encodeURIComponent(entry.key).replace(/'/g, '%27');
+        return `<i id="visual-color-preview-${group}-${encodedKey}" style="--preview-color:${color}" title="${escHtmlApp(entry.label)}"></i>`;
+      }).join('')}
+    </div>` : ''}
+    <div class="visual-color-list">
+      ${entries.length
+        ? entries.map(entry => visualColorEditorRowHtml(group, entry, colors[entry.key] || visualColorEntryDefault(group, entry))).join('')
+        : `<div class="visual-color-empty">${['level2', 'level3'].includes(group) ? '当前上级分类下暂无已使用路径。' : '当前分组暂无可配置项目。'}</div>`}
+    </div>
+    <div class="visual-color-actions">
+      <button type="button" class="btn btn-primary" onclick="visualColorEditorSave()">保存颜色</button>
+      <span id="visual-color-message"></span>
+    </div>
+  </section>`;
+}
+
+function renderVisualColorPanel() {
+  const panel = document.getElementById('visual-color-panel');
+  if (panel) panel.outerHTML = visualColorPanelHtml();
+}
+
+function visualColorEditorSwitchGroup(group) {
+  state.visualColorEditorGroup = group;
+  renderVisualColorPanel();
+}
+
+function visualColorEditorSelectParent(level, encodedValue) {
+  const value = encodedValue ? decodeURIComponent(encodedValue) : '';
+  if (level === 1) {
+    state.visualColorEditorParentL1 = value;
+    state.visualColorEditorParentL2 = '';
+  } else {
+    state.visualColorEditorParentL2 = value;
+  }
+  renderVisualColorPanel();
+}
+
+function visualColorEditorSet(group, encodedKey, value, fromText = false) {
+  const key = decodeURIComponent(encodedKey);
+  const normalized = String(value || '').trim().toLowerCase();
+  const draft = visualColorEditorDraft();
+  const map = visualColorGroupMap(draft, group);
+  const rowId = `visual-color-row-${group}-${encodedKey}`;
+  const row = document.getElementById(rowId);
+  const message = document.getElementById('visual-color-message');
+  if (!isVisualHexColor(normalized)) {
+    if (message) {
+      message.textContent = '请输入 #RRGGBB 格式的颜色。';
+      message.style.color = 'var(--red)';
+    }
+    if (fromText && row) row.querySelector('.visual-color-hex').value = (map[key] || '#78909c').toUpperCase();
+    return;
+  }
+  map[key] = normalized;
+  state.visualColorEditorDirty = true;
+  if (row) {
+    row.style.setProperty('--row-color', normalized);
+    row.querySelector('input[type="color"]').value = normalized;
+    row.querySelector('.visual-color-hex').value = normalized.toUpperCase();
+  }
+  const preview = document.getElementById(`visual-color-preview-${group}-${encodedKey}`);
+  if (preview) preview.style.setProperty('--preview-color', normalized);
+  const saveState = document.getElementById('visual-color-save-state');
+  if (saveState) {
+    saveState.textContent = '有未保存修改';
+    saveState.classList.add('dirty');
+  }
+  if (message) message.textContent = '';
+}
+
+function visualColorEditorResetItem(group, encodedKey) {
+  const key = decodeURIComponent(encodedKey);
+  const entry = visualColorEntries(group).find(item => item.key === key);
+  if (!entry) return;
+  visualColorEditorSet(group, encodedKey, visualColorEntryDefault(group, entry));
+}
+
+function visualColorEditorAutoAssign() {
+  const group = state.visualColorEditorGroup;
+  const entries = visualColorEntries(group);
+  const draft = visualColorEditorDraft();
+  const map = visualColorGroupMap(draft, group);
+  const palette = group === 'special' ? VISUAL_SPECIAL_PALETTE : VISUAL_COLOR_PALETTE;
+  let shuffled = [...palette];
+  for (let index = shuffled.length - 1; index > 0; index--) {
+    const randomIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[randomIndex]] = [shuffled[randomIndex], shuffled[index]];
+  }
+  const unchanged = entries.length > 0 && entries.every((entry, index) =>
+    String(map[entry.key] || '').toLowerCase() === shuffled[index % shuffled.length].toLowerCase()
+  );
+  if (unchanged && shuffled.length > 1) shuffled = [...shuffled.slice(1), shuffled[0]];
+  entries.forEach((entry, index) => { map[entry.key] = shuffled[index % shuffled.length]; });
+  state.visualColorEditorDirty = true;
+  renderVisualColorPanel();
+}
+
+function visualColorEditorResetGroup() {
+  const group = state.visualColorEditorGroup;
+  if (!confirm(`恢复“${VISUAL_COLOR_GROUPS.find(item => item.key === group)?.label || '当前组'}”的默认颜色？修改仍需保存后生效。`)) return;
+  const draft = visualColorEditorDraft();
+  const map = visualColorGroupMap(draft, group);
+  visualColorEntries(group).forEach(entry => { map[entry.key] = visualColorEntryDefault(group, entry); });
+  state.visualColorEditorDirty = true;
+  renderVisualColorPanel();
+}
+
+async function visualColorEditorCommit(showMessage = true) {
+  if (!state.visualColorEditorDraft) return;
+  state.data.__visualColors__ = cloneVisualColorConfig(state.visualColorEditorDraft);
+  await saveAllStorage();
+  state.visualColorEditorDirty = false;
+  if (showMessage) {
+    renderVisualColorPanel();
+    const message = document.getElementById('visual-color-message');
+    if (message) {
+      message.textContent = '颜色已保存并同步';
+      message.style.color = 'var(--pol)';
+    }
+  } else {
+    const saveState = document.getElementById('visual-color-save-state');
+    if (saveState) {
+      saveState.textContent = '颜色已同步';
+      saveState.classList.remove('dirty');
+    }
+  }
+}
+
+async function visualColorEditorSave() {
+  await visualColorEditorCommit(true);
+}
+
 function renderSettings() {
   const s = SETTINGS;
   const tc = s.themeColors;
@@ -5611,33 +8129,11 @@ function renderSettings() {
         <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:8px">
           <div class="form-group"><label>字体大小 (px)</label><input type="number" id="set_fontSize" value="${s.fontSize}" min="10" max="24"></div>
         </div>
-        <div style="margin-top:8px">
-          <div class="card-sub" style="margin-bottom:6px">活动类别颜色（按一级类别循环分配）</div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap" id="set_actColors">
-            ${s.actColors.map((c, i) => `<div style="display:flex;align-items:center;gap:4px">
-              <input type="color" id="set_ac_${i}" value="${c.color}" style="width:32px;height:24px;padding:0;border:none;cursor:pointer">
-              <span style="font-size:10px;color:var(--muted)">${i + 1}</span>
-            </div>`).join('')}
-            <button class="btn btn-ghost btn-sm" onclick="settingsAddActColor()">+ 添加</button>
-          </div>
-        </div>
       </div>
 
-      <!-- 2. 时间与计算规则 -->
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-title" style="margin-bottom:12px">⏰ 时间与计算规则</div>
-        <div class="form-grid" style="grid-template-columns:repeat(3,1fr)">
-          <div class="form-group"><label>每日目标学习时长(h)</label><input type="number" id="set_dailyGoalHours" value="${s.dailyGoalHours}" min="1" max="24" step="0.5"></div>
-          <div class="form-group"><label>起床目标时间(时)</label><input type="number" id="set_wakeGoalHour" value="${s.wakeGoalHour}" min="0" max="12" step="0.5"></div>
-          <div class="form-group"><label>睡觉目标时间(时,0=0:00)</label><input type="number" id="set_sleepGoalHour" value="${s.sleepGoalHour}" min="-2" max="3" step="0.5"></div>
-          <div class="form-group"><label>不可用占比警戒线(%)</label><input type="number" id="set_utilPassPct" value="${s.utilPassPct}" min="0" max="100"></div>
-          <div class="form-group"><label>专注效率-优秀(%)</label><input type="number" id="set_focusGoodPct" value="${s.focusGoodPct}" min="0" max="100"></div>
-          <div class="form-group"><label>专注效率-及格(%)</label><input type="number" id="set_focusOkPct" value="${s.focusOkPct}" min="0" max="100"></div>
-          <div class="form-group"><label>周起始日</label><select id="set_weekStartDay"><option value="1" ${s.weekStartDay === 1 ? 'selected' : ''}>周一</option><option value="0" ${s.weekStartDay === 0 ? 'selected' : ''}>周日</option></select></div>
-        </div>
-      </div>
+      ${visualColorPanelHtml()}
 
-      <!-- 3. 数据存储 -->
+      <!-- 2. 数据存储 -->
       <div class="card" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:12px">💾 数据存储</div>
         <div class="form-grid" style="grid-template-columns:1fr 1fr">
@@ -5656,30 +8152,6 @@ function renderSettings() {
           <span id="snapshot-status" class="form-hint">${state._serverSnapshot?.updatedAt ? `最后快照：${new Date(state._serverSnapshot.updatedAt).toLocaleString()}` : '后端暂无快照'}</span>
         </div>
         <div class="form-hint">本地草稿仍每3秒保存作为断网兜底；共享快照独立存放在后端 <code>draft_snapshot.json</code>，不会覆盖学习数据。</div>
-      </div>
-
-      <!-- 5. 评分与评价规则 -->
-      <div class="card" style="margin-bottom:16px">
-        <div class="card-title" style="margin-bottom:12px">📊 评分与评价规则</div>
-        <p style="font-size:11px;color:var(--muted);margin-bottom:10px">月览表格中每天评分 = 满足以下条件的数量：</p>
-        <div class="form-grid" style="grid-template-columns:repeat(2,1fr)">
-          <div class="form-group"><label>条件1: 实际专注≥(分钟)</label><input type="number" id="set_ratingActualMin" value="${s.ratingActualMin}" min="0"></div>
-          <div class="form-group"><label>条件2: 偏差率≥(%)</label><input type="number" id="set_ratingDeviationPct" value="${s.ratingDeviationPct}"></div>
-          <div class="form-group"><label>条件3: 起床≤(分钟,480=8:00)</label><input type="number" id="set_ratingWakeLimit" value="${s.ratingWakeLimit}" min="0"></div>
-          <div class="form-group"><label>条件4: 不可用占比≤(%)</label><input type="number" id="set_ratingUtilPct" value="${s.ratingUtilPct}" min="0" max="100"></div>
-          <div class="form-group"><label>⭐ 需满足条件数≥</label><input type="number" id="set_ratingStarThreshold" value="${s.ratingStarThreshold}" min="1" max="4"></div>
-          <div class="form-group"><label>👌 需满足条件数≥</label><input type="number" id="set_ratingOkThreshold" value="${s.ratingOkThreshold}" min="1" max="4"></div>
-          <div class="form-group"><label>⚠️ 需满足条件数≥</label><input type="number" id="set_ratingWarnThreshold" value="${s.ratingWarnThreshold}" min="1" max="4"></div>
-        </div>
-        <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
-          <div class="card-sub" style="margin-bottom:8px">作息颜色阈值</div>
-          <div class="form-grid" style="grid-template-columns:repeat(2,1fr)">
-            <div class="form-group"><label>起床绿色≤(分钟,420=7:00)</label><input type="number" id="set_wakeGoodMinute" value="${s.wakeGoodMinute}" min="0"></div>
-            <div class="form-group"><label>起床黄色≤(分钟,480=8:00)</label><input type="number" id="set_wakeWarnMinute" value="${s.wakeWarnMinute}" min="0"></div>
-            <div class="form-group"><label>睡觉绿色≤(小时,0=0:00)</label><input type="number" id="set_sleepGoodHour" value="${s.sleepGoodHour}" step="0.5"></div>
-            <div class="form-group"><label>睡觉黄色≤(小时,0.5=0:30)</label><input type="number" id="set_sleepWarnHour" value="${s.sleepWarnHour}" step="0.5"></div>
-          </div>
-        </div>
       </div>
 
       <!-- 6. 活动类别管理 -->
@@ -5719,11 +8191,6 @@ function renderSettings() {
   `;
 }
 
-function settingsAddActColor() {
-  SETTINGS.actColors.push({ color: '#ffffff', cls: 'custom' });
-  renderSettings();
-}
-
 async function settingsSaveAll() {
   const s = SETTINGS;
   // 外观
@@ -5733,39 +8200,14 @@ async function settingsSaveAll() {
     if (el) s.themeColors[k] = el.value;
   });
   s.fontSize = parseInt(document.getElementById('set_fontSize')?.value) || 14;
-  // actColors
-  const acEls = document.querySelectorAll('[id^="set_ac_"]');
-  s.actColors = Array.from(acEls).map((el, i) => ({ color: el.value, cls: (DEFAULT_SETTINGS.actColors[i]?.cls || 'custom') }));
-
-  // 时间规则
-  s.dailyGoalHours = parseFloat(document.getElementById('set_dailyGoalHours')?.value) || 8;
-  s.wakeGoalHour = parseFloat(document.getElementById('set_wakeGoalHour')?.value) || 7;
-  s.sleepGoalHour = parseFloat(document.getElementById('set_sleepGoalHour')?.value) || 0;
-  s.utilPassPct = parseInt(document.getElementById('set_utilPassPct')?.value) || 50;
-  s.focusGoodPct = parseInt(document.getElementById('set_focusGoodPct')?.value) || 80;
-  s.focusOkPct = parseInt(document.getElementById('set_focusOkPct')?.value) || 60;
-  s.weekStartDay = parseInt(document.getElementById('set_weekStartDay')?.value) || 1;
-
   // 数据
   s.snapshotInterval = Number(document.getElementById('set_snapshotInterval')?.value);
   if (![0, 30000, 60000].includes(s.snapshotInterval)) s.snapshotInterval = 30000;
   s.useLocalStorageCache = document.getElementById('set_useLocalStorageCache')?.value === 'true';
 
-  // 评分
-  s.ratingActualMin = parseInt(document.getElementById('set_ratingActualMin')?.value) || 480;
-  s.ratingDeviationPct = parseInt(document.getElementById('set_ratingDeviationPct')?.value) ?? -10;
-  s.ratingWakeLimit = parseInt(document.getElementById('set_ratingWakeLimit')?.value) || 480;
-  s.ratingUtilPct = parseInt(document.getElementById('set_ratingUtilPct')?.value) || 50;
-  s.ratingStarThreshold = parseInt(document.getElementById('set_ratingStarThreshold')?.value) || 3;
-  s.ratingOkThreshold = parseInt(document.getElementById('set_ratingOkThreshold')?.value) || 2;
-  s.ratingWarnThreshold = parseInt(document.getElementById('set_ratingWarnThreshold')?.value) || 1;
-  s.wakeGoodMinute = parseInt(document.getElementById('set_wakeGoodMinute')?.value) || 420;
-  s.wakeWarnMinute = parseInt(document.getElementById('set_wakeWarnMinute')?.value) || 480;
-  s.sleepGoodHour = parseFloat(document.getElementById('set_sleepGoodHour')?.value) || 0;
-  s.sleepWarnHour = parseFloat(document.getElementById('set_sleepWarnHour')?.value) || 0.5;
-
   SETTINGS = s;
   saveSettings(s);
+  await visualColorEditorCommit(false);
 
   const msg = document.getElementById('settings-msg');
   if (msg) {
@@ -5788,223 +8230,717 @@ function settingsResetAll() {
 // SESSION ANALYSIS TAB (专注时段分析)
 // ============================================================
 function sessAnaGetDates() {
-  const s = state.sessAna;
-  if (s.mode === 'week') {
-    return getWeekDays(s.weekStart);
+  return analysisRangeMeta('session').analysisDates;
+}
+
+function sessAnaSessionCategory(sess) {
+  if (isUnavailableSession(sess)) return sess.name || '特殊时段';
+  if (isSpecialStudySession(sess)) return `🧩 ${sess.name || '特殊学习'}`;
+  return '普通专注';
+}
+
+function sessAnaSessionTypeKey(sess) {
+  if (isUnavailableSession(sess)) return 'special';
+  if (isSpecialStudySession(sess)) return 'special-study';
+  return 'normal';
+}
+
+function sessAnaSessionTypeLabel(type) {
+  return { normal: '普通时段', special: '特殊时段', 'special-study': '特殊学习时段' }[type] || '全部类型';
+}
+
+const SESS_ANA_DURATION_BIN_MIN = 15;
+const SESS_ANA_DURATION_BIN_MAX = 120;
+const SESS_ANA_DURATION_BIN_STEP = 15;
+
+function sessAnaNormalizeDurationBinSize(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 30;
+  const stepped = Math.round(numeric / SESS_ANA_DURATION_BIN_STEP) * SESS_ANA_DURATION_BIN_STEP;
+  return Math.min(SESS_ANA_DURATION_BIN_MAX, Math.max(SESS_ANA_DURATION_BIN_MIN, stepped));
+}
+
+function sessAnaBuildDurationBins(records, binSize) {
+  const size = sessAnaNormalizeDurationBinSize(binSize);
+  const maxDuration = records.reduce((max, record) => Math.max(max, record.duration), 0);
+  const binCount = Math.max(1, Math.ceil(maxDuration / size));
+  return Array.from({ length: binCount }, (_, index) => {
+    const min = index * size;
+    const max = (index + 1) * size;
+    return {
+      key: `${min}-${max}`,
+      label: `${min}–${max}分钟`,
+      chartLabel: [`${min}–${max}`, '分钟'],
+      min,
+      max,
+    };
+  });
+}
+
+function sessAnaCategoryColor(category) {
+  if (category === '普通专注') return getSystemSeriesColor('taskTotal');
+  return getSpecialSeriesColor(String(category || '').replace(/^🧩\s*/, '') || '特殊时段');
+}
+
+function sessAnaTrendMetricMinutes(sess) {
+  return isUnavailableSession(sess)
+    ? Math.max(0, sessionClock(sess))
+    : Math.max(0, Number(sess.actualMinutes) || 0);
+}
+
+function sessAnaDurationMetricMinutes(sess, basis) {
+  if (basis === 'clock') return Math.max(0, sessionClock(sess));
+  if (basis === 'nominal') {
+    if (sess.nominalMinutes == null || sess.nominalMinutes === '') return null;
+    const value = Number(sess.nominalMinutes);
+    return Number.isFinite(value) && value > 0 ? value : null;
   }
-  const y = s.month.year, m = s.month.month;
-  const dim = new Date(y, m + 1, 0).getDate();
-  return Array.from({ length: dim }, (_, i) => `${y}-${String(m + 1).padStart(2, '0')}-${String(i + 1).padStart(2, '0')}`);
+  if (basis === 'actual') {
+    if (isUnavailableSession(sess) || sess.actualMinutes == null || sess.actualMinutes === '') return null;
+    const value = Number(sess.actualMinutes);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+  return null;
+}
+
+function sessAnaCumulativeAverageData(dateStrs, categories, catMap) {
+  return {
+    dates: dateStrs,
+    series: categories.map(category => {
+      let total = 0;
+      let activeDays = 0;
+      return {
+        category,
+        values: dateStrs.map(dateStr => {
+          if (chartDateStatus(dateStr) !== 'recorded') return null;
+          const row = catMap[category]?.[dateStr];
+          if (row) {
+            total += row.metric;
+            activeDays += 1;
+          }
+          return activeDays ? Number((total / activeDays / 60).toFixed(2)) : null;
+        }),
+      };
+    }),
+  };
+}
+
+function sessAnaDurationStats(records, categories, basis, binSize) {
+  const valid = records.map(record => ({ ...record, duration: sessAnaDurationMetricMinutes(record.session, basis) }))
+    .filter(record => record.duration != null && record.duration > 0);
+  const bins = sessAnaBuildDurationBins(valid, binSize);
+  const rows = categories.map(category => {
+    const categoryRecords = valid.filter(record => record.category === category);
+    const counts = Object.fromEntries(bins.map(bin => [bin.key, categoryRecords.filter(record => record.duration > bin.min && record.duration <= bin.max).length]));
+    return { category, validCount: categoryRecords.length, counts };
+  }).filter(row => row.validCount > 0);
+  return { validCount: valid.length, rows, bins, binSize: sessAnaNormalizeDurationBinSize(binSize) };
+}
+
+function sessAnaEncodedValue(value) {
+  return encodeURIComponent(String(value || '')).replace(/'/g, '%27');
+}
+
+function sessAnaLegendHtml(categories) {
+  if (!categories.length) return '';
+  return `<div class="sess-analysis-legend">
+    <div class="sess-analysis-legend-items">${categories.map(category => {
+      const encoded = sessAnaEncodedValue(category);
+      const hidden = state.sessAna.hiddenSeries.includes(category);
+      return `<button type="button" class="sess-analysis-legend-key${hidden ? ' hidden' : ''}" data-sess-series="${encoded}" onclick="sessAnaToggleSeries(decodeURIComponent('${encoded}'))"><i style="--series-color:${sessAnaCategoryColor(category)}"></i><span>${escHtmlApp(category)}</span></button>`;
+    }).join('')}</div>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="sessAnaShowAllSeries()">全部显示</button>
+  </div>`;
+}
+
+function sessAnaDurationPanelHtml(stats) {
+  const s = state.sessAna;
+  const basisLabels = { clock: '时钟时长', nominal: '名义时长', actual: '实际时长' };
+  const categories = stats.rows.map(row => row.category);
+  if (!categories.includes(s.durationCategory)) s.durationCategory = categories[0] || '';
+  const selected = stats.rows.find(row => row.category === s.durationCategory) || null;
+  const categoryTabs = stats.rows.map(row => {
+    const encoded = sessAnaEncodedValue(row.category);
+    return `<button type="button" class="sess-duration-category${s.durationCategory === row.category ? ' active' : ''}" style="--series-color:${sessAnaCategoryColor(row.category)}" onclick="selectSessAnaDurationCategory(decodeURIComponent('${encoded}'))"><i></i><span>${escHtmlApp(row.category)}</span><small>${row.validCount} 段</small></button>`;
+  }).join('');
+  const dominantBin = selected && stats.bins.length ? stats.bins.reduce((best, bin) => (selected.counts[bin.key] || 0) > (selected.counts[best.key] || 0) ? bin : best, stats.bins[0]) : null;
+  return `<section class="sess-analysis-panel sess-duration-panel">
+    <div class="sess-analysis-panel-head">
+      <div><div class="sess-analysis-eyebrow">DURATION DISTRIBUTION</div><h3>时段长度分布</h3><p>通过滑动条调整每个区间的分钟宽度；区间采用左开右闭口径。</p></div>
+      <div class="sess-analysis-tabs sess-duration-basis" aria-label="时长统计口径">
+        ${Object.entries(basisLabels).map(([basis, label]) => `<button type="button" class="${s.durationBasis === basis ? 'active' : ''}" onclick="switchSessAnaDurationBasis('${basis}')">${label}</button>`).join('')}
+      </div>
+    </div>
+    ${stats.validCount ? `<div class="sess-duration-scale-control">
+        <div class="sess-duration-scale-head"><span>区间宽度</span><output id="sess-duration-bin-output">${stats.binSize} 分钟 / 格</output></div>
+        <input type="range" min="${SESS_ANA_DURATION_BIN_MIN}" max="${SESS_ANA_DURATION_BIN_MAX}" step="${SESS_ANA_DURATION_BIN_STEP}" value="${stats.binSize}" aria-label="时段长度区间宽度" oninput="previewSessAnaDurationBinSize(this.value)" onchange="setSessAnaDurationBinSize(this.value)">
+        <div class="sess-duration-scale-labels"><span>15分钟 · 精细</span><span>120分钟 · 宽泛</span></div>
+      </div>
+      <div class="sess-duration-category-tabs" aria-label="选择时段类别">${categoryTabs}</div>
+      <div class="sess-duration-chart-head"><span><b>${selected ? escHtmlApp(selected.category) : '-'}</b> 的时长区间分布</span><small>${selected ? `${selected.validCount} 个有效时段 · 最集中于${dominantBin.label}` : ''}</small></div>
+      <div class="sess-duration-chart"><canvas id="sessAnaDurationChart"></canvas></div>` : `<div class="sess-analysis-empty compact"><b>当前口径没有可统计的时段</b><span>可以切换到时钟时长，或选择包含名义、实际记录的日期范围。</span></div>`}
+  </section>`;
+}
+
+function renderSessAnalysisKpiStatus(dateStrs, filter = '', typeFilter = '') {
+  const rows = dateStrs.map(dateStr => {
+    const row = {
+      dateStr,
+      count: 0,
+      clockMin: 0,
+      effectiveClockMin: 0,
+      nominalMin: 0,
+      actualMin: 0,
+      restMin: 0,
+      distractMin: 0,
+      unavailableMin: 0,
+      specialStudyActualMin: 0,
+    };
+    (getDay(dateStr).sessions || []).forEach(sess => {
+      if (typeFilter && sessAnaSessionTypeKey(sess) !== typeFilter) return;
+      if (filter && sessAnaSessionCategory(sess) !== filter) return;
+      const clock = sessionClock(sess);
+      const nominal = Number(sess.nominalMinutes) || 0;
+      const actual = Number(sess.actualMinutes) || 0;
+      const rest = Number(sess.restMinutes) || 0;
+      row.count += 1;
+      row.clockMin += clock;
+      row.nominalMin += nominal;
+      row.actualMin += actual;
+      row.restMin += rest;
+      if (isUnavailableSession(sess)) {
+        row.unavailableMin += clock;
+      } else if (isSpecialStudySession(sess)) {
+        row.effectiveClockMin += actual;
+        row.unavailableMin += Math.max(0, clock - actual);
+        row.specialStudyActualMin += actual;
+      } else {
+        row.effectiveClockMin += Math.max(0, clock - rest);
+        row.distractMin += Math.max(0, clock - rest - actual);
+      }
+    });
+    return row;
+  });
+  const activeRows = rows.filter(row => row.count > 0);
+  const activeCount = activeRows.length;
+  const sum = key => activeRows.reduce((total, row) => total + (Number(row[key]) || 0), 0);
+  const totalCount = sum('count');
+  const totalClock = sum('clockMin');
+  const totalEffectiveClock = sum('effectiveClockMin');
+  const totalActual = sum('actualMin');
+  const pct = totalEffectiveClock > 0 ? Math.round(totalActual / totalEffectiveClock * 100) : null;
+  const primary = [
+    ['实际专注', fmtHrs(totalActual), pct != null ? `有效时钟利用 ${pct}%` : '暂无有效时钟'],
+    ['有效时钟', fmtHrs(totalEffectiveClock), activeCount ? `日均 ${fmtMin(Math.round(totalEffectiveClock / activeCount), true)}` : '-'],
+    ['时段数量', `${totalCount} 段`, activeCount ? `记录日均 ${(totalCount / activeCount).toFixed(1)} 段` : '-'],
+    ['有效记录天', `${activeCount} 天`, `${dateStrs.length} 天范围${filter ? ` · ${filter}` : ''}`],
+  ];
+  const secondary = [
+    ['时钟', fmtHrs(totalClock)],
+    ['名义', fmtHrs(sum('nominalMin'))],
+    ['休息', fmtHrs(sum('restMin'))],
+    ['分心', fmtHrs(sum('distractMin'))],
+    ['不可用', fmtHrs(sum('unavailableMin'))],
+    ['特殊学习', fmtHrs(sum('specialStudyActualMin'))],
+    ['每段平均', totalCount ? fmtMin(Math.round(totalClock / totalCount), true) : '-'],
+  ];
+  return `<section class="sess-analysis-summary">
+    <div class="sess-analysis-primary-grid">${primary.map(([label, value, sub], index) => `<article class="sess-analysis-primary-card tone-${index + 1}"><span>${label}</span><b>${value}</b><small>${sub}</small></article>`).join('')}</div>
+    <div class="sess-analysis-secondary-strip">${secondary.map(([label, value]) => `<div><span>${label}</span><b>${value}</b></div>`).join('')}</div>
+  </section>`;
+}
+
+function sessAnaRecordDetailHtml(records) {
+  const s = state.sessAna;
+  const categories = [...new Set(records.map(record => record.category))]
+    .sort((a, b) => a === '普通专注' ? -1 : b === '普通专注' ? 1 : a.localeCompare(b));
+  if (s.detailCategory && !categories.includes(s.detailCategory)) s.detailCategory = '';
+  const selectedCategory = s.detailCategory || '';
+  const visibleRecords = records
+    .filter(record => !selectedCategory || record.category === selectedCategory)
+    .slice()
+    .sort((a, b) => b.dateStr.localeCompare(a.dateStr) || a.sourceIndex - b.sourceIndex);
+  const categoryCounts = records.reduce((counts, record) => {
+    counts.set(record.category, (counts.get(record.category) || 0) + 1);
+    return counts;
+  }, new Map());
+  const categoryButtons = categories.map(category => {
+    const encoded = sessAnaEncodedValue(category);
+    return `<button type="button" class="sess-record-category${selectedCategory === category ? ' active' : ''}" style="--series-color:${sessAnaCategoryColor(category)}" onclick="sessAnaSetDetailCategory(decodeURIComponent('${encoded}'))"><i></i><span>${escHtmlApp(category)}</span><b>${categoryCounts.get(category)}</b></button>`;
+  }).join('');
+  const rows = visibleRecords.map((record, rowIndex) => {
+    const sess = record.session;
+    const unavailable = isUnavailableSession(sess);
+    const specialStudy = isSpecialStudySession(sess);
+    const clock = sessionClock(sess);
+    const nominal = Math.max(0, Number(sess.nominalMinutes) || 0);
+    const actual = Math.max(0, Number(sess.actualMinutes) || 0);
+    const rest = Math.max(0, Number(sess.restMinutes) || 0);
+    const effective = specialStudy ? actual : Math.max(0, clock - rest);
+    const efficiency = unavailable || effective <= 0 ? null : Math.round(actual / effective * 100);
+    const typeLabel = unavailable ? '不可用' : specialStudy ? '特殊学习' : '普通专注';
+    const typeClass = unavailable ? 'unavailable' : specialStudy ? 'special-study' : 'normal';
+    const encodedDate = sessAnaEncodedValue(record.dateStr);
+    const encodedId = sess.id ? sessAnaEncodedValue(sess.id) : '';
+    const editAction = sess.id
+      ? `onclick="sessAnaOpenSession(decodeURIComponent('${encodedDate}'),decodeURIComponent('${encodedId}'))"`
+      : 'disabled title="该历史记录缺少ID，无法直接编辑"';
+    const categoryCell = sess.id
+      ? `<button type="button" class="sess-record-name" ${editAction}><i style="--series-color:${sessAnaCategoryColor(record.category)}"></i>${escHtmlApp(record.category)}</button>`
+      : `<span class="sess-record-name disabled"><i style="--series-color:${sessAnaCategoryColor(record.category)}"></i>${escHtmlApp(record.category)}</span>`;
+    return `<tr ${sortableTableRowAttrs({
+      date: record.dateStr,
+      timeRange: parseMin(sess.startTime) == null || parseMin(sess.endTime) == null
+        ? null
+        : [parseMin(sess.startTime), parseMin(sess.endTime)],
+      clock,
+      nominal: unavailable || specialStudy ? null : nominal,
+      actual: unavailable ? null : actual,
+      rest: unavailable || specialStudy ? null : rest,
+      efficiency,
+    }, rowIndex)}>
+      <td class="fw-mono sess-record-date">${formatShort(record.dateStr)}</td>
+      <td><span class="sess-record-type ${typeClass}">${typeLabel}</span></td>
+      <td>${categoryCell}</td>
+      <td class="fw-mono sess-record-time">${sess.startTime || '-'} <span>至</span> ${sess.endTime || '-'}</td>
+      <td class="fw-mono c-clock">${fmtMin(clock, true)}</td>
+      <td class="fw-mono c-nominal">${unavailable || specialStudy ? '-' : fmtMin(nominal, true)}</td>
+      <td class="fw-mono c-actual">${unavailable ? '-' : fmtMin(actual, true)}</td>
+      <td class="fw-mono">${unavailable || specialStudy ? '-' : fmtMin(rest, true)}</td>
+      <td class="fw-mono c-actual">${efficiency == null ? '-' : `${efficiency}%`}</td>
+      <td class="sess-record-note" title="${escHtmlApp(sess.note || '')}">${escHtmlApp(sess.note || '-')}</td>
+      <td><button type="button" class="btn btn-ghost btn-sm" ${editAction}>编辑</button></td>
+    </tr>`;
+  }).join('');
+  return `<section class="sess-record-detail-panel">
+    <div class="sess-record-detail-head">
+      <div><div class="sess-analysis-eyebrow">SESSION RECORDS</div><h3>时段记录明细</h3><p>逐条查看当前范围内的原始时段，并可直接进入录入页修改。</p></div>
+      <span>${visibleRecords.length} / ${records.length} 段</span>
+    </div>
+    <div class="sess-record-categories">
+      <button type="button" class="sess-record-category${selectedCategory ? '' : ' active'}" onclick="sessAnaSetDetailCategory('')"><span>全部时段</span><b>${records.length}</b></button>
+      ${categoryButtons}
+    </div>
+    <div class="sess-record-table-wrap"><table class="sess-record-table" data-sort-table="sess-records">
+      <thead><tr>${sortableTableHeaderHtml('sess-records', 'date', '日期', 'date')}<th>类型</th><th>时段类别</th>${sortableTableHeaderHtml('sess-records', 'timeRange', '起止时间', 'time')}${sortableTableHeaderHtml('sess-records', 'clock', '时钟')}${sortableTableHeaderHtml('sess-records', 'nominal', '名义')}${sortableTableHeaderHtml('sess-records', 'actual', '实际')}${sortableTableHeaderHtml('sess-records', 'rest', '休息')}${sortableTableHeaderHtml('sess-records', 'efficiency', '效率')}<th>备注</th><th>操作</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+  </section>`;
 }
 
 function renderSessAnalysis() {
   const s = state.sessAna;
-  const dateStrs = sessAnaGetDates();
+  if (!['daily', 'cumulativeAverage'].includes(s.trendView)) s.trendView = 'daily';
+  if (!['clock', 'nominal', 'actual'].includes(s.durationBasis)) s.durationBasis = 'clock';
+  if (!['', 'normal', 'special', 'special-study'].includes(s.typeFilter)) s.typeFilter = '';
+  if (typeof s.durationCategory !== 'string') s.durationCategory = '';
+  s.durationBinSize = sessAnaNormalizeDurationBinSize(s.durationBinSize);
+  if (!Array.isArray(s.hiddenSeries)) s.hiddenSeries = [];
+  const sharedRange = analysisRangeMeta('session');
+  const dateStrs = sharedRange.analysisDates;
+  s.mode = dateStrs.length <= 7 ? 'week' : dateStrs.length > 90 ? 'all' : 'month';
   const labels = dateStrs.map(d => formatShort(d));
-  const rangeLabel = s.mode === 'week'
-    ? `${formatShort(dateStrs[0])} — ${formatShort(dateStrs[dateStrs.length - 1])}`
-    : `${s.month.year}年${s.month.month + 1}月`;
+  const rangeLabel = sharedRange.label;
 
   // 收集每天的 session 分类数据
   // 分类：特殊时段按 name 分组，普通时段归为"普通专注"
-  const catMap = {}; // { catName: [{dateStr, clock, nominal, actual, rest}] }
-  let totalSessCount = 0, totalClock = 0, totalNominal = 0, totalActual = 0, totalRest = 0, totalSpecial = 0, totalEffectiveClock = 0;
-
+  const catMap = {}; // { catName: { dateStr: aggregated metrics } }
+  const allSessionRecords = [];
+  const catKinds = {};
   dateStrs.forEach(ds => {
     const day = getDay(ds);
-    (day.sessions || []).forEach(sess => {
-      totalSessCount++;
+    (day.sessions || []).forEach((sess, sourceIndex) => {
       const clk = sessionClock(sess);
       const nom = Number(sess.nominalMinutes) || 0;
       const act = Number(sess.actualMinutes) || 0;
       const rst = Number(sess.restMinutes) || 0;
-      const cat = isUnavailableSession(sess) ? (sess.name || '特殊时段')
-        : isSpecialStudySession(sess) ? `🧩 ${sess.name || '特殊学习'}` : '普通专注';
-      if (isUnavailableSession(sess)) totalSpecial += clk;
-      else if (isSpecialStudySession(sess)) {
-        totalSpecial += Math.max(0, clk - act);
-        totalEffectiveClock += act;
-      } else {
-        totalEffectiveClock += Math.max(0, clk - rst);
-      }
-      totalClock += clk; totalNominal += nom; totalActual += act; totalRest += rst;
+      const cat = sessAnaSessionCategory(sess);
+      const kind = isUnavailableSession(sess) ? 'unavailable' : isSpecialStudySession(sess) ? 'special-study' : 'normal';
+      catKinds[cat] = kind;
+      allSessionRecords.push({ dateStr: ds, category: cat, type: sessAnaSessionTypeKey(sess), session: sess, sourceIndex });
       if (!catMap[cat]) catMap[cat] = {};
-      if (!catMap[cat][ds]) catMap[cat][ds] = { clock: 0, nominal: 0, actual: 0, rest: 0, count: 0 };
+      if (!catMap[cat][ds]) catMap[cat][ds] = { clock: 0, nominal: 0, actual: 0, rest: 0, count: 0, metric: 0 };
       catMap[cat][ds].clock += clk;
       catMap[cat][ds].nominal += nom;
       catMap[cat][ds].actual += act;
       catMap[cat][ds].rest += rst;
+      catMap[cat][ds].metric += sessAnaTrendMetricMinutes(sess);
       catMap[cat][ds].count++;
     });
   });
 
-  const cats = Object.keys(catMap).sort((a, b) => a === '普通专注' ? -1 : b === '普通专注' ? 1 : a.localeCompare(b));
-  const daysWithSess = dateStrs.filter(ds => (getDay(ds).sessions || []).length > 0).length;
-  const avgActPerDay = daysWithSess > 0 ? Math.round(totalActual / daysWithSess) : 0;
-  const eff = totalEffectiveClock > 0 ? Math.round(totalActual / totalEffectiveClock * 100) : null;
+  const allCats = Object.keys(catMap).sort((a, b) => a === '普通专注' ? -1 : b === '普通专注' ? 1 : a.localeCompare(b));
+  const sessTypeFilter = s.typeFilter || '';
+  const typeCats = sessTypeFilter
+    ? allCats.filter(category => allSessionRecords.some(record => record.type === sessTypeFilter && record.category === category))
+    : allCats;
+  if (s.catFilter && !typeCats.includes(s.catFilter)) s.catFilter = '';
+  const sessCatFilter = s.catFilter || '';
+  const cats = sessCatFilter ? [sessCatFilter] : typeCats;
+  const typeVisibleSessionRecords = sessTypeFilter
+    ? allSessionRecords.filter(record => record.type === sessTypeFilter)
+    : allSessionRecords;
+  const visibleSessionRecords = sessCatFilter
+    ? typeVisibleSessionRecords.filter(record => record.category === sessCatFilter)
+    : typeVisibleSessionRecords;
+  const daysWithSess = dateStrs.filter(ds => visibleSessionRecords.some(record => record.dateStr === ds)).length;
 
   // 每日折线图 datasets — 根据筛选决定显示方式
-  const sessCatFilter = s.catFilter || '';
   let sessChartLabels, sessDayDS;
-
-  if (sessCatFilter && catMap[sessCatFilter]) {
-    // 单类别模式：只显示有数据的天，折线连续
-    const filteredDays = dateStrs.filter(ds => catMap[sessCatFilter][ds]);
-    sessChartLabels = filteredDays.map(d => formatShort(d));
-    const isNormal = sessCatFilter === '普通专注';
-    const hex = isNormal ? '#69f0ae' : getStackedColor(cats.indexOf(sessCatFilter));
+  if (s.trendView === 'cumulativeAverage') {
+    const cumulative = sessAnaCumulativeAverageData(dateStrs, cats, catMap);
+    sessChartLabels = cumulative.dates.map(formatShort);
+    sessDayDS = cumulative.series.map(item => {
+      const hex = sessAnaCategoryColor(item.category);
+      return {
+        label: item.category,
+        seriesKey: item.category,
+        data: item.values,
+        borderColor: hex,
+        backgroundColor: hex,
+        borderWidth: 2.2,
+        pointRadius: item.values.length > 60 ? 1.5 : 3.5,
+        pointHoverRadius: 5,
+        pointBackgroundColor: hex,
+        pointBorderColor: '#07111f',
+        pointBorderWidth: 1.5,
+        tension: .16,
+        fill: false,
+        spanGaps: false,
+        hidden: s.hiddenSeries.includes(item.category),
+      };
+    });
+  } else if (sessCatFilter && catMap[sessCatFilter]) {
+    sessChartLabels = labels;
+    const hex = sessAnaCategoryColor(sessCatFilter);
     sessDayDS = [{
       label: sessCatFilter,
-      data: filteredDays.map(ds => {
-        const d = catMap[sessCatFilter][ds];
-        return +((d.actual || d.clock || 0) / 60).toFixed(2);
-      }),
-      borderColor: hex, backgroundColor: hex,
-      borderWidth: 2, pointRadius: 4, pointBackgroundColor: hex,
-      tension: 0.3, fill: false,
+      seriesKey: sessCatFilter,
+      data: chartMaskRecordedValues(dateStrs, dateStrs.map(ds => Number(((catMap[sessCatFilter][ds]?.metric || 0) / 60).toFixed(2)))),
+      borderColor: hex,
+      backgroundColor: hex,
+      borderWidth: 2.2,
+      pointRadius: dateStrs.length > 60 ? 1.5 : 4,
+      pointHoverRadius: 5,
+      pointBackgroundColor: hex,
+      pointBorderColor: '#07111f',
+      pointBorderWidth: 1.5,
+      tension: .16,
+      fill: false,
+      hidden: s.hiddenSeries.includes(sessCatFilter),
     }];
   } else {
-    // 全部模式：所有类别、所有天
     sessChartLabels = labels;
-    sessDayDS = cats.map((cat, ci) => {
-      const isNormal = cat === '普通专注';
-      const hex = isNormal ? '#69f0ae' : getStackedColor(ci);
+    sessDayDS = cats.map(cat => {
+      const hex = sessAnaCategoryColor(cat);
       return {
         label: cat,
-        data: dateStrs.map(ds => +((catMap[cat][ds]?.actual || (catMap[cat][ds]?.clock || 0)) / 60).toFixed(2)),
-        borderColor: hex, backgroundColor: hex,
-        borderWidth: 2, pointRadius: 3, pointBackgroundColor: hex,
-        tension: 0.3, fill: false,
+        seriesKey: cat,
+        data: chartMaskRecordedValues(dateStrs, dateStrs.map(ds => Number(((catMap[cat][ds]?.metric || 0) / 60).toFixed(2)))),
+        borderColor: hex,
+        backgroundColor: hex,
+        borderWidth: 2,
+        pointRadius: dateStrs.length > 60 ? 1.5 : 3,
+        pointHoverRadius: 5,
+        pointBackgroundColor: hex,
+        pointBorderColor: '#07111f',
+        pointBorderWidth: 1.5,
+        tension: .16,
+        fill: false,
+        hidden: s.hiddenSeries.includes(cat),
       };
     });
   }
+  s._trendContext = { dateStrs: [...dateStrs], cats: [...cats], catMap, sessCatFilter };
 
   // 每类别汇总
   const catStats = cats.map(cat => {
-    let count = 0, clock = 0, nominal = 0, actual = 0, rest = 0;
-    Object.values(catMap[cat]).forEach(v => { count += v.count; clock += v.clock; nominal += v.nominal; actual += v.actual; rest += v.rest; });
-    const isSpecial = actual === 0 && clock > 0;
-    const metric = isSpecial ? clock : actual;
-    const effCat = !isSpecial && (clock - rest) > 0 ? Math.round(actual / (clock - rest) * 100) : null;
-    const avgPerDay = daysWithSess > 0 ? Math.round(metric / daysWithSess) : 0;
+    let count = 0, clock = 0, nominal = 0, actual = 0, rest = 0, metric = 0;
+    Object.values(catMap[cat]).forEach(v => { count += v.count; clock += v.clock; nominal += v.nominal; actual += v.actual; rest += v.rest; metric += v.metric; });
+    const isSpecial = catKinds[cat] === 'unavailable';
+    const effective = catKinds[cat] === 'special-study' ? actual : Math.max(0, clock - rest);
+    const effCat = !isSpecial && effective > 0 ? Math.round(actual / effective * 100) : null;
+    const categoryDays = Object.keys(catMap[cat]).length;
+    const avgPerDay = categoryDays > 0 ? Math.round(metric / categoryDays) : 0;
     // 每天该类别的 metric 值数组（用于算 CV）
     const dailyVals = dateStrs.map(ds => {
       const d = catMap[cat][ds];
       if (!d) return 0;
-      return isSpecial ? d.clock : d.actual;
+      return d.metric;
     });
     const stats = calcStats(dailyVals);
     return { cat, count, clock, nominal, actual, rest, eff: effCat, isSpecial, avgAct: count > 0 ? Math.round(metric / count) : 0, avgPerDay, cv: stats.cv, stdDev: stats.stdDev };
   });
-  // 总体每日实际专注的统计
-  const sessOverallStats = calcStats(dateStrs.map(ds => {
-    let a = 0;
-    (getDay(ds).sessions || []).forEach(x => { if (x.type !== 'special') a += Number(x.actualMinutes) || 0; });
-    return a;
-  }));
+  const displayTotals = visibleSessionRecords.reduce((totals, record) => {
+    const sess = record.session;
+    const clock = sessionClock(sess);
+    const actual = Math.max(0, Number(sess.actualMinutes) || 0);
+    const rest = Math.max(0, Number(sess.restMinutes) || 0);
+    totals.clock += clock;
+    totals.nominal += Math.max(0, Number(sess.nominalMinutes) || 0);
+    totals.actual += actual;
+    totals.rest += rest;
+    totals.effective += isUnavailableSession(sess) ? 0 : isSpecialStudySession(sess) ? actual : Math.max(0, clock - rest);
+    return totals;
+  }, { clock: 0, nominal: 0, actual: 0, rest: 0, effective: 0 });
+  const durationStats = sessAnaDurationStats(visibleSessionRecords, cats, s.durationBasis, s.durationBinSize);
+  const heroRange = !sharedRange.baseDates.length ? '暂无历史时段记录' : rangeLabel;
 
-  // 统计指标（根据筛选计算）
-  let sessDisplayStats;
-  if (sessCatFilter && catMap[sessCatFilter]) {
-    const catDailyVals = dateStrs.map(ds => {
-      const d = catMap[sessCatFilter][ds];
-      if (!d) return 0;
-      const isSpec = (d.actual === 0 && d.clock > 0);
-      return isSpec ? d.clock : d.actual;
-    });
-    sessDisplayStats = calcStats(catDailyVals);
-  } else {
-    sessDisplayStats = sessOverallStats;
-  }
-
-  document.getElementById('tab-sessAnalysis').innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
-      <div style="display:flex;gap:4px;background:var(--card2);border-radius:8px;padding:2px">
-        <button class="btn btn-sm ${s.mode === 'week' ? 'btn-primary' : 'btn-ghost'}" onclick="sessAnaNav('mode','week')">周览</button>
-        <button class="btn btn-sm ${s.mode === 'month' ? 'btn-primary' : 'btn-ghost'}" onclick="sessAnaNav('mode','month')">月览</button>
+  document.getElementById('tab-sessAnalysis').innerHTML = `<div class="session-analysis-page">
+    <section class="session-analysis-hero">
+      <div class="session-analysis-hero-copy"><div class="sess-analysis-eyebrow">SESSION ANALYTICS</div><h2>时段分析</h2><p>${heroRange} · ${sessAnaSessionTypeLabel(sessTypeFilter)}${sessCatFilter ? ` · 当前类别：${escHtmlApp(sessCatFilter)}` : ' · 全部时段类别'}</p></div>
+      <div class="session-analysis-hero-stats">
+        <div><span>有效记录</span><b>${daysWithSess} 天</b></div>
+        <div><span>时段总数</span><b>${visibleSessionRecords.length} 段</b></div>
+        <div><span>实际专注</span><b>${fmtHrs(displayTotals.actual)}</b></div>
       </div>
-      <button class="btn btn-ghost btn-sm" onclick="sessAnaNav('prev')">← ${s.mode === 'week' ? '上周' : '上月'}</button>
-      <span style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--hp)">${rangeLabel}</span>
-      <button class="btn btn-ghost btn-sm" onclick="sessAnaNav('next')">${s.mode === 'week' ? '下周' : '下月'} →</button>
-      <button class="btn btn-ghost btn-sm" onclick="sessAnaNav('today')">${s.mode === 'week' ? '本周' : '本月'}</button>
-      ${cats.length > 1 ? `<span style="color:var(--dim);font-size:11px">│</span>
-      <span style="font-size:11px;color:var(--muted)">类别：</span>
-      <select onchange="sessAnaNav('catFilter',this.value)" style="font-size:12px;padding:3px 8px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px">
-        <option value="">全部 (${cats.length})</option>
-        ${cats.map(c => `<option value="${escHtmlApp(c)}" ${sessCatFilter === c ? 'selected' : ''}>${escHtmlApp(c)}</option>`).join('')}
-      </select>` : ''}
-    </div>
+    </section>
 
-    <div class="three-time" style="margin-bottom:16px">
-      <div class="time-block clock"><div class="label">时段数</div><div class="value">${totalSessCount}</div><div class="sub">${daysWithSess} 天有记录</div></div>
-      <div class="time-block actual"><div class="label">总·实际专注${tipIcon('actual')}</div><div class="value">${fmtMin(totalActual, true)}</div><div class="sub">日均 ${fmtMin(avgActPerDay)}</div></div>
-      <div class="time-block nominal"><div class="label">总·名义${tipIcon('nominal')}</div><div class="value">${fmtMin(totalNominal, true)}</div><div class="sub">日均 ${fmtMin(daysWithSess > 0 ? Math.round(totalNominal / daysWithSess) : 0)}</div></div>
-    </div>
-    <div class="three-time" style="margin-bottom:20px">
-      <div class="time-block clock"><div class="label">总·时钟${tipIcon('clock')}</div><div class="value">${fmtMin(totalClock, true)}</div><div class="sub">有效 ${fmtMin(totalClock - totalRest)} · 日均 ${fmtMin(daysWithSess > 0 ? Math.round(totalClock / daysWithSess) : 0)}</div></div>
-      <div class="time-block" style="border-color:var(--sleep)"><div class="label">总·休息${tipIcon('rest')}</div><div class="value" style="color:var(--sleep)">${fmtMin(totalRest, true)}</div><div class="sub">日均 ${fmtMin(daysWithSess > 0 ? Math.round(totalRest / daysWithSess) : 0)}</div></div>
-      <div class="time-block" style="border-color:${eff != null && eff >= 80 ? 'var(--green)' : 'var(--wake)'}"><div class="label">专注效率${tipIcon('efficiency')}</div><div class="value" style="color:${eff >= 80 ? 'var(--green)' : eff >= 60 ? 'var(--wake)' : 'var(--red)'}">${eff != null ? eff + '%' : '-'}</div></div>
-    </div>
-    <div class="three-time" style="margin-bottom:20px">
-      ${sessCatFilter ? `<div class="time-block" style="border-color:var(--dim)"><div class="label">${escHtmlApp(sessCatFilter)}·CV${tipIcon('cv')}</div><div class="value" style="color:${sessDisplayStats.cv != null && sessDisplayStats.cv < 0.3 ? 'var(--green)' : 'var(--wake)'}">${fmtCV(sessDisplayStats.cv)}</div><div class="sub">σ = ${fmtSD(sessDisplayStats.stdDev)} · n=${sessDisplayStats.n}</div></div>` : ''}
-      <div class="time-block" style="border-color:var(--dim)"><div class="label">数据天数</div><div class="value" style="color:var(--muted)">${sessCatFilter ? sessDisplayStats.n : daysWithSess}</div><div class="sub">共 ${dateStrs.length} 天</div></div>
-    </div>
+    ${analysisRangePlannerHtml('session', sharedRange)}
 
-    <div class="chart-grid">
-      <div class="chart-card full">
-        <div class="chart-title">每日专注时长趋势${sessCatFilter ? '（' + escHtmlApp(sessCatFilter) + '）' : '（按类别）'}</div>
-        <div class="chart-sub">折线图${sessCatFilter ? ' · 仅显示有数据的天' : ''} · 普通专注=实际分钟 · 特殊时段=时钟时长</div>
-        <canvas id="sessAnaDailyChart" height="${s.mode === 'week' ? '100' : '120'}"></canvas>
-      </div>
-      <div class="chart-card full">
-        <div class="chart-title">类别汇总明细</div>
-        <div class="chart-sub">每种时段的统计数据</div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>类别</th><th>时段数</th><th>时钟${tipIcon('clock')}</th><th>名义${tipIcon('nominal')}</th><th>实际${tipIcon('actual')}</th><th>休息${tipIcon('rest')}</th><th>效率${tipIcon('efficiency')}</th><th>每段平均</th><th>日均</th><th>CV${tipIcon('cv')}</th></tr></thead>
-            <tbody>${catStats.map(c => `<tr>
-              <td style="font-weight:500">${escHtmlApp(c.cat)}</td>
-              <td class="fw-mono">${c.count}</td>
-              <td class="fw-mono c-clock">${fmtMin(c.clock, true)}</td>
-              <td class="fw-mono c-nominal">${fmtMin(c.nominal, true)}</td>
-              <td class="fw-mono c-actual">${fmtMin(c.actual, true)}</td>
-              <td class="fw-mono">${fmtMin(c.rest, true)}</td>
-              <td class="fw-mono ${c.eff >= 80 ? 'c-green' : c.eff >= 60 ? 'c-wake' : 'c-red'}">${c.eff != null ? c.eff + '%' : '-'}</td>
-              <td class="fw-mono">${fmtMin(c.avgAct)}</td>
-              <td class="fw-mono" style="color:var(--muted)">${fmtMin(c.avgPerDay)}</td>
-              <td class="fw-mono" style="color:${c.cv != null && c.cv < 0.3 ? 'var(--green)' : c.cv != null && c.cv < 0.5 ? 'var(--wake)' : 'var(--red)'}">${fmtCV(c.cv)}</td>
-            </tr>`).join('')}</tbody>
-            <tfoot><tr><td>合计</td><td class="fw-mono">${totalSessCount}</td><td class="fw-mono c-clock">${fmtMin(totalClock, true)}</td><td class="fw-mono c-nominal">${fmtMin(totalNominal, true)}</td><td class="fw-mono c-actual">${fmtMin(totalActual, true)}</td><td class="fw-mono">${fmtMin(totalRest, true)}</td><td class="fw-mono">${eff != null ? eff + '%' : '-'}</td><td></td><td class="fw-mono" style="color:var(--muted)">${fmtMin(avgActPerDay)}</td><td></td></tr></tfoot>
-          </table>
+    <section class="sess-analysis-toolbar">
+      <label class="sess-analysis-filter sess-analysis-type-filter"><span>时段类型</span><select onchange="sessAnaNav('typeFilter',this.value)">
+        <option value="" ${sessTypeFilter ? '' : 'selected'}>全部类型 (${allSessionRecords.length})</option>
+        ${[['normal', '普通时段'], ['special', '特殊时段'], ['special-study', '特殊学习时段']].map(([value, label]) => `<option value="${value}" ${sessTypeFilter === value ? 'selected' : ''}>${label} (${allSessionRecords.filter(record => record.type === value).length})</option>`).join('')}
+      </select></label>
+      <label class="sess-analysis-filter"><span>时段类别</span><select onchange="sessAnaNav('catFilter',this.value)"><option value="">全部类别 (${typeCats.length})</option>${typeCats.map(category => `<option value="${escHtmlApp(category)}" ${sessCatFilter === category ? 'selected' : ''}>${escHtmlApp(category)}</option>`).join('')}</select></label>
+    </section>
+
+    ${visibleSessionRecords.length ? `
+      ${renderSessAnalysisKpiStatus(dateStrs, sessCatFilter, sessTypeFilter)}
+      <section class="sess-analysis-panel sess-analysis-trend-panel">
+        <div class="sess-analysis-panel-head"><div><div class="sess-analysis-eyebrow">FOCUS TREND</div><h3>每日专注时长趋势</h3><p id="sess-analysis-trend-note">${s.trendView === 'daily' ? '查看每天的类别时长；普通专注和特殊学习使用实际分钟，不可用时段使用时钟分钟。' : '查看截至当天的累计类别分钟 ÷ 该类别有效记录天数。'}</p></div>
+          <div class="sess-analysis-tabs sess-analysis-trend-tabs"><button type="button" class="${s.trendView === 'daily' ? 'active' : ''}" data-sess-trend-view="daily" onclick="switchSessAnaTrendView('daily')">每日趋势</button><button type="button" class="${s.trendView === 'cumulativeAverage' ? 'active' : ''}" data-sess-trend-view="cumulativeAverage" onclick="switchSessAnaTrendView('cumulativeAverage')">累计平均</button></div>
         </div>
-      </div>
-    </div>
-  `;
+        ${sessAnaLegendHtml(cats)}
+        <div class="sess-analysis-chart-stage"><canvas id="sessAnaDailyChart"></canvas></div>
+      </section>
+      <div id="sess-analysis-duration-host">${sessAnaDurationPanelHtml(durationStats)}</div>
+      <details class="sess-analysis-detail-panel">
+        <summary><span><b>类别汇总明细</b><small>${cats.length} 个类别 · ${visibleSessionRecords.length} 个时段${sessCatFilter ? ` · ${escHtmlApp(sessCatFilter)}` : ''}</small></span><span>展开</span></summary>
+        <div class="sess-analysis-table-wrap"><table class="sess-analysis-table" data-sort-table="sess-category-summary">
+          <thead><tr><th>类别</th>${sortableTableHeaderHtml('sess-category-summary', 'count', '时段数')}${sortableTableHeaderHtml('sess-category-summary', 'clock', `时钟${tipIcon('clock')}`)}${sortableTableHeaderHtml('sess-category-summary', 'nominal', `名义${tipIcon('nominal')}`)}${sortableTableHeaderHtml('sess-category-summary', 'actual', `实际${tipIcon('actual')}`)}${sortableTableHeaderHtml('sess-category-summary', 'rest', `休息${tipIcon('rest')}`)}${sortableTableHeaderHtml('sess-category-summary', 'efficiency', `效率${tipIcon('efficiency')}`)}${sortableTableHeaderHtml('sess-category-summary', 'average', '每段平均')}${sortableTableHeaderHtml('sess-category-summary', 'daily', '日均')}${sortableTableHeaderHtml('sess-category-summary', 'cv', `CV${tipIcon('cv')}`)}</tr></thead>
+          <tbody>${catStats.map((c, rowIndex) => `<tr ${sortableTableRowAttrs({ count: c.count, clock: c.clock, nominal: c.nominal, actual: c.actual, rest: c.rest, efficiency: c.eff, average: c.avgAct, daily: c.avgPerDay, cv: c.cv }, rowIndex)}><td><i style="--series-color:${sessAnaCategoryColor(c.cat)}"></i>${escHtmlApp(c.cat)}</td><td class="fw-mono">${c.count}</td><td class="fw-mono c-clock">${fmtMin(c.clock, true)}</td><td class="fw-mono c-nominal">${fmtMin(c.nominal, true)}</td><td class="fw-mono c-actual">${fmtMin(c.actual, true)}</td><td class="fw-mono">${fmtMin(c.rest, true)}</td><td class="fw-mono c-actual">${c.eff != null ? `${c.eff}%` : '-'}</td><td class="fw-mono">${fmtMin(c.avgAct)}</td><td class="fw-mono c-muted">${fmtMin(c.avgPerDay)}</td><td class="fw-mono c-muted">${fmtCV(c.cv)}</td></tr>`).join('')}</tbody>
+          <tfoot><tr><td>合计</td><td>${visibleSessionRecords.length}</td><td>${fmtMin(displayTotals.clock, true)}</td><td>${fmtMin(displayTotals.nominal, true)}</td><td>${fmtMin(displayTotals.actual, true)}</td><td>${fmtMin(displayTotals.rest, true)}</td><td>${displayTotals.effective ? `${Math.round(displayTotals.actual / displayTotals.effective * 100)}%` : '-'}</td><td></td><td>${daysWithSess ? fmtMin(Math.round(displayTotals.actual / daysWithSess)) : '-'}</td><td></td></tr></tfoot>
+        </table></div>
+      </details>
+      ${sessAnaRecordDetailHtml(visibleSessionRecords)}
+    ` : `<div class="sess-analysis-empty"><b>当前范围没有时段记录</b><span>可以切换时间范围或类别，也可以先在录入页添加专注时段。</span></div>`}
+  </div>`;
 
+  if (!visibleSessionRecords.length) return;
+  renderSessAnaTrendChart(sessChartLabels, sessDayDS, dateStrs);
+  renderSessAnaDurationChart(durationStats);
+}
+
+function renderSessAnaTrendChart(labels, datasets, dateStrs = []) {
+  if (!document.getElementById('sessAnaDailyChart')) return;
+  const s = state.sessAna;
   mkChart('sessAnaDailyChart', {
-    type: 'line', data: { labels: sessChartLabels, datasets: sessDayDS },
+    type: 'line', data: { labels, datasets },
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { position: 'bottom', labels: { color: '#6b7a9e', boxWidth: 12 } },
-        tooltip: { callbacks: { label: ctx => { const v = ctx.parsed.y; if (!v) return null; return `${ctx.dataset.label}: ${fmtMin(Math.round(v * 60))}`; } } }
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => { const value = ctx.parsed.y; return value == null ? null : `${ctx.dataset.label}: ${fmtMin(Math.round(value * 60))}`; } } },
       },
       scales: {
-        x: { ticks: { color: '#6b7a9e', maxRotation: s.mode === 'month' ? 45 : 0 }, grid: gridCfg },
-        y: { ticks: { color: '#6b7a9e', callback: v => v + 'h' }, grid: gridCfg, min: 0 }
-      }
-    }
+        x: { ticks: { color: '#6b7a9e', maxRotation: s.mode === 'week' ? 0 : 35, autoSkip: true, maxTicksLimit: s.mode === 'all' ? 24 : undefined }, grid: { display: false } },
+        y: { ticks: { color: '#6b7a9e', callback: value => `${value}h` }, grid: { color: 'rgba(107,122,158,.12)', drawBorder: false }, min: 0, title: { display: true, text: s.trendView === 'daily' ? '每日时长（小时）' : '累计日均时长（小时）', color: '#6b7a9e' } },
+      },
+    },
+    plugins: [noRecordRegionPlugin(dateStrs)],
   });
+}
+
+function sessAnaTrendDataForView(context, view) {
+  const { dateStrs, cats, catMap, sessCatFilter } = context;
+  const makeDataset = (category, values) => {
+    const color = sessAnaCategoryColor(category);
+    return {
+      label: category,
+      seriesKey: category,
+      data: values,
+      borderColor: color,
+      backgroundColor: color,
+      borderWidth: 2.2,
+      pointRadius: values.length > 60 ? 1.5 : 3.5,
+      pointHoverRadius: 5,
+      pointBackgroundColor: color,
+      pointBorderColor: '#07111f',
+      pointBorderWidth: 1.5,
+      tension: .16,
+      fill: false,
+      spanGaps: false,
+      hidden: state.sessAna.hiddenSeries.includes(category),
+    };
+  };
+  if (view === 'cumulativeAverage') {
+    const cumulative = sessAnaCumulativeAverageData(dateStrs, cats, catMap);
+    return { labels: cumulative.dates.map(formatShort), datasets: cumulative.series.map(item => makeDataset(item.category, item.values)) };
+  }
+  if (sessCatFilter && catMap[sessCatFilter]) {
+    const values = dateStrs.map(dateStr => Number(((catMap[sessCatFilter][dateStr]?.metric || 0) / 60).toFixed(2)));
+    return { labels: dateStrs.map(formatShort), datasets: [makeDataset(sessCatFilter, chartMaskRecordedValues(dateStrs, values))] };
+  }
+  return {
+    labels: dateStrs.map(formatShort),
+    datasets: cats.map(category => makeDataset(
+      category,
+      chartMaskRecordedValues(dateStrs, dateStrs.map(dateStr => Number(((catMap[category][dateStr]?.metric || 0) / 60).toFixed(2))))
+    )),
+  };
+}
+
+function renderSessAnaDurationChart(stats) {
+  const canvas = document.getElementById('sessAnaDurationChart');
+  if (!canvas || !stats?.validCount) return;
+  const selected = stats.rows.find(row => row.category === state.sessAna.durationCategory) || stats.rows[0];
+  if (!selected) return;
+  const color = sessAnaCategoryColor(selected.category);
+  mkChart('sessAnaDurationChart', {
+    type: 'line',
+    data: {
+      labels: stats.bins.map(bin => bin.chartLabel),
+      datasets: [{
+        label: selected.category,
+        data: stats.bins.map(bin => selected.counts[bin.key] || 0),
+        borderColor: color,
+        backgroundColor: `${color}1f`,
+        pointBackgroundColor: color,
+        pointBorderColor: '#07111f',
+        pointBorderWidth: 1.5,
+        pointRadius: 4.5,
+        pointHoverRadius: 6,
+        borderWidth: 2.3,
+        tension: .18,
+        fill: true,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { title: contexts => stats.bins[contexts[0]?.dataIndex]?.label || '', label: context => {
+          const count = Number(context.parsed.y) || 0;
+          const pct = selected.validCount ? count / selected.validCount * 100 : 0;
+          return `${count} 段 · 占该类别 ${pct.toFixed(1)}%`;
+        } } },
+      },
+      scales: {
+        x: { ticks: { color: '#a8b5d0', maxRotation: 0, autoSkip: true, maxTicksLimit: 12 }, grid: { display: false }, title: { display: true, text: `单条时段长度区间（每格${stats.binSize}分钟）`, color: '#6b7a9e' } },
+        y: { beginAtZero: true, ticks: { color: '#6b7a9e', precision: 0 }, grid: { color: 'rgba(107,122,158,.12)', drawBorder: false }, title: { display: true, text: '时段数', color: '#6b7a9e' } },
+      },
+    },
+  });
+}
+
+function sessAnaCurrentDurationContext() {
+  const records = [];
+  sessAnaGetDates().forEach(dateStr => {
+    (getDay(dateStr).sessions || []).forEach(session => records.push({ dateStr, category: sessAnaSessionCategory(session), session }));
+  });
+  const typeVisible = state.sessAna.typeFilter
+    ? records.filter(record => sessAnaSessionTypeKey(record.session) === state.sessAna.typeFilter)
+    : records;
+  const visible = state.sessAna.catFilter ? typeVisible.filter(record => record.category === state.sessAna.catFilter) : typeVisible;
+  const categories = [...new Set(visible.map(record => record.category))].sort((a, b) => a === '普通专注' ? -1 : b === '普通专注' ? 1 : a.localeCompare(b));
+  return { records: visible, categories };
+}
+
+function rerenderSessAnaDurationPanel() {
+  const host = document.getElementById('sess-analysis-duration-host');
+  if (!host) return;
+  const context = sessAnaCurrentDurationContext();
+  const stats = sessAnaDurationStats(context.records, context.categories, state.sessAna.durationBasis, state.sessAna.durationBinSize);
+  host.innerHTML = sessAnaDurationPanelHtml(stats);
+  requestAnimationFrame(() => renderSessAnaDurationChart(stats));
+}
+
+function switchSessAnaTrendView(view) {
+  if (!['daily', 'cumulativeAverage'].includes(view)) return;
+  state.sessAna.trendView = view;
+  document.querySelectorAll('[data-sess-trend-view]').forEach(button => button.classList.toggle('active', button.dataset.sessTrendView === view));
+  const note = document.getElementById('sess-analysis-trend-note');
+  if (note) note.textContent = view === 'daily'
+    ? '查看每天的类别时长；普通专注和特殊学习使用实际分钟，不可用时段使用时钟分钟。'
+    : '查看截至当天的累计类别分钟 ÷ 该类别有效记录天数。';
+  const context = state.sessAna._trendContext;
+  if (!context) return renderSessAnalysis();
+  const chartData = sessAnaTrendDataForView(context, view);
+  renderSessAnaTrendChart(chartData.labels, chartData.datasets, context.dateStrs);
+}
+
+function switchSessAnaDurationBasis(basis) {
+  if (!['clock', 'nominal', 'actual'].includes(basis)) return;
+  state.sessAna.durationBasis = basis;
+  rerenderSessAnaDurationPanel();
+}
+
+function previewSessAnaDurationBinSize(value) {
+  const output = document.getElementById('sess-duration-bin-output');
+  if (output) output.textContent = `${sessAnaNormalizeDurationBinSize(value)} 分钟 / 格`;
+}
+
+function setSessAnaDurationBinSize(value) {
+  state.sessAna.durationBinSize = sessAnaNormalizeDurationBinSize(value);
+  rerenderSessAnaDurationPanel();
+}
+
+function selectSessAnaDurationCategory(category) {
+  if (!category) return;
+  state.sessAna.durationCategory = category;
+  rerenderSessAnaDurationPanel();
+}
+
+function sessAnaToggleSeries(category) {
+  const hidden = state.sessAna.hiddenSeries;
+  const index = hidden.indexOf(category);
+  if (index >= 0) hidden.splice(index, 1);
+  else hidden.push(category);
+  const chart = chartReg.sessAnaDailyChart;
+  if (chart) {
+    const datasetIndex = chart.data.datasets.findIndex(dataset => dataset.seriesKey === category);
+    if (datasetIndex >= 0) {
+      chart.setDatasetVisibility(datasetIndex, index >= 0);
+      chart.update();
+    }
+  }
+  const encoded = sessAnaEncodedValue(category);
+  document.querySelectorAll('[data-sess-series]').forEach(button => {
+    if (button.dataset.sessSeries === encoded) button.classList.toggle('hidden', index < 0);
+  });
+}
+
+function sessAnaShowAllSeries() {
+  state.sessAna.hiddenSeries = [];
+  const chart = chartReg.sessAnaDailyChart;
+  if (chart) {
+    chart.data.datasets.forEach((dataset, index) => chart.setDatasetVisibility(index, true));
+    chart.update();
+  }
+  document.querySelectorAll('[data-sess-series]').forEach(button => button.classList.remove('hidden'));
+}
+
+function sessAnaSetDetailCategory(category) {
+  state.sessAna.detailCategory = category || '';
+  renderSessAnalysis();
+}
+
+function sessAnaOpenSession(dateStr, sessionId) {
+  if (!dateStr || !sessionId) return;
+  monthEditSession(dateStr, sessionId);
 }
 
 function sessAnaNav(action, val) {
   const s = state.sessAna;
-  if (action === 'mode') { s.mode = val; }
+  if (action === 'typeFilter') { s.typeFilter = val; s.catFilter = ''; }
   else if (action === 'catFilter') { s.catFilter = val; }
-  else if (action === 'prev') { if (s.mode === 'week') s.weekStart = addDays(s.weekStart, -7); else { s.month.month--; if (s.month.month < 0) { s.month.month = 11; s.month.year--; } } }
-  else if (action === 'next') { if (s.mode === 'week') s.weekStart = addDays(s.weekStart, 7); else { s.month.month++; if (s.month.month > 11) { s.month.month = 0; s.month.year++; } } }
-  else if (action === 'today') { const n = new Date(); if (s.mode === 'week') s.weekStart = getMondayOfDate(n); else { s.month.year = n.getFullYear(); s.month.month = n.getMonth(); } }
+  else return;
   renderSessAnalysis();
 }
 
@@ -6012,24 +8948,528 @@ function sessAnaNav(action, val) {
 // TASK ANALYSIS TAB (任务记录分析)
 // ============================================================
 function taskAnaGetDates() {
+  return analysisRangeMeta('task').analysisDates;
+}
+
+function taskAnaCumulativeCategoryData(dateStrs, categories, categoryMap, valueKey) {
+  return {
+    dates: dateStrs,
+    series: categories.map(category => {
+      let total = 0;
+      let activeDays = 0;
+      return {
+        category,
+        values: dateStrs.map(dateStr => {
+          if (chartDateStatus(dateStr) !== 'recorded') return null;
+          const row = categoryMap[category]?.[dateStr];
+          if (row) {
+            total += Math.max(0, Number(row[valueKey]) || 0);
+            activeDays += 1;
+          }
+          return activeDays ? total / activeDays : null;
+        }),
+      };
+    }),
+  };
+}
+
+function taskAnaCumulativeDailyCount(dateStrs, taskRecords) {
+  let total = 0;
+  let activeDays = 0;
+  return dateStrs.map(dateStr => {
+    if (chartDateStatus(dateStr) !== 'recorded') return null;
+    const count = taskRecords.filter(record => record.dateStr === dateStr).length;
+    if (count > 0) {
+      total += count;
+      activeDays += 1;
+    }
+    return activeDays ? Number((total / activeDays).toFixed(2)) : null;
+  });
+}
+
+function taskAnaLegendHtml(categories, group) {
+  if (!categories.length) return '';
+  const hidden = state.taskAna.hiddenSeries?.[group] || [];
+  return `<div class="task-analysis-legend"><div class="task-analysis-legend-items">${categories.map(category => {
+    const encoded = encodeURIComponent(category).replace(/'/g, '%27');
+    return `<button type="button" class="task-analysis-legend-key${hidden.includes(category) ? ' hidden' : ''}" data-task-series-group="${group}" data-task-series="${encoded}" onclick="taskAnaToggleSeries('${group}',decodeURIComponent('${encoded}'))"><i style="--series-color:${getCategoryColor(category, group === 'efficiency' ? 3 : state.taskAna.level)}"></i><span>${escHtmlApp(category)}</span></button>`;
+  }).join('')}</div><button type="button" class="btn btn-ghost btn-sm" onclick="taskAnaShowAllSeries('${group}')">全部显示</button></div>`;
+}
+
+function taskAnaCumulativeChapterValues(items, metric) {
+  let totalMinutes = 0;
+  let totalQuantity = 0;
+  return items.map(item => {
+    totalMinutes += Math.max(0, Number(item.minutes) || 0);
+    totalQuantity += Math.max(0, Number(item.quantity) || 0);
+    if (metric === 'quantityEfficiency') return totalMinutes > 0 ? totalQuantity / totalMinutes : null;
+    return totalMinutes / Math.max(1, items.indexOf(item) + 1);
+  });
+}
+
+const TASK_DISTRIBUTION_TARGET_BINS = [5, 7, 9, 12, 16];
+const TASK_DISTRIBUTION_UNLABELED_UNIT = '__unlabeled__';
+
+function taskAnaDistributionGranularity(value) {
+  const numeric = Math.round(Number(value));
+  return Number.isFinite(numeric) ? Math.min(5, Math.max(1, numeric)) : 3;
+}
+
+function taskAnaDistributionUnitKey(task) {
+  return visibleTaskQuantityUnit(task).trim() || TASK_DISTRIBUTION_UNLABELED_UNIT;
+}
+
+function taskAnaDistributionUnitLabel(unitKey) {
+  return unitKey === TASK_DISTRIBUTION_UNLABELED_UNIT ? '未标单位' : unitKey;
+}
+
+function taskAnaDistributionNiceWidth(maxValue, targetBins, metric) {
+  if (!(maxValue > 0)) return metric === 'efficiency' ? .001 : 1;
+  const raw = maxValue / Math.max(1, targetBins);
+  const exponent = Math.floor(Math.log10(raw));
+  const magnitude = 10 ** exponent;
+  const fraction = raw / magnitude;
+  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10;
+  const minimum = metric === 'efficiency' ? .001 : 1;
+  return Math.max(minimum, niceFraction * magnitude);
+}
+
+function taskAnaDistributionNumber(value, width, maximumDigits = 3) {
+  const magnitude = Math.abs(width);
+  const digits = magnitude >= 1 ? 0 : Math.min(maximumDigits, Math.max(1, Math.ceil(-Math.log10(magnitude))));
+  return Number(value.toFixed(digits)).toLocaleString('zh-CN', { maximumFractionDigits: digits });
+}
+
+function taskAnaDistributionMetricValue(task, metric, unitKey) {
+  const minutes = Math.max(0, Number(task?.minutes) || 0);
+  if (metric === 'duration') return minutes > 0 ? minutes : null;
+  const quantity = visibleTaskQuantity(task);
+  if (!(quantity > 0) || taskAnaDistributionUnitKey(task) !== unitKey) return null;
+  if (metric === 'quantity') return quantity;
+  return minutes > 0 ? quantity / minutes : null;
+}
+
+function taskAnaDistributionStats(records, metric, unitKey, granularity) {
+  const values = records
+    .map(record => taskAnaDistributionMetricValue(record.task, metric, unitKey))
+    .filter(value => Number.isFinite(value) && value > 0);
+  if (!values.length) return { values: [], bins: [], width: 0, average: null, dominant: null };
+  const level = taskAnaDistributionGranularity(granularity);
+  const targetBins = TASK_DISTRIBUTION_TARGET_BINS[level - 1];
+  const maximum = Math.max(...values);
+  const width = taskAnaDistributionNiceWidth(maximum, targetBins, metric);
+  const count = Math.max(1, Math.ceil(maximum / width));
+  const bins = Array.from({ length: count }, (_, index) => {
+    const min = index * width;
+    const max = (index + 1) * width;
+    return {
+      min,
+      max,
+      count: values.filter(value => value > min && value <= max + Number.EPSILON).length,
+    };
+  });
+  const dominant = bins.reduce((best, bin) => bin.count > best.count ? bin : best, bins[0]);
+  return {
+    values,
+    bins,
+    width,
+    average: values.reduce((sum, value) => sum + value, 0) / values.length,
+    dominant,
+  };
+}
+
+function taskAnaDistributionPanelHtml(records) {
   const s = state.taskAna;
-  if (s.mode === 'week') return getWeekDays(s.weekStart);
-  const y = s.month.year, m = s.month.month;
-  const dim = new Date(y, m + 1, 0).getDate();
-  return Array.from({ length: dim }, (_, i) => `${y}-${String(m + 1).padStart(2, '0')}-${String(i + 1).padStart(2, '0')}`);
+  if (!['duration', 'quantity', 'efficiency'].includes(s.distributionMetric)) s.distributionMetric = 'duration';
+  s.distributionGranularity = taskAnaDistributionGranularity(s.distributionGranularity);
+  const normalized = (records || []).map(record => {
+    const [level1, level2, level3] = parseActPath(record.task?.activityType);
+    return {
+      ...record,
+      distributionLevel1: level1 || '',
+      distributionLevel2: level1 && level2 ? `${level1} > ${level2}` : '',
+      distributionLevel3: level1 && level2 && level3 ? `${level1} > ${level2} > ${level3}` : '',
+    };
+  }).filter(record => record.distributionLevel3);
+  const level1Options = [...new Set(normalized.map(record => record.distributionLevel1))].sort();
+  if (s.distributionLevel1 && !level1Options.includes(s.distributionLevel1)) {
+    s.distributionLevel1 = '';
+    s.distributionLevel2 = '';
+    s.distributionLevel3 = '';
+    s.distributionUnit = '';
+  }
+  const level1Records = s.distributionLevel1
+    ? normalized.filter(record => record.distributionLevel1 === s.distributionLevel1)
+    : [];
+  const level2Options = [...new Set(level1Records.map(record => record.distributionLevel2))].filter(Boolean).sort();
+  if (s.distributionLevel2 && !level2Options.includes(s.distributionLevel2)) {
+    s.distributionLevel2 = '';
+    s.distributionLevel3 = '';
+    s.distributionUnit = '';
+  }
+  const level2Records = s.distributionLevel2
+    ? level1Records.filter(record => record.distributionLevel2 === s.distributionLevel2)
+    : [];
+  const level3Options = [...new Set(level2Records.map(record => record.distributionLevel3))].filter(Boolean).sort();
+  if (s.distributionLevel3 && !level3Options.includes(s.distributionLevel3)) {
+    s.distributionLevel3 = '';
+    s.distributionUnit = '';
+  }
+  const selectedRecords = s.distributionLevel3
+    ? level2Records.filter(record => record.distributionLevel3 === s.distributionLevel3)
+    : [];
+  const unitCounts = selectedRecords.reduce((counts, record) => {
+    if (!(visibleTaskQuantity(record.task) > 0)) return counts;
+    const unitKey = taskAnaDistributionUnitKey(record.task);
+    counts.set(unitKey, (counts.get(unitKey) || 0) + 1);
+    return counts;
+  }, new Map());
+  const unitOptions = [...unitCounts.keys()].sort((a, b) => (unitCounts.get(b) - unitCounts.get(a)) || taskAnaDistributionUnitLabel(a).localeCompare(taskAnaDistributionUnitLabel(b)));
+  if (!unitOptions.includes(s.distributionUnit)) s.distributionUnit = unitOptions[0] || '';
+  const metric = s.distributionMetric;
+  const metricLabels = { duration: '任务时长', quantity: '完成数量', efficiency: '任务效率' };
+  const needsUnit = metric !== 'duration';
+  const unitLabel = metric === 'duration'
+    ? '分钟'
+    : `${taskAnaDistributionUnitLabel(s.distributionUnit || TASK_DISTRIBUTION_UNLABELED_UNIT)}${metric === 'efficiency' ? '/分钟' : ''}`;
+  const stats = s.distributionLevel3
+    ? taskAnaDistributionStats(selectedRecords, metric, s.distributionUnit, s.distributionGranularity)
+    : { values: [], bins: [], width: 0, average: null, dominant: null };
+  const color = s.distributionLevel3 ? getCategoryColor(s.distributionLevel3, 3) : getSystemSeriesColor('taskTotal');
+  const widthText = stats.width ? taskAnaDistributionNumber(stats.width, stats.width) : '-';
+  const valueText = value => `${taskAnaDistributionNumber(value, stats.width || value || 1)} ${escHtmlApp(unitLabel)}`;
+  const binText = bin => `${taskAnaDistributionNumber(bin.min, stats.width)}–${taskAnaDistributionNumber(bin.max, stats.width)} ${escHtmlApp(unitLabel)}`;
+  s._distributionChartData = stats.values.length ? {
+    color,
+    category: s.distributionLevel3,
+    unitLabel,
+    labels: stats.bins.map(bin => [
+      `${taskAnaDistributionNumber(bin.min, stats.width)}–${taskAnaDistributionNumber(bin.max, stats.width)}`,
+      unitLabel,
+    ]),
+    counts: stats.bins.map(bin => bin.count),
+    bins: stats.bins,
+  } : null;
+  s._distributionPreview = { selectedRecords, metric, unitKey: s.distributionUnit };
+  const selectHtml = (level, label, options, selected, enabled) => `<label class="task-distribution-select"><span>${label}</span><select ${enabled ? '' : 'disabled'} onchange="taskAnaSetDistributionLevel(${level},this.value)"><option value="">${enabled ? `请选择${label}` : '请先选择上一级'}</option>${options.map(path => `<option value="${escHtmlApp(path)}" ${selected === path ? 'selected' : ''}>${escHtmlApp(path.split(' > ').pop() || path)}</option>`).join('')}</select></label>`;
+  const selectors = [
+    selectHtml(1, '一级分类', level1Options, s.distributionLevel1, true),
+    selectHtml(2, '二级分类', level2Options, s.distributionLevel2, Boolean(s.distributionLevel1)),
+    selectHtml(3, '三级分类', level3Options, s.distributionLevel3, Boolean(s.distributionLevel2)),
+  ].join('');
+  const metricTabs = Object.entries(metricLabels).map(([key, label]) => `<button type="button" class="${metric === key ? 'active' : ''}" onclick="switchTaskAnaDistributionMetric('${key}')">${label}</button>`).join('');
+  let bodyHtml;
+  if (!normalized.length) {
+    bodyHtml = '<div class="task-analysis-empty compact"><b>当前范围没有完整三级分类任务</b><span>请先为任务补全一级、二级和三级分类。</span></div>';
+  } else if (!s.distributionLevel3) {
+    bodyHtml = '<div class="task-analysis-empty compact"><b>请选择完整三级分类</b><span>依次选择一级、二级和三级分类后，这里会显示单条任务分布。</span></div>';
+  } else if (needsUnit && !unitOptions.length) {
+    bodyHtml = `<div class="task-analysis-empty compact"><b>当前分类没有数量记录</b><span>${metric === 'efficiency' ? '填写正数数量和任务时长后才能计算效率分布。' : '填写正数完成数量后才能生成数量分布。'}</span></div>`;
+  } else if (!stats.values.length) {
+    bodyHtml = `<div class="task-analysis-empty compact"><b>当前指标没有有效任务</b><span>${metric === 'duration' ? '只有时长大于零的任务进入分布。' : '可以切换数量单位或补充有效记录。'}</span></div>`;
+  } else {
+    bodyHtml = `<div class="task-distribution-controls">
+        <div class="task-distribution-scale-head"><span>区间精细度</span><output id="task-distribution-granularity-output">第 ${s.distributionGranularity} 档 · ${widthText} ${escHtmlApp(unitLabel)} / 格</output></div>
+        <input type="range" min="1" max="5" step="1" value="${s.distributionGranularity}" aria-label="任务分布区间精细度" oninput="previewTaskAnaDistributionGranularity(this.value)" onchange="setTaskAnaDistributionGranularity(this.value)">
+        <div class="task-distribution-scale-labels"><span>宽泛 · 5格</span><span>精细 · 16格</span></div>
+      </div>
+      <div class="task-distribution-chart-head"><span><i style="--series-color:${color}"></i><b>${escHtmlApp(s.distributionLevel3)}</b> · ${metricLabels[metric]}分布</span><small>${stats.values.length} 条有效任务 · 平均 ${valueText(stats.average)} · 最集中于 ${binText(stats.dominant)}</small></div>
+      <div class="task-distribution-chart-stage"><canvas id="taskAnaDistributionChart"></canvas></div>`;
+  }
+  return `<section class="task-analysis-panel task-distribution-panel">
+    <div class="task-analysis-panel-head"><div><div class="task-analysis-eyebrow">TASK DISTRIBUTION</div><h3>单条任务分布</h3><p>选择完整三级分类，比较每条任务落入不同时长、数量或效率区间的频次。</p></div><div class="task-analysis-view-tabs task-distribution-metric-tabs">${metricTabs}</div></div>
+    <div class="task-distribution-category-grid">${selectors}</div>
+    ${needsUnit && s.distributionLevel3 && unitOptions.length ? `<label class="task-distribution-unit"><span>数量单位</span><select onchange="setTaskAnaDistributionUnit(this.value)">${unitOptions.map(unit => `<option value="${escHtmlApp(unit)}" ${s.distributionUnit === unit ? 'selected' : ''}>${escHtmlApp(taskAnaDistributionUnitLabel(unit))} · ${unitCounts.get(unit)} 条</option>`).join('')}</select></label>` : ''}
+    ${bodyHtml}
+  </section>`;
+}
+
+function taskAnaCurrentDistributionRecords() {
+  const level = state.taskAna.level || 1;
+  const records = [];
+  taskAnaGetDates().forEach(dateStr => {
+    (getDay(dateStr).tasks || []).forEach(task => records.push({
+      dateStr,
+      task,
+      category: truncateActPath(task.activityType, level),
+    }));
+  });
+  return state.taskAna.catFilter
+    ? records.filter(record => record.category === state.taskAna.catFilter)
+    : records;
+}
+
+function rerenderTaskAnaDistributionPanel() {
+  const host = document.getElementById('task-analysis-distribution-host');
+  if (!host) return;
+  host.innerHTML = taskAnaDistributionPanelHtml(taskAnaCurrentDistributionRecords());
+  requestAnimationFrame(renderTaskAnaDistributionChart);
+}
+
+function renderTaskAnaDistributionChart() {
+  const canvas = document.getElementById('taskAnaDistributionChart');
+  const chartData = state.taskAna._distributionChartData;
+  if (!canvas || !chartData) return;
+  mkChart('taskAnaDistributionChart', {
+    type: 'line',
+    data: {
+      labels: chartData.labels,
+      datasets: [{
+        label: chartData.category,
+        data: chartData.counts,
+        borderColor: chartData.color,
+        backgroundColor: `${chartData.color}1f`,
+        pointBackgroundColor: chartData.color,
+        pointBorderColor: '#07111f',
+        pointBorderWidth: 1.5,
+        pointRadius: 4.5,
+        pointHoverRadius: 6,
+        borderWidth: 2.3,
+        tension: .18,
+        fill: true,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: contexts => {
+            const bin = chartData.bins[contexts[0]?.dataIndex];
+            if (!bin) return '';
+            return `${taskAnaDistributionNumber(bin.min, bin.max - bin.min)}–${taskAnaDistributionNumber(bin.max, bin.max - bin.min)} ${chartData.unitLabel}`;
+          },
+          label: context => `${Number(context.parsed.y) || 0} 条任务`,
+        } },
+      },
+      scales: {
+        x: { ticks: { color: '#a8b5d0', maxRotation: 0, autoSkip: true, maxTicksLimit: 16 }, grid: { display: false }, title: { display: true, text: `单条任务区间（${chartData.unitLabel}）`, color: '#6b7a9e' } },
+        y: { beginAtZero: true, ticks: { color: '#6b7a9e', precision: 0 }, grid: { color: 'rgba(107,122,158,.12)', drawBorder: false }, title: { display: true, text: '任务条数', color: '#6b7a9e' } },
+      },
+    },
+  });
+}
+
+function taskAnaSetDistributionLevel(level, value) {
+  const s = state.taskAna;
+  if (Number(level) === 1) {
+    s.distributionLevel1 = value || '';
+    s.distributionLevel2 = '';
+    s.distributionLevel3 = '';
+  } else if (Number(level) === 2) {
+    s.distributionLevel2 = value || '';
+    s.distributionLevel3 = '';
+  } else if (Number(level) === 3) s.distributionLevel3 = value || '';
+  else return;
+  s.distributionUnit = '';
+  rerenderTaskAnaDistributionPanel();
+}
+
+function switchTaskAnaDistributionMetric(metric) {
+  if (!['duration', 'quantity', 'efficiency'].includes(metric)) return;
+  state.taskAna.distributionMetric = metric;
+  rerenderTaskAnaDistributionPanel();
+}
+
+function setTaskAnaDistributionUnit(unit) {
+  state.taskAna.distributionUnit = unit || '';
+  rerenderTaskAnaDistributionPanel();
+}
+
+function previewTaskAnaDistributionGranularity(value) {
+  const output = document.getElementById('task-distribution-granularity-output');
+  const preview = state.taskAna._distributionPreview;
+  if (!output || !preview) return;
+  const stats = taskAnaDistributionStats(preview.selectedRecords, preview.metric, preview.unitKey, value);
+  const unitLabel = preview.metric === 'duration'
+    ? '分钟'
+    : `${taskAnaDistributionUnitLabel(preview.unitKey || TASK_DISTRIBUTION_UNLABELED_UNIT)}${preview.metric === 'efficiency' ? '/分钟' : ''}`;
+  output.textContent = `第 ${taskAnaDistributionGranularity(value)} 档 · ${stats.width ? taskAnaDistributionNumber(stats.width, stats.width) : '-'} ${unitLabel} / 格`;
+}
+
+function setTaskAnaDistributionGranularity(value) {
+  state.taskAna.distributionGranularity = taskAnaDistributionGranularity(value);
+  rerenderTaskAnaDistributionPanel();
+}
+
+function taskAnaCategoryFilterContext(records) {
+  const normalized = (records || []).map((record, sourceIndex) => {
+    const [rawLevel1, rawLevel2, rawLevel3] = parseActPath(record.task?.activityType);
+    const level1 = rawLevel1 || '未分类';
+    const level2 = rawLevel2 || '';
+    const level3 = rawLevel3 || '';
+    return {
+      ...record,
+      sourceIndex,
+      level1Path: level1,
+      level2Path: level2 ? `${level1} > ${level2}` : '',
+      level3Path: level3 ? `${level1} > ${level2} > ${level3}` : '',
+      level3Category: truncateActPath(record.task?.activityType, 3),
+    };
+  });
+  const level1Counts = new Map();
+  normalized.forEach(record => level1Counts.set(record.level1Path, (level1Counts.get(record.level1Path) || 0) + 1));
+  const level1Options = [...level1Counts.keys()].sort();
+  if (state.taskAna.taskDetailLevel1 && !level1Options.includes(state.taskAna.taskDetailLevel1)) {
+    state.taskAna.taskDetailLevel1 = '';
+    state.taskAna.taskDetailLevel2 = '';
+    state.taskAna.taskDetailLevel3 = '';
+  }
+  const selectedLevel1 = state.taskAna.taskDetailLevel1 || '';
+  const level1Records = selectedLevel1 ? normalized.filter(record => record.level1Path === selectedLevel1) : normalized;
+  const level2Counts = new Map();
+  level1Records.filter(record => record.level2Path).forEach(record => level2Counts.set(record.level2Path, (level2Counts.get(record.level2Path) || 0) + 1));
+  const level2Options = [...level2Counts.keys()].sort();
+  if (state.taskAna.taskDetailLevel2 && !level2Options.includes(state.taskAna.taskDetailLevel2)) {
+    state.taskAna.taskDetailLevel2 = '';
+    state.taskAna.taskDetailLevel3 = '';
+  }
+  const selectedLevel2 = state.taskAna.taskDetailLevel2 || '';
+  const level2Records = selectedLevel2 ? level1Records.filter(record => record.level2Path === selectedLevel2) : level1Records;
+  const level3Counts = new Map();
+  level2Records.filter(record => record.level3Path).forEach(record => level3Counts.set(record.level3Path, (level3Counts.get(record.level3Path) || 0) + 1));
+  const level3Options = [...level3Counts.keys()].sort();
+  if (state.taskAna.taskDetailLevel3 && !level3Options.includes(state.taskAna.taskDetailLevel3)) state.taskAna.taskDetailLevel3 = '';
+  const selectedLevel3 = state.taskAna.taskDetailLevel3 || '';
+  const selectedPath = selectedLevel3 || selectedLevel2 || selectedLevel1;
+  const visible = normalized
+    .filter(record => !selectedLevel1 || record.level1Path === selectedLevel1)
+    .filter(record => !selectedLevel2 || record.level2Path === selectedLevel2)
+    .filter(record => !selectedLevel3 || record.level3Path === selectedLevel3)
+    .sort((a, b) => b.dateStr.localeCompare(a.dateStr) || a.sourceIndex - b.sourceIndex);
+  const filterRowHtml = (level, label, options, counts, selected, total, enabled, allLabel) => {
+    if (!enabled) return `<div class="task-detail-filter-level disabled"><span class="task-detail-filter-label">${label}</span><div class="task-detail-filter-empty">请先选择上一级分类</div></div>`;
+    const allButton = `<button type="button" class="task-detail-category${selected ? '' : ' active'}" onclick="taskAnaSetDetailLevel(${level},'')"><span>${allLabel}</span><b>${total}</b></button>`;
+    const optionButtons = options.map(path => {
+      const encoded = encodeURIComponent(path).replace(/'/g, '%27');
+      const shortName = path.split(' > ').pop() || path;
+      return `<button type="button" class="task-detail-category${selected === path ? ' active' : ''}" style="--category-color:${getCategoryColor(path, level)}" title="${escHtmlApp(path)}" onclick="taskAnaSetDetailLevel(${level},decodeURIComponent('${encoded}'))"><i></i><span>${escHtmlApp(shortName)}</span><b>${counts.get(path)}</b></button>`;
+    }).join('');
+    return `<div class="task-detail-filter-level"><span class="task-detail-filter-label">${label}</span><div class="task-detail-filter-options">${allButton}${optionButtons || '<span class="task-detail-filter-empty">当前分支没有下一级分类</span>'}</div></div>`;
+  };
+  const categoryFilters = [
+    filterRowHtml(1, '一级分类', level1Options, level1Counts, selectedLevel1, normalized.length, true, '全部一级'),
+    filterRowHtml(2, '二级分类', level2Options, level2Counts, selectedLevel2, level1Records.length, Boolean(selectedLevel1), '全部二级'),
+    filterRowHtml(3, '三级分类', level3Options, level3Counts, selectedLevel3, level2Records.length, Boolean(selectedLevel2), '全部三级'),
+  ].join('');
+  return { normalized, selectedPath, visible, categoryFilters };
+}
+
+function taskAnaCategoryStatsFromRecords(records, level) {
+  const grouped = new Map();
+  (records || []).forEach(record => {
+    const task = record.task || {};
+    const cat = truncateActPath(task.activityType, level);
+    if (!grouped.has(cat)) grouped.set(cat, {
+      cat, count: 0, min: 0, qty: 0, qtyUnit: '', wrong: 0, errorQty: 0, errorTaskCount: 0,
+      activeDates: new Set(), durations: [],
+    });
+    const row = grouped.get(cat);
+    const minutes = Math.max(0, Number(task.minutes) || 0);
+    const quantity = visibleTaskQuantity(task);
+    const wrong = visibleTaskWrongCount(task);
+    row.count++;
+    row.min += minutes;
+    row.qty += quantity;
+    row.durations.push(minutes);
+    if (record.dateStr) row.activeDates.add(record.dateStr);
+    if (visibleTaskQuantityUnit(task)) row.qtyUnit = visibleTaskQuantityUnit(task);
+    if (wrong != null) {
+      row.wrong += wrong;
+      row.errorQty += quantity;
+      row.errorTaskCount++;
+    }
+  });
+  return [...grouped.values()].map(row => {
+    const activeDays = row.activeDates.size;
+    const durationStats = calcStats(row.durations);
+    const errorRate = row.errorQty > 0 ? row.wrong / row.errorQty * 100 : null;
+    const correctCount = row.errorQty > 0 ? Math.max(0, row.errorQty - row.wrong) : null;
+    const accuracyRate = row.errorQty > 0 ? correctCount / row.errorQty * 100 : null;
+    return {
+      cat: row.cat,
+      count: row.count,
+      min: row.min,
+      qty: row.qty,
+      qtyUnit: row.qtyUnit,
+      wrong: row.wrong,
+      errorQty: row.errorQty,
+      errorTaskCount: row.errorTaskCount,
+      errorRate,
+      correctCount,
+      accuracyRate,
+      activeDays,
+      avgMin: row.count ? Math.round(row.min / row.count) : 0,
+      avgPerDay: activeDays ? Math.round(row.min / activeDays) : 0,
+      avgEff: row.qty > 0 && row.min > 0 ? +(row.qty / row.min).toFixed(2) : null,
+      cv: durationStats.cv,
+    };
+  });
+}
+
+function taskAnaTaskDetailPanelHtml(records, filterContext = null) {
+  const taskEfficiencyIndex = buildTaskEfficiencyComparisonIndex();
+  const context = filterContext || taskAnaCategoryFilterContext(records);
+  const { normalized, selectedPath, visible, categoryFilters } = context;
+  const rows = visible.map((record, rowIndex) => {
+    const task = record.task || {};
+    const quantity = visibleTaskQuantity(task);
+    const unit = visibleTaskQuantityUnit(task);
+    const minutes = Math.max(0, Number(task.minutes) || 0);
+    const efficiency = quantity > 0 && minutes > 0 ? quantity / minutes : null;
+    const efficiencyComparison = taskEfficiencyComparisonFor(taskEfficiencyIndex, task, record.dateStr);
+    const accuracy = visibleTaskAccuracy(task);
+    const encodedId = task.id ? encodeURIComponent(task.id).replace(/'/g, '%27') : '';
+    const openAction = task.id ? `taskAnaOpenTask('${record.dateStr}','${encodedId}')` : '';
+    return `<tr ${sortableTableRowAttrs({
+      date: record.dateStr,
+      minutes,
+      quantity: quantity > 0 ? quantity : null,
+      efficiency,
+      efficiencyDelta: efficiencyComparison?.deltaPct,
+      accuracy,
+    }, rowIndex)}>
+      <td class="fw-mono">${formatShort(record.dateStr)}</td>
+      <td>${task.id ? `<button type="button" class="task-detail-name" onclick="${openAction}">${escHtmlApp(task.name || '未命名任务')}</button>` : `<span class="task-detail-name disabled" title="该历史任务缺少ID，无法打开编辑">${escHtmlApp(task.name || '未命名任务')}</span>`}</td>
+      <td><span class="task-detail-category-label"><i style="--category-color:${getCategoryColor(record.level3Category, 3)}"></i>${escHtmlApp(record.level3Category)}</span></td>
+      <td class="fw-mono c-actual">${fmtMin(minutes, true)}</td>
+      <td class="fw-mono">${quantity > 0 ? `${forecastDisplayMetric(quantity)}${unit ? ` ${escHtmlApp(unit)}` : ''}` : '-'}</td>
+      <td class="fw-mono">${efficiency == null ? '-' : `${efficiency.toFixed(3)}${unit ? ` ${escHtmlApp(unit)}` : ''}/min`}</td>
+      <td class="fw-mono">${taskEfficiencyDeltaHtml(efficiencyComparison)}</td>
+      <td class="fw-mono c-muted">${accuracy == null ? '-' : `${accuracy.toFixed(2)}%`}</td>
+      <td><span class="task-detail-note" title="${escHtmlApp(task.note || '')}">${escHtmlApp(task.note || '-')}</span></td>
+      <td>${task.id ? `<button type="button" class="btn btn-ghost btn-sm" onclick="${openAction}">编辑</button>` : '<button type="button" class="btn btn-ghost btn-sm" disabled title="该历史任务缺少ID">不可编辑</button>'}</td>
+    </tr>`;
+  }).join('');
+  return `<section class="task-detail-panel">
+    <div class="task-detail-head"><div><div class="task-analysis-eyebrow">TASK RECORDS</div><h3>任务记录明细</h3><p>当前范围共 ${normalized.length} 条任务${selectedPath ? ` · ${escHtmlApp(selectedPath)} ${visible.length} 条` : ''}</p></div><span>${visible.length} 条</span></div>
+    <div class="task-detail-categories">${categoryFilters}</div>
+    <div class="task-detail-table-wrap"><table class="task-detail-table" data-sort-table="task-records"><thead><tr>${sortableTableHeaderHtml('task-records', 'date', '日期', 'date')}<th>任务名称</th><th>三级分类</th>${sortableTableHeaderHtml('task-records', 'minutes', '时长')}${sortableTableHeaderHtml('task-records', 'quantity', '数量')}${sortableTableHeaderHtml('task-records', 'efficiency', '效率')}${sortableTableHeaderHtml('task-records', 'efficiencyDelta', '较平均效率')}${sortableTableHeaderHtml('task-records', 'accuracy', '正确率')}<th>备注</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
+  </section>`;
 }
 
 function renderTaskAnalysis() {
   const s = state.taskAna;
-  const dateStrs = taskAnaGetDates();
+  if (!['daily', 'cumulativeAverage'].includes(s.durationView)) s.durationView = 'daily';
+  if (!['daily', 'cumulativeAverage'].includes(s.countView)) s.countView = 'daily';
+  if (!['minutes', 'quantityEfficiency'].includes(s.chapterMetric)) s.chapterMetric = 'minutes';
+  if (!['single', 'cumulativeAverage'].includes(s.chapterView)) s.chapterView = 'single';
+  if (!['daily', 'cumulativeAverage'].includes(s.efficiencyView)) s.efficiencyView = 'daily';
+  if (!s.hiddenSeries || typeof s.hiddenSeries !== 'object') s.hiddenSeries = { duration: [], efficiency: [] };
+  if (!Array.isArray(s.hiddenSeries.duration)) s.hiddenSeries.duration = [];
+  if (!Array.isArray(s.hiddenSeries.efficiency)) s.hiddenSeries.efficiency = [];
+  const sharedRange = analysisRangeMeta('task');
+  const dateStrs = sharedRange.analysisDates;
+  s.mode = dateStrs.length <= 7 ? 'week' : dateStrs.length > 90 ? 'all' : 'month';
   const labels = dateStrs.map(d => formatShort(d));
   const level = s.level || 1;
-  const rangeLabel = s.mode === 'week'
-    ? `${formatShort(dateStrs[0])} — ${formatShort(dateStrs[dateStrs.length - 1])}`
-    : `${s.month.year}年${s.month.month + 1}月`;
+  const rangeLabel = sharedRange.label;
 
   // 收集任务按类别分组
   const catMap = {}; // { catName: { [dateStr]: { min, qty, count } } }
+  const allTaskRecords = [];
   let totalCount = 0, totalMin = 0, totalQty = 0;
 
   dateStrs.forEach(ds => {
@@ -6041,16 +9481,15 @@ function renderTaskAnalysis() {
       const qtyUnit = visibleTaskQuantityUnit(t);
       totalMin += min; totalQty += qty;
       const cat = truncateActPath(t.activityType, level);
+      allTaskRecords.push({ dateStr: ds, task: t, category: cat });
       if (!catMap[cat]) catMap[cat] = {};
       if (!catMap[cat][ds]) catMap[cat][ds] = { min: 0, qty: 0, count: 0, qtyUnit: '', wrong: 0, errorQty: 0, errorTaskCount: 0 };
       catMap[cat][ds].min += min;
       catMap[cat][ds].qty += qty;
       catMap[cat][ds].count++;
       if (qtyUnit) catMap[cat][ds].qtyUnit = qtyUnit;
-      const wrong = Number(t.wrongCount);
-      const hasExplicitWrong = t.wrongCount != null && t.wrongCount !== '' &&
-        Number.isFinite(wrong) && wrong >= 0 && qty > 0 && wrong <= qty;
-      if (hasExplicitWrong) {
+      const wrong = visibleTaskWrongCount(t);
+      if (wrong != null) {
         catMap[cat][ds].wrong += wrong;
         catMap[cat][ds].errorQty += qty;
         catMap[cat][ds].errorTaskCount++;
@@ -6058,37 +9497,73 @@ function renderTaskAnalysis() {
     });
   });
 
-  const cats = Object.keys(catMap).sort();
-  const daysWithTasks = dateStrs.filter(ds => (getDay(ds).tasks || []).length > 0).length;
+  const allCats = Object.keys(catMap).sort();
+  if (s.catFilter && !allCats.includes(s.catFilter)) s.catFilter = '';
+  const taskCatFilter = s.catFilter || '';
+  const cats = taskCatFilter ? [taskCatFilter] : allCats;
+  const trendTaskRecords = taskCatFilter ? allTaskRecords.filter(record => record.category === taskCatFilter) : allTaskRecords;
+  const trendTotalMin = trendTaskRecords.reduce((sum, record) => sum + (Number(record.task.minutes) || 0), 0);
+  const visibleTaskRecords = allTaskRecords;
+  const fullLevel3Cats = [...new Set(allTaskRecords.map(record => truncateActPath(record.task.activityType, 3)))];
+  totalCount = visibleTaskRecords.length;
+  totalMin = visibleTaskRecords.reduce((sum, record) => sum + (Number(record.task.minutes) || 0), 0);
+  totalQty = visibleTaskRecords.reduce((sum, record) => sum + visibleTaskQuantity(record.task), 0);
+  const daysWithTasks = dateStrs.filter(dateStr => visibleTaskRecords.some(record => record.dateStr === dateStr)).length;
   const avgMinPerDay = daysWithTasks > 0 ? Math.round(totalMin / daysWithTasks) : 0;
 
   // 折线图 datasets — 根据筛选决定显示方式
-  const taskCatFilter = s.catFilter || '';
   let taskChartLabels, taskDayDS;
 
-  if (taskCatFilter && catMap[taskCatFilter]) {
-    // 单类别模式：只显示有数据的天
-    const filteredDays = dateStrs.filter(ds => catMap[taskCatFilter][ds]);
-    taskChartLabels = filteredDays.map(d => formatShort(d));
-    const hex = level === 1 ? (getActColor(taskCatFilter).color || getStackedColor(0)) : getStackedColor(cats.indexOf(taskCatFilter));
+  if (s.durationView === 'cumulativeAverage') {
+    const cumulative = taskAnaCumulativeCategoryData(dateStrs, cats, catMap, 'min');
+    taskChartLabels = cumulative.dates.map(formatShort);
+    taskDayDS = cumulative.series.map(item => {
+      const hex = getCategoryColor(item.category, level);
+      return {
+        label: item.category,
+        seriesKey: item.category,
+        data: item.values.map(value => value == null ? null : Number((value / 60).toFixed(2))),
+        borderColor: hex,
+        backgroundColor: hex,
+        borderWidth: 2.2,
+        pointRadius: item.values.length > 60 ? 1.5 : 3.5,
+        pointBackgroundColor: hex,
+        pointBorderColor: '#07111f',
+        pointBorderWidth: 1.5,
+        tension: .16,
+        fill: false,
+        spanGaps: false,
+        hidden: s.hiddenSeries.duration.includes(item.category),
+      };
+    });
+  } else if (taskCatFilter && catMap[taskCatFilter]) {
+    // 单类别模式仍保留完整日期轴，以便标识无记录区间。
+    taskChartLabels = labels;
+    const hex = getCategoryColor(taskCatFilter, level);
     taskDayDS = [{
       label: taskCatFilter,
-      data: filteredDays.map(ds => +((catMap[taskCatFilter][ds].min || 0) / 60).toFixed(2)),
+      seriesKey: taskCatFilter,
+      data: chartMaskRecordedValues(dateStrs, dateStrs.map(ds => +((catMap[taskCatFilter][ds]?.min || 0) / 60).toFixed(2))),
       borderColor: hex, backgroundColor: hex,
-      borderWidth: 2, pointRadius: 4, pointBackgroundColor: hex,
-      tension: 0.3, fill: false,
+      borderWidth: 2.2, pointRadius: dateStrs.length > 60 ? 1.5 : 4, pointBackgroundColor: hex,
+      pointBorderColor: '#07111f', pointBorderWidth: 1.5,
+      tension: .16, fill: false,
+      hidden: s.hiddenSeries.duration.includes(taskCatFilter),
     }];
   } else {
     // 全部模式
     taskChartLabels = labels;
     taskDayDS = cats.map((cat, ci) => {
-      const hex = level === 1 ? (getActColor(cat).color || getStackedColor(ci)) : getStackedColor(ci);
+      const hex = getCategoryColor(cat, level);
       return {
         label: cat,
-        data: dateStrs.map(ds => +((catMap[cat][ds]?.min || 0) / 60).toFixed(2)),
+        seriesKey: cat,
+        data: chartMaskRecordedValues(dateStrs, dateStrs.map(ds => +((catMap[cat][ds]?.min || 0) / 60).toFixed(2))),
         borderColor: hex, backgroundColor: hex,
-        borderWidth: 2, pointRadius: 3, pointBackgroundColor: hex,
-        tension: 0.3, fill: false,
+        borderWidth: 2, pointRadius: dateStrs.length > 60 ? 1.5 : 3, pointBackgroundColor: hex,
+        pointBorderColor: '#07111f', pointBorderWidth: 1.5,
+        tension: .16, fill: false,
+        hidden: s.hiddenSeries.duration.includes(cat),
       };
     });
   }
@@ -6105,12 +9580,20 @@ function renderTaskAnalysis() {
       errorTaskCount += v.errorTaskCount || 0;
       if (v.qtyUnit) qtyUnit = v.qtyUnit;
     });
-    const avgPerDay = daysWithTasks > 0 ? Math.round(min / daysWithTasks) : 0;
+    const activeDays = Object.keys(catMap[cat]).length;
+    const avgPerDay = activeDays > 0 ? Math.round(min / activeDays) : 0;
     const avgEff = (qty && min) ? +(qty / min).toFixed(2) : null;
     const errorRate = errorQty > 0 ? wrong / errorQty * 100 : null;
-    const dailyVals = dateStrs.map(ds => catMap[cat][ds]?.min || 0);
-    const stats = calcStats(dailyVals);
-    return { cat, count, min, qty, qtyUnit, wrong, errorQty, errorTaskCount, errorRate, avgMin: count > 0 ? Math.round(min / count) : 0, avgPerDay, avgEff, cv: stats.cv, stdDev: stats.stdDev };
+    const correctCount = errorQty > 0 ? Math.max(0, errorQty - wrong) : null;
+    const accuracyRate = errorQty > 0 ? correctCount / errorQty * 100 : null;
+    const durationStats = calcStats(allTaskRecords
+      .filter(record => record.category === cat)
+      .map(record => Math.max(0, Number(record.task.minutes) || 0)));
+    return {
+      cat, count, min, qty, qtyUnit, wrong, errorQty, errorTaskCount, errorRate, correctCount, accuracyRate,
+      activeDays, avgMin: count > 0 ? Math.round(min / count) : 0, avgPerDay, avgEff,
+      cv: durationStats.cv,
+    };
   });
   // 章节效率：横轴按模板章节顺序；周/月只筛选首次完成日，累计值包含此前跨天投入。
   const analysisDateSet = new Set(dateStrs);
@@ -6192,6 +9675,7 @@ function renderTaskAnalysis() {
     const quantityMinutes = quantityItems.reduce((sum, item) => sum + item.minutes, 0);
     const totalQuantity = quantityItems.reduce((sum, item) => sum + item.quantity, 0);
     const stats = calcStats(items.map(item => item.minutes));
+    const questionSpeedStats = calcStats(quantityItems.map(item => item.quantity / item.minutes));
     return {
       template,
       id: template.id,
@@ -6202,8 +9686,13 @@ function renderTaskAnalysis() {
       completedChapters: items.length,
       avgMinutes: items.length ? totalMinutes / items.length : null,
       questionSpeed: quantityMinutes > 0 ? totalQuantity / quantityMinutes : null,
+      variance: stats.variance,
+      stdDev: stats.stdDev,
       cv: stats.cv,
       n: stats.n,
+      questionSpeedCv: questionSpeedStats.cv,
+      questionSpeedStdDev: questionSpeedStats.stdDev,
+      questionSpeedN: questionSpeedStats.n,
     };
   });
   const chapterModeCats = new Set(chapterTemplates.map(template => truncateActPath(template.activityType, 3)));
@@ -6214,6 +9703,7 @@ function renderTaskAnalysis() {
   const selectedChapterTemplateStats = chapterTemplateStats.find(item => item.id === s.chapterEffTemplateId) ||
     firstChapterTemplateWithData;
   const selectedChapterItems = selectedChapterTemplateStats?.items || [];
+  if (s.chapterMetric === 'quantityEfficiency' && !selectedChapterTemplateStats?.template.quantityEnabled) s.chapterMetric = 'minutes';
   const chapterChartLabels = selectedChapterItems.map(item =>
     `${item.item.name}${item.item.archived ? '（已归档）' : ''}`
   );
@@ -6227,6 +9717,7 @@ function renderTaskAnalysis() {
     const quantityMinutes = quantityItems.reduce((sum, item) => sum + item.minutes, 0);
     const totalQuantity = quantityItems.reduce((sum, item) => sum + item.quantity, 0);
     const stats = calcStats(items.map(item => item.minutes));
+    const questionSpeedStats = calcStats(quantityItems.map(item => item.quantity / item.minutes));
     const unit = related.find(item => item.template.quantityEnabled)?.template.quantityUnit || '';
     return {
       cat,
@@ -6234,13 +9725,19 @@ function renderTaskAnalysis() {
       questionSpeed: quantityMinutes > 0 ? totalQuantity / quantityMinutes : null,
       unit,
       chapters: items.length,
+      variance: stats.variance,
+      stdDev: stats.stdDev,
       cv: stats.cv,
       n: stats.n,
+      questionSpeedCv: questionSpeedStats.cv,
+      questionSpeedStdDev: questionSpeedStats.stdDev,
+      questionSpeedN: questionSpeedStats.n,
     };
   });
 
-  // 纯数量效率趋势；开启章节的模板优先使用上面的“分钟/章”口径。
+  // 纯数量效率趋势：普通数量任务按记录日计入；章节＋数量模板按章节完成日计入累计章节数据。
   const effCatMap = {};
+  const effSampleMap = {};
   dateStrs.forEach(ds => {
     const day = getDay(ds);
     (day.tasks || []).forEach(t => {
@@ -6254,6 +9751,8 @@ function renderTaskAnalysis() {
       const min = Number(t.minutes) || 0;
       if (!qty || !min) return;
       const cat3 = truncateActPath(t.activityType, 3);
+      if (!effSampleMap[cat3]) effSampleMap[cat3] = [];
+      effSampleMap[cat3].push(qty / min);
       if (!effCatMap[cat3]) effCatMap[cat3] = {};
       if (!effCatMap[cat3][ds]) effCatMap[cat3][ds] = { qty: 0, min: 0, qtyUnit: '' };
       effCatMap[cat3][ds].qty += qty;
@@ -6261,37 +9760,136 @@ function renderTaskAnalysis() {
       if (qtyUnit) effCatMap[cat3][ds].qtyUnit = qtyUnit;
     });
   });
+  chapterTemplateData.forEach(templateData => {
+    const template = templateData.template;
+    if (!template.quantityEnabled) return;
+    const cat3 = truncateActPath(template.activityType, 3);
+    const qtyUnit = String(template.quantityUnit || '').trim();
+    [...templateData.progress.values()]
+      .filter(progress => progress.completed && analysisDateSet.has(progress.completionDate) && progress.quantity > 0 && progress.minutes > 0)
+      .forEach(progress => {
+        const completionDate = progress.completionDate;
+        if (!effSampleMap[cat3]) effSampleMap[cat3] = [];
+        effSampleMap[cat3].push(progress.quantity / progress.minutes);
+        if (!effCatMap[cat3]) effCatMap[cat3] = {};
+        if (!effCatMap[cat3][completionDate]) effCatMap[cat3][completionDate] = { qty: 0, min: 0, qtyUnit: '' };
+        effCatMap[cat3][completionDate].qty += progress.quantity;
+        effCatMap[cat3][completionDate].min += progress.minutes;
+        if (qtyUnit) effCatMap[cat3][completionDate].qtyUnit = qtyUnit;
+      });
+  });
   const effCats = Object.keys(effCatMap).sort();
-  const effCatFilter = s.effCatFilter || '';
+  const effCategoryNodes = effCats.map(category => {
+    const [level1, level2, level3] = parseActPath(category);
+    return {
+      category,
+      level1Path: level1 || '',
+      level2Path: level1 && level2 ? `${level1} > ${level2}` : '',
+      level3Path: level1 && level2 && level3 ? `${level1} > ${level2} > ${level3}` : '',
+    };
+  }).filter(node => node.level3Path);
+  if (s.effCatFilter && effCats.includes(s.effCatFilter) && !s.effLevel1 && !s.effLevel2 && !s.effLevel3) {
+    const legacyNode = effCategoryNodes.find(node => node.category === s.effCatFilter);
+    if (legacyNode) {
+      s.effLevel1 = legacyNode.level1Path;
+      s.effLevel2 = legacyNode.level2Path;
+      s.effLevel3 = legacyNode.level3Path;
+    }
+  }
+  const effLevel1Options = [...new Set(effCategoryNodes.map(node => node.level1Path))].sort();
+  if (s.effLevel1 && !effLevel1Options.includes(s.effLevel1)) {
+    s.effLevel1 = '';
+    s.effLevel2 = '';
+    s.effLevel3 = '';
+  }
+  const effLevel1Nodes = s.effLevel1
+    ? effCategoryNodes.filter(node => node.level1Path === s.effLevel1)
+    : [];
+  const effLevel2Options = [...new Set(effLevel1Nodes.map(node => node.level2Path))].filter(Boolean).sort();
+  if (s.effLevel2 && !effLevel2Options.includes(s.effLevel2)) {
+    s.effLevel2 = '';
+    s.effLevel3 = '';
+  }
+  const effLevel2Nodes = s.effLevel2
+    ? effLevel1Nodes.filter(node => node.level2Path === s.effLevel2)
+    : [];
+  const effLevel3Options = [...new Set(effLevel2Nodes.map(node => node.level3Path))].filter(Boolean).sort();
+  if (s.effLevel3 && !effLevel3Options.includes(s.effLevel3)) s.effLevel3 = '';
+  const effSelectedPath = s.effLevel3 || s.effLevel2 || s.effLevel1 || '';
+  const effFilteredCats = effSelectedPath
+    ? effCats.filter(category => category === effSelectedPath || category.startsWith(`${effSelectedPath} > `))
+    : effCats;
+  const effCatFilter = s.effLevel3 || '';
+  s.effCatFilter = effCatFilter;
+  const effCategorySelectHtml = (level, label, options, selected, enabled) => `<label><span>${label}</span><select ${enabled ? '' : 'disabled'} onchange="taskAnaSetEfficiencyLevel(${level},this.value)"><option value="">${enabled ? (level === 1 ? '全部（显示所有曲线）' : `请选择${label}`) : '请先选择上一级'}</option>${options.map(path => `<option value="${escHtmlApp(path)}" ${selected === path ? 'selected' : ''}>${escHtmlApp(path.split(' > ').pop() || path)}</option>`).join('')}</select></label>`;
+  const effCategorySelectors = [
+    effCategorySelectHtml(1, '一级分类', effLevel1Options, s.effLevel1, true),
+    effCategorySelectHtml(2, '二级分类', effLevel2Options, s.effLevel2, Boolean(s.effLevel1)),
+    effCategorySelectHtml(3, '三级分类', effLevel3Options, s.effLevel3, Boolean(s.effLevel2)),
+  ].join('');
 
   // 根据筛选构建效率 datasets
   let effChartLabels, effDayDS;
-  if (effCatFilter && effCatMap[effCatFilter]) {
-    // 单类别：只显示有数据的天
-    const filteredDays = dateStrs.filter(ds => effCatMap[effCatFilter][ds]);
-    effChartLabels = filteredDays.map(d => formatShort(d));
-    const hex = getStackedColor(effCats.indexOf(effCatFilter));
+  let effChartDateStrs = dateStrs;
+  if (s.efficiencyView === 'cumulativeAverage') {
+    const visibleEffCats = effFilteredCats;
+    effChartLabels = labels;
+    effDayDS = visibleEffCats.map(cat => {
+      const hex = getCategoryColor(cat, 3);
+      let totalQty = 0, totalMinutes = 0, unit = '';
+      Object.values(effCatMap[cat]).forEach(value => { if (value.qtyUnit) unit = value.qtyUnit; });
+      return {
+        label: cat + (unit ? ` (${unit}/min)` : ' (/min)'),
+        seriesKey: cat,
+        data: dateStrs.map(dateStr => {
+          if (chartDateStatus(dateStr) !== 'recorded') return null;
+          const row = effCatMap[cat]?.[dateStr];
+          if (row) { totalQty += row.qty; totalMinutes += row.min; }
+          return totalMinutes > 0 ? Number((totalQty / totalMinutes).toFixed(3)) : null;
+        }),
+        borderColor: hex,
+        backgroundColor: hex,
+        borderWidth: 2.2,
+        pointRadius: dateStrs.length > 60 ? 1.5 : 3.5,
+        pointBackgroundColor: hex,
+        pointBorderColor: '#07111f',
+        pointBorderWidth: 1.5,
+        tension: .16,
+        fill: false,
+        spanGaps: false,
+        hidden: s.hiddenSeries.efficiency.includes(cat),
+      };
+    });
+  } else if (effCatFilter && effCatMap[effCatFilter]) {
+    // 单类别仍保留完整日期轴。
+    effChartLabels = labels;
+    const hex = getCategoryColor(effCatFilter, 3);
     let unit = '';
     Object.values(effCatMap[effCatFilter]).forEach(v => { if (v.qtyUnit) unit = v.qtyUnit; });
     effDayDS = [{
       label: effCatFilter + (unit ? ' (' + unit + '/min)' : ' (/min)'),
-      data: filteredDays.map(ds => {
+      seriesKey: effCatFilter,
+      data: dateStrs.map(ds => {
+        if (chartDateStatus(ds) !== 'recorded') return null;
         const d = effCatMap[effCatFilter][ds];
-        return +(d.qty / d.min).toFixed(3);
+        return d ? +(d.qty / d.min).toFixed(3) : null;
       }),
       borderColor: hex, backgroundColor: hex,
       borderWidth: 2, pointRadius: 4, pointBackgroundColor: hex,
-      tension: 0.3, fill: false,
+      pointBorderColor: '#07111f', pointBorderWidth: 1.5,
+      tension: .16, fill: false, spanGaps: false,
+      hidden: s.hiddenSeries.efficiency.includes(effCatFilter),
     }];
   } else {
-    // 全部类别
+    // 全部类别或当前一级／二级分支
     effChartLabels = labels;
-    effDayDS = effCats.map((cat, ci) => {
-      const hex = getStackedColor(ci);
+    effDayDS = effFilteredCats.map((cat, ci) => {
+      const hex = getCategoryColor(cat, 3);
       let unit = '';
       Object.values(effCatMap[cat]).forEach(v => { if (v.qtyUnit) unit = v.qtyUnit; });
       return {
         label: cat + (unit ? ' (' + unit + '/min)' : ' (/min)'),
+        seriesKey: cat,
         data: dateStrs.map(ds => {
           const d = effCatMap[cat][ds];
           if (!d) return null;
@@ -6299,23 +9897,33 @@ function renderTaskAnalysis() {
         }),
         borderColor: hex, backgroundColor: hex,
         borderWidth: 2, pointRadius: 4, pointBackgroundColor: hex,
-        tension: 0.3, fill: false, spanGaps: true,
+        pointBorderColor: '#07111f', pointBorderWidth: 1.5,
+        tension: .16, fill: false, spanGaps: false,
+        hidden: s.hiddenSeries.efficiency.includes(cat),
       };
     });
   }
 
+  // 横轴跟随当前可见系列，只保留至少有一个可见类别真正产生效率样本的日期。
+  const visibleEfficiencyCats = effFilteredCats
+    .filter(cat => !s.hiddenSeries.efficiency.includes(cat));
+  const activeEfficiencyIndexes = dateStrs
+    .map((dateStr, index) => ({ dateStr, index }))
+    .filter(({ dateStr }) => visibleEfficiencyCats.some(cat => Boolean(effCatMap[cat]?.[dateStr])));
+  effChartDateStrs = activeEfficiencyIndexes.map(item => item.dateStr);
+  effChartLabels = activeEfficiencyIndexes.map(item => effChartLabels[item.index]);
+  effDayDS = effDayDS.map(dataset => ({
+    ...dataset,
+    data: activeEfficiencyIndexes.map(item => dataset.data[item.index]),
+  }));
+
   // 效率统计（每个三级类别的效率 CV）
   const effCatStats = effCats.map(cat => {
     let unit = '', totalQty = 0, totalMin = 0;
-    const dailyEffVals = [];
     Object.values(effCatMap[cat]).forEach(v => { totalQty += v.qty; totalMin += v.min; if (v.qtyUnit) unit = v.qtyUnit; });
-    dateStrs.forEach(ds => {
-      const d = effCatMap[cat][ds];
-      if (d && d.min > 0) dailyEffVals.push(d.qty / d.min);
-    });
-    const stats = calcStats(dailyEffVals);
+    const stats = calcStats(effSampleMap[cat] || []);
     const avgEff = totalMin > 0 ? +(totalQty / totalMin).toFixed(3) : null;
-    return { cat, unit, avgEff, cv: stats.cv, stdDev: stats.stdDev, n: stats.n };
+    return { cat, unit, avgEff, variance: stats.variance, cv: stats.cv, stdDev: stats.stdDev, n: stats.n };
   });
 
   // 当前筛选的效率统计
@@ -6324,159 +9932,143 @@ function renderTaskAnalysis() {
     effDisplayStats = effCatStats.find(c => c.cat === effCatFilter) || null;
   }
 
-  document.getElementById('tab-taskAnalysis').innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
-      <div style="display:flex;gap:4px;background:var(--card2);border-radius:8px;padding:2px">
-        <button class="btn btn-sm ${s.mode === 'week' ? 'btn-primary' : 'btn-ghost'}" onclick="taskAnaNav('mode','week')">周览</button>
-        <button class="btn btn-sm ${s.mode === 'month' ? 'btn-primary' : 'btn-ghost'}" onclick="taskAnaNav('mode','month')">月览</button>
-      </div>
-      <span style="color:var(--dim);font-size:11px">│</span>
-      <span style="font-size:11px;color:var(--muted)">类别层级：</span>
-      <div style="display:flex;gap:4px;background:var(--card2);border-radius:8px;padding:2px">
-        <button class="btn btn-sm ${level === 1 ? 'btn-primary' : 'btn-ghost'}" onclick="taskAnaNav('level',1)">一级</button>
-        <button class="btn btn-sm ${level === 2 ? 'btn-primary' : 'btn-ghost'}" onclick="taskAnaNav('level',2)">二级</button>
-        <button class="btn btn-sm ${level === 3 ? 'btn-primary' : 'btn-ghost'}" onclick="taskAnaNav('level',3)">三级</button>
-      </div>
-      <span style="color:var(--dim);font-size:11px">│</span>
-      <button class="btn btn-ghost btn-sm" onclick="taskAnaNav('prev')">← ${s.mode === 'week' ? '上周' : '上月'}</button>
-      <span style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--hp)">${rangeLabel}</span>
-      <button class="btn btn-ghost btn-sm" onclick="taskAnaNav('next')">${s.mode === 'week' ? '下周' : '下月'} →</button>
-      <button class="btn btn-ghost btn-sm" onclick="taskAnaNav('today')">${s.mode === 'week' ? '本周' : '本月'}</button>
-      ${cats.length > 1 ? `<span style="color:var(--dim);font-size:11px">│</span>
-      <span style="font-size:11px;color:var(--muted)">筛选：</span>
-      <select onchange="taskAnaNav('catFilter',this.value)" style="font-size:12px;padding:3px 8px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px">
-        <option value="">全部 (${cats.length})</option>
-        ${cats.map(c => `<option value="${escHtmlApp(c)}" ${taskCatFilter === c ? 'selected' : ''}>${escHtmlApp(c)}</option>`).join('')}
-      </select>` : ''}
-    </div>
+  const quantityRecordCount = visibleTaskRecords.filter(record => visibleTaskQuantity(record.task) > 0).length;
+  const errorSampleRecords = visibleTaskRecords.filter(record => visibleTaskWrongCount(record.task) != null);
+  const wrongRecordCount = errorSampleRecords.length;
+  const detailCategoryContext = taskAnaCategoryFilterContext(visibleTaskRecords);
+  const summaryRecords = detailCategoryContext.visible;
+  const summaryLevel = 3;
+  const summaryCatStats = taskAnaCategoryStatsFromRecords(summaryRecords, summaryLevel);
+  const sortedCatStats = [...summaryCatStats].sort((a, b) => b.min - a.min);
+  const summaryTotalCount = summaryRecords.length;
+  const summaryTotalMin = summaryRecords.reduce((sum, record) => sum + Math.max(0, Number(record.task?.minutes) || 0), 0);
+  const summaryDaysWithTasks = new Set(summaryRecords.map(record => record.dateStr)).size;
+  const summaryAvgMinPerDay = summaryDaysWithTasks ? Math.round(summaryTotalMin / summaryDaysWithTasks) : 0;
+  const summaryTotalQty = summaryRecords.reduce((sum, record) => sum + visibleTaskQuantity(record.task), 0);
+  const summaryErrorRecords = summaryRecords.filter(record => visibleTaskWrongCount(record.task) != null);
+  const summaryErrorQty = summaryErrorRecords.reduce((sum, record) => sum + visibleTaskQuantity(record.task), 0);
+  const summaryWrong = summaryErrorRecords.reduce((sum, record) => sum + (visibleTaskWrongCount(record.task) || 0), 0);
+  const summaryCorrect = summaryErrorQty > 0 ? Math.max(0, summaryErrorQty - summaryWrong) : null;
+  const summaryAccuracyRate = summaryErrorQty > 0 ? summaryCorrect / summaryErrorQty * 100 : null;
+  const summaryErrorRate = summaryErrorQty > 0 ? summaryWrong / summaryErrorQty * 100 : null;
+  const summaryDurationStats = calcStats(summaryRecords.map(record => Math.max(0, Number(record.task?.minutes) || 0)));
 
-    <div class="three-time" style="margin-bottom:16px">
-      <div class="time-block actual"><div class="label">任务总数</div><div class="value">${totalCount}</div><div class="sub">${daysWithTasks} 天 · ${cats.length} 个类别 · 日均 ${daysWithTasks > 0 ? (totalCount / daysWithTasks).toFixed(1) : 0} 条</div></div>
-      <div class="time-block nominal"><div class="label">总时长${tipIcon('taskMin')}</div><div class="value">${fmtMin(totalMin, true)}</div><div class="sub">日均 ${fmtMin(avgMinPerDay)}</div></div>
-      <div class="time-block clock"><div class="label">每条平均</div><div class="value">${totalCount > 0 ? fmtMin(Math.round(totalMin / totalCount)) : '-'}</div></div>
-    </div>
-
-    <div class="chart-grid">
-      <div class="chart-card full">
-        <div class="chart-title">每日任务时长趋势${taskCatFilter ? '（' + escHtmlApp(taskCatFilter) + '）' : '（按类别）'}</div>
-        <div class="chart-sub">折线图${taskCatFilter ? ' · 仅显示有数据的天' : ''} · 纵轴=小时</div>
-        <canvas id="taskAnaDailyChart" height="${s.mode === 'week' ? '100' : '120'}"></canvas>
+  document.getElementById('tab-taskAnalysis').innerHTML = `<div class="task-analysis-page">
+    <section class="task-analysis-hero">
+      <div><div class="task-analysis-eyebrow">TASK ANALYTICS</div><h2>任务分析</h2><p>${rangeLabel} · 全部任务统计</p></div>
+      <div class="task-analysis-hero-stats"><div><span>有任务天</span><b>${daysWithTasks} 天</b></div><div><span>任务总数</span><b>${totalCount} 条</b></div><div><span>总任务时长</span><b>${fmtHrs(totalMin)}</b></div><div><span>三级类别</span><b>${fullLevel3Cats.length} 类</b></div></div>
+    </section>
+    ${analysisRangePlannerHtml('task', sharedRange)}
+    <section class="task-analysis-toolbar">
+      <div class="task-analysis-control"><span>趋势 / 占比分类层级</span><div class="task-analysis-tabs"><button class="${level === 1 ? 'active' : ''}" onclick="taskAnaNav('level',1)">一级</button><button class="${level === 2 ? 'active' : ''}" onclick="taskAnaNav('level',2)">二级</button><button class="${level === 3 ? 'active' : ''}" onclick="taskAnaNav('level',3)">三级</button></div></div>
+      <label class="task-analysis-filter"><span>趋势 / 占比类别</span><select onchange="taskAnaNav('catFilter',this.value)"><option value="">全部类别 (${allCats.length})</option>${allCats.map(category => `<option value="${escHtmlApp(category)}" ${taskCatFilter === category ? 'selected' : ''}>${escHtmlApp(category)}</option>`).join('')}</select></label>
+    </section>
+    ${totalCount ? `<section class="task-analysis-summary">
+      <div class="task-analysis-primary-grid"><article><span>任务总时长${tipIcon('taskMin')}</span><b>${fmtHrs(totalMin)}</b><small>有任务日均 ${fmtMin(avgMinPerDay, true)}</small></article><article><span>任务数量</span><b>${totalCount} 条</b><small>有任务日均 ${daysWithTasks ? (totalCount / daysWithTasks).toFixed(1) : 0} 条</small></article><article><span>有任务天</span><b>${daysWithTasks} 天</b><small>当前范围 ${dateStrs.length} 天</small></article><article><span>每条平均</span><b>${totalCount ? fmtMin(Math.round(totalMin / totalCount)) : '-'}</b><small>全部分类</small></article></div>
+      <div class="task-analysis-secondary-strip"><div><span>三级类别</span><b>${fullLevel3Cats.length}</b></div><div><span>数量记录</span><b>${quantityRecordCount} 条</b></div><div><span>有效错题记录</span><b>${wrongRecordCount} 条</b></div><div><span>累计数量</span><b>${totalQty ? forecastDisplayMetric(totalQty) : '-'}</b></div></div>
+    </section>
+    <div class="task-analysis-dashboard-grid">
+      <section class="task-analysis-panel task-analysis-duration-panel">
+        <div class="task-analysis-panel-head"><div><div class="task-analysis-eyebrow">DURATION TREND</div><h3>每日任务时长趋势</h3><p>${s.durationView === 'daily' ? '按类别显示每天的任务时长。' : '显示截至当天累计类别分钟 ÷ 该类别有任务天数。'}</p></div><div class="task-analysis-view-tabs"><button class="${s.durationView === 'daily' ? 'active' : ''}" onclick="switchTaskAnaView('durationView','daily')">每日时长</button><button class="${s.durationView === 'cumulativeAverage' ? 'active' : ''}" onclick="switchTaskAnaView('durationView','cumulativeAverage')">累计日均</button></div></div>
+        ${taskAnaLegendHtml(cats, 'duration')}
+        <div class="task-analysis-chart-stage large"><canvas id="taskAnaDailyChart"></canvas></div>
+      </section>
+      <div class="task-analysis-split-row">
+        <section class="task-analysis-panel task-analysis-composition-panel"><div class="task-analysis-panel-head"><div><div class="task-analysis-eyebrow">CATEGORY SHARE</div><h3>类别时间占比</h3><p>按顶部分类层级与类别筛选显示累计任务时长构成。</p></div></div><div class="task-analysis-composition-body"><div class="task-analysis-doughnut-stage"><canvas id="taskAnaPieChart"></canvas><div class="task-analysis-doughnut-center"><span>总时长</span><b>${fmtHrs(trendTotalMin)}</b></div></div><div class="task-analysis-composition-legend">${catStats.filter(c => c.min > 0).map((c, index) => `<button onclick="taskAnaHighlightPie(${index})"><i style="--series-color:${getCategoryColor(c.cat, level)}"></i><span>${escHtmlApp(c.cat)}</span><b>${fmtMin(c.min, true)}</b><small>${trendTotalMin ? (c.min / trendTotalMin * 100).toFixed(1) : 0}%</small></button>`).join('')}</div></div></section>
+        <section class="task-analysis-panel task-analysis-count-panel"><div class="task-analysis-panel-head"><div><div class="task-analysis-eyebrow">TASK COUNT</div><h3>每日任务数量</h3><p>${s.countView === 'daily' ? '显示当前时间范围内每天的全部任务条数。' : '全部任务累计数量 ÷ 有任务天数。'}</p></div><div class="task-analysis-view-tabs"><button class="${s.countView === 'daily' ? 'active' : ''}" onclick="switchTaskAnaView('countView','daily')">每日数量</button><button class="${s.countView === 'cumulativeAverage' ? 'active' : ''}" onclick="switchTaskAnaView('countView','cumulativeAverage')">累计日均</button></div></div><div class="task-analysis-chart-stage medium"><canvas id="taskAnaCountChart"></canvas></div></section>
       </div>
-      <div class="chart-card">
-        <div class="chart-title">类别时间占比</div>
-        <div class="chart-sub">各类别累计时长</div>
-        <canvas id="taskAnaPieChart" height="200"></canvas>
-      </div>
-      <div class="chart-card">
-        <div class="chart-title">每日任务数量</div>
-        <div class="chart-sub">柱图=条数 · 折线=时长(h)</div>
-        <canvas id="taskAnaCountChart" height="200"></canvas>
-      </div>
-      ${chapterTemplateStats.length > 0 ? `
-      <div class="chart-card full">
-        <div class="chart-title">按章节分析</div>
-        <div class="chart-sub">周/月范围按首次完成日期筛选；每章数值包含完成前全部跨天投入</div>
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px">
-          <span style="font-size:11px;color:var(--muted)">章节模板：</span>
-          <select onchange="taskAnaNav('chapterEffTemplateId',this.value)" style="min-width:220px;font-size:12px;padding:4px 8px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px">
-            ${chapterTemplateStats.map(item => `<option value="${escHtmlApp(item.id)}" ${selectedChapterTemplateStats?.id === item.id ? 'selected' : ''}>${escHtmlApp(item.label)}（完成 ${item.completedChapters} 章）</option>`).join('')}
-          </select>
-        </div>
-        ${selectedChapterTemplateStats ? `<div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap;font-size:12px">
-          <span style="color:var(--muted)">平均完成耗时：<b style="color:var(--text)">${selectedChapterTemplateStats.avgMinutes == null ? '-' : `${forecastDisplayMetric(selectedChapterTemplateStats.avgMinutes)} 分钟/章`}</b></span>
-          ${selectedChapterTemplateStats.template.quantityEnabled ? `<span style="color:var(--muted)">平均题目效率：<b style="color:var(--text)">${selectedChapterTemplateStats.questionSpeed == null ? '-' : `${selectedChapterTemplateStats.questionSpeed.toFixed(3)} ${escHtmlApp(selectedChapterTemplateStats.template.quantityUnit || '题')}/分钟`}</b></span>` : ''}
-          <span style="color:var(--muted)">已完成：<b style="color:var(--text)">${selectedChapterTemplateStats.completedChapters} 章</b></span>
-          <span style="color:var(--muted)">耗时CV${tipIcon('cv')}：<b style="color:${selectedChapterTemplateStats.cv != null && selectedChapterTemplateStats.cv < 0.3 ? 'var(--green)' : 'var(--wake)'}">${fmtCV(selectedChapterTemplateStats.cv)}</b></span>
+      <div id="task-analysis-distribution-host">${taskAnaDistributionPanelHtml(visibleTaskRecords)}</div>
+      ${chapterTemplateStats.length > 0 ? `<section class="task-analysis-panel task-chapter-workspace">
+        <div class="task-analysis-panel-head"><div><div class="task-analysis-eyebrow">CHAPTER ANALYSIS</div><h3>章节分析</h3><p>按首次完成日期筛选；每章保留完成前全部跨天投入。</p></div><label class="task-analysis-select"><span>章节模板</span><select onchange="taskAnaNav('chapterEffTemplateId',this.value)">${chapterTemplateStats.map(item => `<option value="${escHtmlApp(item.id)}" ${selectedChapterTemplateStats?.id === item.id ? 'selected' : ''}>${escHtmlApp(item.label)}（${item.completedChapters}章）</option>`).join('')}</select></label></div>
+        ${selectedChapterTemplateStats ? `<div class="task-chapter-summary">
+          <div><span>完成章节</span><b>${selectedChapterTemplateStats.completedChapters} 章</b></div>
+          <div><span>累计耗时</span><b>${fmtMin(selectedChapterTemplateStats.totalMinutes, true)}</b></div>
+          <div><span>章节平均耗时</span><b>${selectedChapterTemplateStats.avgMinutes == null ? '-' : `${forecastDisplayMetric(selectedChapterTemplateStats.avgMinutes)} 分/章`}</b></div>
+          <div><span>章节耗时 CV</span><b>${fmtCV(selectedChapterTemplateStats.cv)}</b></div>
+          ${selectedChapterTemplateStats.template.quantityEnabled ? `<div><span>累计数量</span><b>${selectedChapterTemplateStats.totalQuantity ? `${forecastDisplayMetric(selectedChapterTemplateStats.totalQuantity)} ${escHtmlApp(selectedChapterTemplateStats.template.quantityUnit || '题')}` : '-'}</b></div>
+          <div><span>章节内题目效率</span><b>${selectedChapterTemplateStats.questionSpeed == null ? '-' : `${selectedChapterTemplateStats.questionSpeed.toFixed(3)} ${escHtmlApp(selectedChapterTemplateStats.template.quantityUnit || '题')}/分`}</b></div>
+          <div><span>题目效率 CV</span><b>${fmtCV(selectedChapterTemplateStats.questionSpeedCv)}</b></div>` : ''}
         </div>` : ''}
-      </div>
-      <div class="chart-card full">
-        <div class="chart-title">每章完成耗时</div>
-        <div class="chart-sub">柱状图 · 横轴=章节 · 纵轴=完成该章累计分钟</div>
-        ${selectedChapterItems.length ? `<div style="overflow-x:auto"><div style="min-width:${Math.max(720, selectedChapterItems.length * 90)}px"><canvas id="taskAnaChapterMinutesChart" height="${s.mode === 'week' ? '100' : '120'}"></canvas></div></div>` : '<div class="empty-state"><p>当前范围没有已完成章节。</p></div>'}
-      </div>
-      ${selectedChapterTemplateStats?.template.quantityEnabled ? `<div class="chart-card full">
-        <div class="chart-title">每章题目效率</div>
-        <div class="chart-sub">折线图 · 横轴=章节 · 纵轴=${escHtmlApp(selectedChapterTemplateStats.template.quantityUnit || '题')}/分钟</div>
-        ${selectedChapterItems.length ? `<div style="overflow-x:auto"><div style="min-width:${Math.max(720, selectedChapterItems.length * 90)}px"><canvas id="taskAnaChapterQuantityEffChart" height="${s.mode === 'week' ? '100' : '120'}"></canvas></div></div>` : '<div class="empty-state"><p>当前范围没有已完成章节。</p></div>'}
-      </div>` : ''}` : ''}
-      ${effCats.length > 0 ? `<div class="chart-card full">
-        <div class="chart-title">纯数量效率趋势（按三级分类）${effCatFilter ? ' — ' + escHtmlApp(effCatFilter) : ''}</div>
-        <div class="chart-sub">仅统计未开启章节的模板 · 效率 = 数量 ÷ 时长(分钟)${effCatFilter ? ' · 仅显示有数据的天' : ''}</div>
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap">
-          <span style="font-size:11px;color:var(--muted)">纵轴：</span>
-          <div style="display:flex;gap:4px;background:var(--card2);border-radius:8px;padding:2px">
-            <button class="btn btn-sm ${s.effScale === 'linear' ? 'btn-primary' : 'btn-ghost'}" onclick="taskAnaNav('effScale','linear')">线性</button>
-            <button class="btn btn-sm ${s.effScale === 'log' ? 'btn-primary' : 'btn-ghost'}" onclick="taskAnaNav('effScale','log')">对数</button>
-            <button class="btn btn-sm ${s.effScale === 'normalize' ? 'btn-primary' : 'btn-ghost'}" onclick="taskAnaNav('effScale','normalize')">归一化</button>
-          </div>
-          ${s.effScale === 'linear' ? `<span style="font-size:11px;color:var(--muted)">Y轴上限：</span>
-          <input type="number" id="effYMaxInput" value="${s.effYMax}" placeholder="自动" min="0" step="0.5"
-            style="width:70px;padding:3px 8px;font-size:12px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px"
-            onchange="state.taskAna.effYMax=this.value;renderTaskAnalysis()">` : ''}
-          ${s.effScale === 'normalize' ? '<span style="font-size:10px;color:var(--dim)">归一化到自身最大值百分比</span>' : ''}
-          ${effCats.length > 1 ? `<span style="color:var(--dim);font-size:11px">│</span>
-          <span style="font-size:11px;color:var(--muted)">筛选：</span>
-          <select onchange="taskAnaNav('effCatFilter',this.value)" style="font-size:12px;padding:3px 8px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px">
-            <option value="">全部 (${effCats.length})</option>
-            ${effCats.map(c => `<option value="${escHtmlApp(c)}" ${effCatFilter === c ? 'selected' : ''}>${escHtmlApp(c)}</option>`).join('')}
-          </select>` : ''}
-        </div>
-        ${effDisplayStats ? `<div style="display:flex;gap:12px;margin-bottom:10px;flex-wrap:wrap;font-size:12px">
-          <span style="color:var(--muted)">平均效率: <b style="color:var(--text)">${effDisplayStats.avgEff}${effDisplayStats.unit ? ' ' + effDisplayStats.unit + '/min' : '/min'}</b></span>
-          <span style="color:var(--muted)">CV${tipIcon('cv')}: <b style="color:${effDisplayStats.cv != null && effDisplayStats.cv < 0.3 ? 'var(--green)' : 'var(--wake)'}">${fmtCV(effDisplayStats.cv)}</b> (n=${effDisplayStats.n})</span>
-        </div>` : ''}
-        <canvas id="taskAnaEffChart" height="${s.mode === 'week' ? '100' : '120'}"></canvas>
-      </div>` : ''}
-      <div class="chart-card full">
-        <div class="chart-title">类别汇总明细</div>
-        <div class="chart-sub">每种活动类别的统计</div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>类别</th><th>任务数</th><th>总时长</th><th>每条平均</th><th>日均</th>${level === 3 ? '<th>总数量</th><th>综合错误率</th><th>平均效率</th><th>效率CV' + tipIcon('cv') + '</th>' : ''}</tr></thead>
-            <tbody>${catStats.map(c => {
-    const hex = level === 1 ? (getActColor(c.cat).color || '#78909c') : '#78909c';
-    const ecs = level === 3 ? effCatStats.find(e => e.cat === c.cat) : null;
-    const chapterEcs = level === 3 ? chapterEffCatStats.find(e => e.cat === c.cat) : null;
-    const usesChapterEfficiency = level === 3 && chapterModeCats.has(c.cat);
-    const displayedEfficiencyStats = usesChapterEfficiency ? chapterEcs : ecs;
-    return `<tr>
-              <td><span class="badge" style="background:${hexRgba(hex, 0.13)};color:${hex};border:1px solid ${hexRgba(hex, 0.3)}">${escHtmlApp(c.cat)}</span></td>
+        <div class="task-chapter-toolbar"><div class="task-analysis-view-tabs"><button class="${s.chapterMetric === 'minutes' ? 'active' : ''}" onclick="switchTaskAnaView('chapterMetric','minutes')">完成耗时</button>${selectedChapterTemplateStats?.template.quantityEnabled ? `<button class="${s.chapterMetric === 'quantityEfficiency' ? 'active' : ''}" onclick="switchTaskAnaView('chapterMetric','quantityEfficiency')">数量效率</button>` : ''}</div><div class="task-analysis-view-tabs"><button class="${s.chapterView === 'single' ? 'active' : ''}" onclick="switchTaskAnaView('chapterView','single')">${s.chapterMetric === 'minutes' ? '逐章数据' : '逐章效率'}</button><button class="${s.chapterView === 'cumulativeAverage' ? 'active' : ''}" onclick="switchTaskAnaView('chapterView','cumulativeAverage')">累计平均</button></div></div>
+        ${selectedChapterItems.length ? '<div class="task-analysis-chart-stage chapter"><canvas id="taskAnaChapterChart"></canvas></div>' : '<div class="task-analysis-empty compact"><b>当前范围没有已完成章节</b><span>切换范围或章节模板后再查看。</span></div>'}
+      </section>` : ''}
+      ${effCats.length > 0 ? `<section class="task-analysis-panel task-efficiency-panel">
+        <div class="task-analysis-panel-head"><div><div class="task-analysis-eyebrow">QUANTITY EFFICIENCY</div><h3>纯数量效率趋势</h3><p>${s.efficiencyView === 'daily' ? '普通数量任务按记录日统计；章节＋数量任务使用完成章节的累计数量 ÷ 累计分钟，并归入章节完成日。' : '截至当天累计数量 ÷ 累计分钟，使用加权口径；章节数据从完成日开始计入。'}</p></div><div class="task-analysis-view-tabs"><button class="${s.efficiencyView === 'daily' ? 'active' : ''}" onclick="switchTaskAnaView('efficiencyView','daily')">每日效率</button><button class="${s.efficiencyView === 'cumulativeAverage' ? 'active' : ''}" onclick="switchTaskAnaView('efficiencyView','cumulativeAverage')">累计平均</button></div></div>
+        <div class="task-efficiency-toolbar"><div class="task-analysis-view-tabs"><button class="${s.effScale === 'linear' ? 'active' : ''}" onclick="taskAnaNav('effScale','linear')">线性</button><button class="${s.effScale === 'log' ? 'active' : ''}" onclick="taskAnaNav('effScale','log')">对数</button><button class="${s.effScale === 'normalize' ? 'active' : ''}" onclick="taskAnaNav('effScale','normalize')">归一化</button></div>${s.effScale === 'linear' ? `<label><span>Y轴上限</span><input type="number" value="${s.effYMax}" placeholder="自动" min="0" step="0.5" onchange="state.taskAna.effYMax=this.value;renderTaskAnalysis()"></label>` : ''}${effCategorySelectors}</div>
+        ${effDisplayStats ? `<div class="task-efficiency-summary"><span>加权效率 <b>${effDisplayStats.avgEff}${effDisplayStats.unit ? ` ${escHtmlApp(effDisplayStats.unit)}` : ''}/min</b></span><span>CV <b>${fmtCV(effDisplayStats.cv)}</b></span><span>样本 <b>${effDisplayStats.n}</b></span></div>` : ''}
+        ${taskAnaLegendHtml(effFilteredCats, 'efficiency')}
+        <div class="task-analysis-chart-stage large"><canvas id="taskAnaEffChart"></canvas></div>
+      </section>` : ''}
+      <section class="task-analysis-table-panel">
+        <div class="task-analysis-table-head"><div><div class="task-analysis-eyebrow">CATEGORY DETAILS</div><h3>类别汇总明细</h3><p>${summaryCatStats.length} 个类别${detailCategoryContext.selectedPath ? ` · 当前分支：${escHtmlApp(detailCategoryContext.selectedPath)}` : ''} · 点击数值表头可切换排序</p></div></div>
+        <div class="task-detail-categories task-summary-categories">${detailCategoryContext.categoryFilters}</div>
+        <div class="task-analysis-table-wrap"><table class="task-analysis-table level-${summaryLevel}" data-sort-table="task-category-summary">
+          <colgroup><col class="task-col-category"><col span="5" class="task-col-basic"><col class="task-col-stability"><col span="5" class="task-col-accuracy"><col span="4" class="task-col-efficiency"></colgroup>
+          <thead><tr class="task-analysis-table-groups"><th rowspan="2" class="task-analysis-category-head">三级类别</th><th colspan="5">基础统计</th><th class="task-analysis-group-start">时长稳定性</th><th colspan="5" class="task-analysis-group-start">数量与正确性</th><th colspan="4" class="task-analysis-group-start">章节与题目效率</th></tr><tr>${sortableTableHeaderHtml('task-category-summary', 'count', '任务数')}${sortableTableHeaderHtml('task-category-summary', 'duration', '总时长')}${sortableTableHeaderHtml('task-category-summary', 'average', '每条平均')}${sortableTableHeaderHtml('task-category-summary', 'activeDays', '有任务天')}${sortableTableHeaderHtml('task-category-summary', 'daily', '有任务日均')}${sortableTableHeaderHtml('task-category-summary', 'durationCv', `时长CV${tipIcon('cv')}`, 'number', 'task-analysis-group-start')}${sortableTableHeaderHtml('task-category-summary', 'quantity', '总数量', 'number', 'task-analysis-group-start')}${sortableTableHeaderHtml('task-category-summary', 'wrong', '错题数')}${sortableTableHeaderHtml('task-category-summary', 'correct', '正确数')}${sortableTableHeaderHtml('task-category-summary', 'accuracy', '正确率')}${sortableTableHeaderHtml('task-category-summary', 'errorRate', '错误率')}${sortableTableHeaderHtml('task-category-summary', 'chapterAverage', '章节平均耗时', 'number', 'task-analysis-group-start')}${sortableTableHeaderHtml('task-category-summary', 'chapterCv', `章节耗时CV${tipIcon('cv')}`)}${sortableTableHeaderHtml('task-category-summary', 'questionEfficiency', '题目效率')}${sortableTableHeaderHtml('task-category-summary', 'questionCv', `题目效率CV${tipIcon('cv')}`)}</tr></thead>
+            <tbody>${sortedCatStats.map((c, rowIndex) => {
+    const hex = getCategoryColor(c.cat, summaryLevel);
+    const ecs = effCatStats.find(e => e.cat === c.cat);
+    const chapterEcs = chapterEffCatStats.find(e => e.cat === c.cat);
+    const usesChapterEfficiency = chapterModeCats.has(c.cat);
+    const chapterAverage = usesChapterEfficiency ? chapterEcs?.avgEff : null;
+    const chapterCv = usesChapterEfficiency ? chapterEcs?.cv : null;
+    const questionEfficiency = usesChapterEfficiency ? chapterEcs?.questionSpeed : c.avgEff;
+    const questionCv = usesChapterEfficiency ? chapterEcs?.questionSpeedCv : ecs?.cv;
+    const questionUnit = usesChapterEfficiency ? chapterEcs?.unit : c.qtyUnit;
+    return `<tr ${sortableTableRowAttrs({
+      count: c.count, duration: c.min, average: c.avgMin, activeDays: c.activeDays,
+      daily: c.avgPerDay, durationCv: c.cv,
+      quantity: c.qty > 0 ? c.qty : null,
+      wrong: c.errorRate == null ? null : c.wrong,
+      correct: c.correctCount,
+      accuracy: c.accuracyRate,
+      errorRate: c.errorRate,
+      chapterAverage,
+      chapterCv,
+      questionEfficiency,
+      questionCv,
+    }, rowIndex)}>
+              <td class="task-analysis-category-col"><div class="task-analysis-category-cell"><i style="--series-color:${hex}"></i><span>${escHtmlApp(c.cat)}</span></div></td>
               <td class="fw-mono">${c.count}</td>
               <td class="fw-mono c-actual">${fmtMin(c.min, true)}</td>
               <td class="fw-mono">${fmtMin(c.avgMin)}</td>
-              <td class="fw-mono" style="color:var(--muted)">${fmtMin(c.avgPerDay)}</td>
-              ${level === 3 ? `<td class="fw-mono">${c.qty ? c.qty + (c.qtyUnit ? ' ' + c.qtyUnit : '') : '-'}</td>
-              <td class="fw-mono ${c.errorRate == null ? 'c-muted' : c.errorRate <= 10 ? 'c-green' : c.errorRate <= 30 ? 'c-wake' : 'c-red'}" title="${c.errorRate == null ? '没有明确填写错题数的任务' : `错 ${forecastDisplayMetric(c.wrong)} / ${forecastDisplayMetric(c.errorQty)} · ${c.errorTaskCount} 条有效任务`}">${c.errorRate == null ? '-' : `${c.errorRate.toFixed(2)}%`}</td>
-              <td class="fw-mono">${usesChapterEfficiency
-                ? chapterEcs?.avgEff != null
-                  ? `${forecastDisplayMetric(chapterEcs.avgEff)} 分钟/章${chapterEcs.questionSpeed != null ? `<br><span class="c-muted">${chapterEcs.questionSpeed.toFixed(3)} ${escHtmlApp(chapterEcs.unit || '题')}/分钟</span>` : ''}`
-                  : '-'
-                : c.avgEff != null ? c.avgEff + (c.qtyUnit ? ' ' + c.qtyUnit + '/min' : '/min') : '-'}</td>
-              <td class="fw-mono" style="color:${displayedEfficiencyStats && displayedEfficiencyStats.cv != null && displayedEfficiencyStats.cv < 0.3 ? 'var(--green)' : displayedEfficiencyStats && displayedEfficiencyStats.cv != null && displayedEfficiencyStats.cv < 0.5 ? 'var(--wake)' : displayedEfficiencyStats && displayedEfficiencyStats.cv != null ? 'var(--red)' : 'var(--muted)'}">${displayedEfficiencyStats ? fmtCV(displayedEfficiencyStats.cv) : '-'}</td>` : ''}
+              <td class="fw-mono">${c.activeDays}</td><td class="fw-mono c-muted">${fmtMin(c.avgPerDay)}</td>
+              <td class="fw-mono c-muted task-analysis-group-start">${fmtCV(c.cv)}</td>
+              <td class="fw-mono task-analysis-group-start">${c.qty ? c.qty + (c.qtyUnit ? ' ' + c.qtyUnit : '') : '-'}</td>
+              <td class="fw-mono c-muted">${c.errorRate == null ? '-' : forecastDisplayMetric(c.wrong)}</td><td class="fw-mono c-muted">${c.correctCount == null ? '-' : forecastDisplayMetric(c.correctCount)}</td><td class="fw-mono c-muted" title="${c.accuracyRate == null ? '没有合法错题记录' : `有效数量 ${forecastDisplayMetric(c.errorQty)} · 正确 ${forecastDisplayMetric(c.correctCount)} · 错题 ${forecastDisplayMetric(c.wrong)}`}">${c.accuracyRate == null ? '-' : `${c.accuracyRate.toFixed(2)}%`}</td><td class="fw-mono c-muted" title="${c.errorRate == null ? '没有合法错题记录' : `有效数量 ${forecastDisplayMetric(c.errorQty)} · 正确 ${forecastDisplayMetric(c.correctCount)} · 错题 ${forecastDisplayMetric(c.wrong)}`}">${c.errorRate == null ? '-' : `${c.errorRate.toFixed(2)}%`}</td>
+              <td class="fw-mono task-analysis-group-start">${chapterAverage == null ? '-' : `${forecastDisplayMetric(chapterAverage)} 分钟/章`}</td>
+              <td class="fw-mono c-muted">${fmtCV(chapterCv)}</td>
+              <td class="fw-mono">${questionEfficiency == null ? '-' : `${forecastDisplayMetric(questionEfficiency)}${questionUnit ? ` ${escHtmlApp(questionUnit)}` : ''}/分钟`}</td>
+              <td class="fw-mono c-muted">${fmtCV(questionCv)}</td>
             </tr>`;
   }).join('')}</tbody>
-            <tfoot><tr><td>合计</td><td class="fw-mono">${totalCount}</td><td class="fw-mono c-actual">${fmtMin(totalMin, true)}</td><td class="fw-mono">${totalCount > 0 ? fmtMin(Math.round(totalMin / totalCount)) : '-'}</td><td class="fw-mono" style="color:var(--muted)">${fmtMin(avgMinPerDay)}</td>${level === 3 ? '<td colspan="4"></td>' : ''}</tr></tfoot>
+            <tfoot><tr><td class="task-analysis-category-col">合计</td><td>${summaryTotalCount}</td><td>${fmtMin(summaryTotalMin, true)}</td><td>${summaryTotalCount > 0 ? fmtMin(Math.round(summaryTotalMin / summaryTotalCount)) : '-'}</td><td>${summaryDaysWithTasks}</td><td>${fmtMin(summaryAvgMinPerDay)}</td><td class="task-analysis-group-start">${fmtCV(summaryDurationStats.cv)}</td><td class="task-analysis-group-start">${summaryTotalQty ? forecastDisplayMetric(summaryTotalQty) : '-'}</td><td>${summaryErrorQty ? forecastDisplayMetric(summaryWrong) : '-'}</td><td>${summaryCorrect == null ? '-' : forecastDisplayMetric(summaryCorrect)}</td><td title="${summaryAccuracyRate == null ? '没有合法错题记录' : `有效数量 ${forecastDisplayMetric(summaryErrorQty)}`}">${summaryAccuracyRate == null ? '-' : `${summaryAccuracyRate.toFixed(2)}%`}</td><td title="${summaryErrorRate == null ? '没有合法错题记录' : `有效数量 ${forecastDisplayMetric(summaryErrorQty)}`}">${summaryErrorRate == null ? '-' : `${summaryErrorRate.toFixed(2)}%`}</td><td class="task-analysis-group-start" colspan="4"></td></tr></tfoot>
           </table>
         </div>
-      </div>
+      </section>
+      ${taskAnaTaskDetailPanelHtml(visibleTaskRecords, detailCategoryContext)}
     </div>
-  `;
+    ` : `<div class="task-analysis-empty"><b>当前范围没有任务记录</b><span>可以切换时间范围、类别层级或先在录入页添加任务。</span></div>`}
+  </div>`;
 
-  // 堆叠柱图
+  if (!totalCount) return;
+  renderTaskAnaDistributionChart();
   mkChart('taskAnaDailyChart', {
     type: 'line', data: { labels: taskChartLabels, datasets: taskDayDS },
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { position: 'bottom', labels: { color: '#6b7a9e', boxWidth: 12 } },
-        tooltip: { callbacks: { label: ctx => { const v = ctx.parsed.y; if (!v) return null; return `${ctx.dataset.label}: ${fmtMin(Math.round(v * 60))}`; } } }
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => { const v = ctx.parsed.y; if (v == null) return null; return `${ctx.dataset.label}: ${fmtMin(Math.round(v * 60))}`; } } }
       },
       scales: {
-        x: { ticks: { color: '#6b7a9e', maxRotation: s.mode === 'month' ? 45 : 0 }, grid: gridCfg },
-        y: { ticks: { color: '#6b7a9e', callback: v => v + 'h' }, grid: gridCfg, min: 0 }
+        x: { ticks: { color: '#6b7a9e', maxRotation: s.mode === 'week' ? 0 : 35, autoSkip: true, maxTicksLimit: s.mode === 'all' ? 24 : undefined }, grid: { display: false } },
+        y: { ticks: { color: '#6b7a9e', callback: v => v + 'h' }, grid: { color: 'rgba(107,122,158,.12)' }, min: 0, title: { display: true, text: s.durationView === 'daily' ? '每日时长（小时）' : '累计日均时长（小时）', color: '#6b7a9e' } }
       }
-    }
+    },
+    plugins: [noRecordRegionPlugin(dateStrs)],
   });
 
   // 饼图
@@ -6485,34 +10077,105 @@ function renderTaskAnalysis() {
     mkChart('taskAnaPieChart', {
       type: 'doughnut', data: {
         labels: pieData.map(c => c.cat),
-        datasets: [{ data: pieData.map(c => c.min), backgroundColor: pieData.map((c, i) => hexRgba(level === 1 ? (getActColor(c.cat).color || getStackedColor(i)) : getStackedColor(i), 0.75)), borderWidth: 1 }]
+        datasets: [{ data: pieData.map(c => c.min), backgroundColor: pieData.map(c => hexRgba(getCategoryColor(c.cat, level), 0.78)), borderColor: '#101b2c', borderWidth: 2, hoverOffset: 5 }]
       },
-      options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#6b7a9e', boxWidth: 10, padding: 8 } }, tooltip: { callbacks: { label: ctx => `${ctx.label}: ${fmtMin(ctx.raw)}` } } } }
+      options: { responsive: true, maintainAspectRatio: false, cutout: '67%', plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => `${ctx.label}: ${fmtMin(ctx.raw)} · ${trendTotalMin ? (ctx.raw / trendTotalMin * 100).toFixed(1) : 0}%` } } } }
     });
   }
 
-  // 每日条数+时长
-  const dayCounts = dateStrs.map(ds => (getDay(ds).tasks || []).length);
-  const dayMins = dateStrs.map(ds => +((getDay(ds).tasks || []).reduce((s, t) => s + (Number(t.minutes) || 0), 0) / 60).toFixed(2));
+  // 每日任务条数 / 累计日均
+  const dayCounts = dateStrs.map(dateStr => visibleTaskRecords.filter(record => record.dateStr === dateStr).length);
+  const countChartData = s.countView === 'cumulativeAverage'
+    ? taskAnaCumulativeDailyCount(dateStrs, visibleTaskRecords)
+    : chartMaskRecordedValues(dateStrs, dayCounts);
+  const countColor = getSystemSeriesColor('taskTotal');
   mkChart('taskAnaCountChart', {
-    type: 'bar', data: {
-      labels, datasets: [
-        { label: '任务条数', data: dayCounts, backgroundColor: 'rgba(79,195,247,.35)', borderColor: '#4fc3f7', borderWidth: 1, borderRadius: 3, yAxisID: 'y' },
-        { type: 'line', label: '时长(h)', data: dayMins, borderColor: '#69f0ae', borderWidth: 2, pointRadius: 3, tension: .3, yAxisID: 'y1' },
-      ]
+    type: s.countView === 'daily' ? 'bar' : 'line', data: {
+      labels, datasets: [{
+        label: s.countView === 'daily' ? '每日任务条数' : '累计日均任务数',
+        data: countChartData,
+        backgroundColor: s.countView === 'daily' ? hexRgba(countColor, .3) : hexRgba(countColor, .12),
+        borderColor: countColor,
+        borderWidth: 2,
+        borderRadius: 4,
+        pointRadius: s.countView === 'daily' ? 0 : 3.5,
+        pointBackgroundColor: countColor,
+        pointBorderColor: '#07111f',
+        pointBorderWidth: 1.5,
+        tension: .16,
+        fill: s.countView !== 'daily',
+        spanGaps: false,
+      }]
     },
     options: {
-      responsive: true, plugins: { legend: { labels: { color: '#6b7a9e' } } },
+      responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: context => `${context.dataset.label}: ${Number(context.parsed.y).toFixed(s.countView === 'daily' ? 0 : 2)} 条` } } },
       scales: {
-        x: { ticks: { color: '#6b7a9e', maxRotation: s.mode === 'month' ? 45 : 0 }, grid: gridCfg },
-        y: { ticks: { color: '#6b7a9e' }, grid: gridCfg, min: 0, title: { display: true, text: '条数', color: '#6b7a9e' } },
-        y1: { ticks: { color: '#69f0ae', callback: v => v + 'h' }, grid: { drawOnChartArea: false }, position: 'right', min: 0 }
+        x: { ticks: { color: '#6b7a9e', maxRotation: s.mode === 'week' ? 0 : 35, autoSkip: true, maxTicksLimit: s.mode === 'all' ? 24 : undefined }, grid: { display: false } },
+        y: { ticks: { color: '#6b7a9e', precision: s.countView === 'daily' ? 0 : undefined }, grid: { color: 'rgba(107,122,158,.12)' }, min: 0, title: { display: true, text: s.countView === 'daily' ? '任务条数' : '累计日均任务数', color: '#6b7a9e' } }
       }
-    }
+    },
+    plugins: [noRecordRegionPlugin(dateStrs)],
   });
 
+  if (selectedChapterItems.length > 0 && document.getElementById('taskAnaChapterChart')) {
+    const quantityMetric = s.chapterMetric === 'quantityEfficiency';
+    const cumulative = s.chapterView === 'cumulativeAverage';
+    const unit = selectedChapterTemplateStats?.template.quantityUnit || '题';
+    const chapterValues = cumulative
+      ? taskAnaCumulativeChapterValues(selectedChapterItems, s.chapterMetric)
+      : selectedChapterItems.map(item => quantityMetric
+        ? item.minutes > 0 && item.quantity > 0 ? item.quantity / item.minutes : null
+        : item.minutes);
+    const color = getChartSeriesColor(quantityMetric ? 'chapterEfficiency' : 'chapterDuration');
+    const archivedColor = getChartSeriesColor('archived');
+    mkChart('taskAnaChapterChart', {
+      type: cumulative || quantityMetric ? 'line' : 'bar',
+      data: {
+        labels: chapterChartLabels,
+        datasets: [{
+          label: quantityMetric
+            ? cumulative ? `累计加权效率（${unit}/分钟）` : `逐章效率（${unit}/分钟）`
+            : cumulative ? '累计平均耗时（分钟/章）' : '逐章完成耗时（分钟）',
+          data: chapterValues.map(value => value == null ? null : Number(value.toFixed(3))),
+          backgroundColor: cumulative || quantityMetric ? hexRgba(color, .12) : selectedChapterItems.map(item => item.item.archived ? hexRgba(archivedColor, .42) : hexRgba(color, .4)),
+          borderColor: cumulative || quantityMetric ? color : selectedChapterItems.map(item => item.item.archived ? archivedColor : color),
+          borderWidth: 2.2,
+          borderRadius: 4,
+          pointRadius: cumulative || quantityMetric ? 4 : 0,
+          pointBackgroundColor: color,
+          pointBorderColor: '#07111f',
+          pointBorderWidth: 1.5,
+          tension: .16,
+          fill: cumulative || quantityMetric,
+          spanGaps: false,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: {
+            label: context => context.parsed.y == null ? '数据不足' : `${context.dataset.label}: ${quantityMetric ? Number(context.parsed.y).toFixed(3) : forecastDisplayMetric(context.parsed.y)}`,
+            afterLabel: context => {
+              const item = selectedChapterItems[context.dataIndex];
+              return [`累计数量：${forecastDisplayMetric(item.quantity)} ${unit}`, `章节累计耗时：${forecastDisplayMetric(item.minutes)} 分钟`, `首次完成：${item.completionDate}`];
+            },
+          } },
+        },
+        scales: {
+          x: { ticks: { color: '#6b7a9e', maxRotation: 35, autoSkip: true, maxTicksLimit: 14 }, grid: { display: false } },
+          y: { beginAtZero: true, ticks: { color: '#6b7a9e' }, grid: { color: 'rgba(107,122,158,.12)' }, title: { display: true, text: quantityMetric ? `${unit}/分钟` : '分钟/章', color: '#6b7a9e' } },
+        },
+      },
+    });
+  }
+
   // 按章节完成耗时柱状图
-  if (selectedChapterItems.length > 0) {
+  if (selectedChapterItems.length > 0 && document.getElementById('taskAnaChapterMinutesChart')) {
+    const chapterDurationColor = getChartSeriesColor('chapterDuration');
+    const archivedColor = getChartSeriesColor('archived');
     mkChart('taskAnaChapterMinutesChart', {
       type: 'bar',
       data: {
@@ -6520,8 +10183,8 @@ function renderTaskAnalysis() {
         datasets: [{
           label: '完成耗时（分钟）',
           data: selectedChapterItems.map(item => +item.minutes.toFixed(1)),
-          backgroundColor: selectedChapterItems.map(item => item.item.archived ? 'rgba(158,158,158,.45)' : 'rgba(79,195,247,.45)'),
-          borderColor: selectedChapterItems.map(item => item.item.archived ? '#9e9e9e' : '#4fc3f7'),
+          backgroundColor: selectedChapterItems.map(item => hexRgba(item.item.archived ? archivedColor : chapterDurationColor, .45)),
+          borderColor: selectedChapterItems.map(item => item.item.archived ? archivedColor : chapterDurationColor),
           borderWidth: 1,
           borderRadius: 4,
         }]
@@ -6561,7 +10224,8 @@ function renderTaskAnalysis() {
   }
 
   // 章节＋数量模板：按章节题目效率折线图
-  if (selectedChapterItems.length > 0 && selectedChapterTemplateStats?.template.quantityEnabled) {
+  if (selectedChapterItems.length > 0 && selectedChapterTemplateStats?.template.quantityEnabled && document.getElementById('taskAnaChapterQuantityEffChart')) {
+    const chapterEfficiencyColor = getChartSeriesColor('chapterEfficiency');
     mkChart('taskAnaChapterQuantityEffChart', {
       type: 'line',
       data: {
@@ -6571,11 +10235,11 @@ function renderTaskAnalysis() {
           data: selectedChapterItems.map(item =>
             item.minutes > 0 && item.quantity > 0 ? +(item.quantity / item.minutes).toFixed(3) : null
           ),
-          borderColor: '#69f0ae',
-          backgroundColor: '#69f0ae',
+          borderColor: chapterEfficiencyColor,
+          backgroundColor: chapterEfficiencyColor,
           borderWidth: 2,
           pointRadius: 4,
-          pointBackgroundColor: '#69f0ae',
+          pointBackgroundColor: chapterEfficiencyColor,
           tension: 0.25,
           fill: false,
           spanGaps: false,
@@ -6651,31 +10315,128 @@ function renderTaskAnalysis() {
       type: 'line', data: { labels: effChartLabels, datasets: chartDS },
       options: {
         responsive: true,
+        maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { position: 'bottom', labels: { color: '#6b7a9e', boxWidth: 12 } },
+          legend: { display: false },
           tooltip: { callbacks: { label: tooltipFmt } }
         },
         scales: {
-          x: { ticks: { color: '#6b7a9e', maxRotation: s.mode === 'month' ? 45 : 0 }, grid: gridCfg },
-          y: { type: yType, ticks: { color: '#6b7a9e' }, grid: gridCfg, min: yMin, max: yMax, title: { display: true, text: yTitle, color: '#6b7a9e' } }
+          x: { ticks: { color: '#6b7a9e', maxRotation: s.mode === 'week' ? 0 : 35, autoSkip: true, maxTicksLimit: s.mode === 'all' ? 24 : undefined }, grid: { display: false } },
+          y: { type: yType, ticks: { color: '#6b7a9e' }, grid: { color: 'rgba(107,122,158,.12)' }, min: yMin, max: yMax, title: { display: true, text: yTitle, color: '#6b7a9e' } }
         }
-      }
+      },
+      plugins: [noRecordRegionPlugin(effChartDateStrs)],
     });
   }
 }
 
+function switchTaskAnaView(key, value) {
+  const allowed = {
+    durationView: ['daily', 'cumulativeAverage'],
+    countView: ['daily', 'cumulativeAverage'],
+    chapterMetric: ['minutes', 'quantityEfficiency'],
+    chapterView: ['single', 'cumulativeAverage'],
+    efficiencyView: ['daily', 'cumulativeAverage'],
+  };
+  if (!allowed[key]?.includes(value)) return;
+  state.taskAna[key] = value;
+  renderTaskAnalysis();
+}
+
+function taskAnaToggleSeries(group, category) {
+  const hidden = state.taskAna.hiddenSeries[group];
+  if (!Array.isArray(hidden)) return;
+  const index = hidden.indexOf(category);
+  if (index >= 0) hidden.splice(index, 1);
+  else hidden.push(category);
+  if (group === 'efficiency') {
+    renderTaskAnalysis();
+    return;
+  }
+  const chart = chartReg[group === 'efficiency' ? 'taskAnaEffChart' : 'taskAnaDailyChart'];
+  if (chart) {
+    const datasetIndex = chart.data.datasets.findIndex(dataset => dataset.seriesKey === category);
+    if (datasetIndex >= 0) {
+      chart.setDatasetVisibility(datasetIndex, index >= 0);
+      chart.update();
+    }
+  }
+  const encoded = encodeURIComponent(category).replace(/'/g, '%27');
+  document.querySelectorAll(`[data-task-series-group="${group}"]`).forEach(button => {
+    if (button.dataset.taskSeries === encoded) button.classList.toggle('hidden', index < 0);
+  });
+}
+
+function taskAnaShowAllSeries(group) {
+  if (!state.taskAna.hiddenSeries[group]) return;
+  state.taskAna.hiddenSeries[group] = [];
+  if (group === 'efficiency') {
+    renderTaskAnalysis();
+    return;
+  }
+  const chart = chartReg[group === 'efficiency' ? 'taskAnaEffChart' : 'taskAnaDailyChart'];
+  if (chart) {
+    chart.data.datasets.forEach((dataset, index) => chart.setDatasetVisibility(index, true));
+    chart.update();
+  }
+  document.querySelectorAll(`[data-task-series-group="${group}"]`).forEach(button => button.classList.remove('hidden'));
+}
+
+function taskAnaHighlightPie(index) {
+  const chart = chartReg.taskAnaPieChart;
+  if (!chart) return;
+  chart.setActiveElements([{ datasetIndex: 0, index: Number(index) }]);
+  chart.tooltip?.setActiveElements([{ datasetIndex: 0, index: Number(index) }], { x: 0, y: 0 });
+  chart.update();
+}
+
+function taskAnaSetDetailLevel(level, categoryPath) {
+  const value = categoryPath || '';
+  if (Number(level) === 1) {
+    state.taskAna.taskDetailLevel1 = value;
+    state.taskAna.taskDetailLevel2 = '';
+    state.taskAna.taskDetailLevel3 = '';
+  } else if (Number(level) === 2) {
+    state.taskAna.taskDetailLevel2 = value;
+    state.taskAna.taskDetailLevel3 = '';
+  } else if (Number(level) === 3) {
+    state.taskAna.taskDetailLevel3 = value;
+  } else return;
+  renderTaskAnalysis();
+}
+
+function taskAnaOpenTask(dateStr, encodedTaskId) {
+  const taskId = decodeURIComponent(encodedTaskId || '');
+  if (!dateStr || !taskId) return;
+  monthEditTask(dateStr, taskId);
+}
+
+function taskAnaSetEfficiencyLevel(level, categoryPath) {
+  const s = state.taskAna;
+  const value = categoryPath || '';
+  if (Number(level) === 1) {
+    s.effLevel1 = value;
+    s.effLevel2 = '';
+    s.effLevel3 = '';
+  } else if (Number(level) === 2) {
+    s.effLevel2 = value;
+    s.effLevel3 = '';
+  } else if (Number(level) === 3) {
+    s.effLevel3 = value;
+  } else return;
+  s.effCatFilter = s.effLevel3 || '';
+  renderTaskAnalysis();
+}
+
 function taskAnaNav(action, val) {
   const s = state.taskAna;
-  if (action === 'mode') { s.mode = val; }
-  else if (action === 'level') { s.level = val; s.catFilter = ''; }
+  if (action === 'level') { s.level = val; s.catFilter = ''; }
   else if (action === 'effScale') { s.effScale = val; }
   else if (action === 'catFilter') { s.catFilter = val; }
   else if (action === 'effCatFilter') { s.effCatFilter = val; }
   else if (action === 'chapterEffTemplateId') { s.chapterEffTemplateId = val; }
-  else if (action === 'prev') { if (s.mode === 'week') s.weekStart = addDays(s.weekStart, -7); else { s.month.month--; if (s.month.month < 0) { s.month.month = 11; s.month.year--; } } }
-  else if (action === 'next') { if (s.mode === 'week') s.weekStart = addDays(s.weekStart, 7); else { s.month.month++; if (s.month.month > 11) { s.month.month = 0; s.month.year++; } } }
-  else if (action === 'today') { const n = new Date(); if (s.mode === 'week') s.weekStart = getMondayOfDate(n); else { s.month.year = n.getFullYear(); s.month.month = n.getMonth(); } }
+  else return;
   renderTaskAnalysis();
 }
 
@@ -6800,17 +10561,6 @@ function regroupTaskMap(taskMap, level) {
   return grouped;
 }
 
-// 堆积图配色方案（与主题色系一致但区分度更高）
-const STACKED_PALETTE = [
-  '#4fc3f7', '#69f0ae', '#ce93d8', '#ffb74d', '#ef9a9a',
-  '#80deea', '#ffd54f', '#a5d6a7', '#f48fb1', '#90caf9',
-  '#b39ddb', '#ffcc80', '#80cbc4', '#e6ee9c', '#bcaaa4',
-];
-
-function getStackedColor(index) {
-  return STACKED_PALETTE[index % STACKED_PALETTE.length];
-}
-
 function hexRgba(hex, a) {
   if (!hex || hex[0] !== '#') return `rgba(120,144,156,${a})`;
   const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
@@ -6818,27 +10568,18 @@ function hexRgba(hex, a) {
 }
 
 function renderStackedArea() {
-  const mode = state.stackedMode || 'week';
-  let dateStrs, rangeLabel, prevAction, nextAction, todayAction;
-
-  if (mode === 'week') {
-    dateStrs = getWeekDays(state.stackedWeekStart);
-    rangeLabel = `${formatShort(dateStrs[0])} — ${formatShort(dateStrs[6])}`;
-    prevAction = `stackedNav('week', -7)`;
-    nextAction = `stackedNav('week', 7)`;
-    todayAction = `stackedGoToday('week')`;
-  } else {
-    const y = state.stackedMonth.year, m = state.stackedMonth.month;
-    const daysInMonth = new Date(y, m + 1, 0).getDate();
-    dateStrs = [];
-    for (let i = 1; i <= daysInMonth; i++) {
-      dateStrs.push(`${y}-${String(m + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}`);
-    }
-    rangeLabel = `${y}年${m + 1}月`;
-    prevAction = `stackedNav('month', -1)`;
-    nextAction = `stackedNav('month', 1)`;
-    todayAction = `stackedGoToday('month')`;
-  }
+  const sharedRange = analysisRangeMeta('stacked');
+  const mode = sharedRange.analysisDates.length <= 7 ? 'week' : sharedRange.analysisDates.length > 90 ? 'all' : 'month';
+  const rangeMeta = {
+    ...sharedRange,
+    dateStrs: sharedRange.analysisDates,
+    rangeLabel: sharedRange.label,
+    excludedCount: sharedRange.context.shellDates.length,
+  };
+  const dateStrs = rangeMeta.dateStrs;
+  const chartView = ['absolute', 'percent'].includes(state.stackedChartView) ? state.stackedChartView : 'absolute';
+  state.stackedChartView = chartView;
+  const hiddenSeries = stackedHiddenSeriesSet();
 
   const { specialCats } = collectAllCategories(dateStrs);
   const rawBreakdowns = dateStrs.map(d => computeDayBreakdown(d));
@@ -6855,72 +10596,85 @@ function renderStackedArea() {
   const taskCatsSet = new Set();
   breakdowns.forEach(bd => Object.keys(bd.taskMap).forEach(k => taskCatsSet.add(k)));
   const taskCats = [...taskCatsSet].sort();
+  const taskColors = taskCats.map(cat => getCategoryColor(cat, groupLevel));
+  const specialColors = specialCats.map(cat => getSpecialSeriesColor(cat));
 
   const labels = dateStrs.map(d => formatShort(d));
 
   // ── 构建堆积 datasets（绝对值 + 百分比共用逻辑） ──
   function buildDatasets(valueFn) {
     const ds = [];
-    let ci = 0;
+    const maskedValues = getter => chartMaskRecordedValues(dateStrs, breakdowns.map(getter));
     // 任务类别
-    taskCats.forEach(cat => {
-      // 一级用主题色，二/三级用调色板保证同父类的子类颜色可区分
-      const hex = groupLevel === 1
-        ? (getActColor(cat).color || getStackedColor(ci))
-        : getStackedColor(ci);
+    taskCats.forEach((cat, index) => {
+      const hex = taskColors[index];
+      const seriesKey = `task:${cat}`;
       ds.push({
         label: cat,
-        data: breakdowns.map(bd => valueFn(bd.taskMap[cat] || 0, bd)),
-        backgroundColor: hexRgba(hex, 0.75),
+        data: maskedValues(bd => valueFn(bd.taskMap[cat] || 0, bd)),
+        backgroundColor: hexRgba(hex, 0.62),
         borderColor: hexRgba(hex, 0.9),
-        borderWidth: 0.5,
+        borderWidth: 1,
         fill: 'origin',
         pointRadius: 0,
-        tension: 0.35,
+        tension: 0.22,
+        hidden: hiddenSeries.has(seriesKey),
+        _seriesKey: seriesKey,
+        _seriesGroup: 'task',
+        _seriesColor: hex,
       });
-      ci++;
     });
     // 特殊时段
-    specialCats.forEach(cat => {
-      const hex = getStackedColor(ci);
+    specialCats.forEach((cat, index) => {
+      const hex = specialColors[index];
+      const seriesKey = `special:${cat}`;
       ds.push({
-        label: '🔸' + cat,
-        data: breakdowns.map(bd => valueFn(bd.specialMap[cat] || 0, bd)),
-        backgroundColor: hexRgba(hex, 0.6),
+        label: cat,
+        data: maskedValues(bd => valueFn(bd.specialMap[cat] || 0, bd)),
+        backgroundColor: hexRgba(hex, 0.52),
         borderColor: hexRgba(hex, 0.8),
-        borderWidth: 0.5,
+        borderWidth: 1,
         fill: 'origin',
         pointRadius: 0,
-        tension: 0.35,
+        tension: 0.22,
+        hidden: hiddenSeries.has(seriesKey),
+        _seriesKey: seriesKey,
+        _seriesGroup: 'special',
+        _seriesColor: hex,
       });
-      ci++;
     });
     // 休息
     ds.push({
-      label: '😴 休息',
-      data: breakdowns.map(bd => valueFn(bd.focusRestMin, bd)),
-      backgroundColor: 'rgba(179,136,255,0.55)',
-      borderColor: 'rgba(179,136,255,0.8)',
-      borderWidth: 0.5,
-      fill: 'origin', pointRadius: 0, tension: 0.35,
+      label: '休息',
+      data: maskedValues(bd => valueFn(bd.focusRestMin, bd)),
+      backgroundColor: hexRgba(getSystemSeriesColor('rest'), 0.48),
+      borderColor: hexRgba(getSystemSeriesColor('rest'), 0.82),
+      borderWidth: 1,
+      fill: 'origin', pointRadius: 0, tension: 0.22,
+      hidden: hiddenSeries.has('status:rest'),
+      _seriesKey: 'status:rest', _seriesGroup: 'status', _seriesColor: getSystemSeriesColor('rest'),
     });
     // 分心
     ds.push({
-      label: '😶 分心',
-      data: breakdowns.map(bd => valueFn(bd.focusDistractMin, bd)),
-      backgroundColor: 'rgba(244,67,54,0.45)',
-      borderColor: 'rgba(244,67,54,0.7)',
-      borderWidth: 0.5,
-      fill: 'origin', pointRadius: 0, tension: 0.35,
+      label: '分心',
+      data: maskedValues(bd => valueFn(bd.focusDistractMin, bd)),
+      backgroundColor: hexRgba(getSystemSeriesColor('distract'), 0.4),
+      borderColor: hexRgba(getSystemSeriesColor('distract'), 0.78),
+      borderWidth: 1,
+      fill: 'origin', pointRadius: 0, tension: 0.22,
+      hidden: hiddenSeries.has('status:distract'),
+      _seriesKey: 'status:distract', _seriesGroup: 'status', _seriesColor: getSystemSeriesColor('distract'),
     });
     // 空闲
     ds.push({
-      label: '⬜ 空闲/未记录',
-      data: breakdowns.map(bd => valueFn(bd.idleMin, bd)),
-      backgroundColor: 'rgba(61,74,106,0.45)',
-      borderColor: 'rgba(61,74,106,0.7)',
-      borderWidth: 0.5,
-      fill: 'origin', pointRadius: 0, tension: 0.35,
+      label: '空闲/未记录',
+      data: maskedValues(bd => valueFn(bd.idleMin, bd)),
+      backgroundColor: hexRgba(getSystemSeriesColor('idle'), 0.34),
+      borderColor: hexRgba(getSystemSeriesColor('idle'), 0.7),
+      borderWidth: 1,
+      fill: 'origin', pointRadius: 0, tension: 0.22,
+      hidden: hiddenSeries.has('status:idle'),
+      _seriesKey: 'status:idle', _seriesGroup: 'status', _seriesColor: getSystemSeriesColor('idle'),
     });
     return ds;
   }
@@ -6930,14 +10684,14 @@ function renderStackedArea() {
   // 清醒参考线（独立 y 轴，不参与堆积）
   absDatasets.push({
     label: '── 清醒时长',
-    data: breakdowns.map(bd => bd.awakeMin != null ? +(bd.awakeMin / 60).toFixed(1) : null),
-    borderColor: '#ffd54f',
+    data: chartMaskRecordedValues(dateStrs, breakdowns.map(bd => bd.awakeMin != null ? +(bd.awakeMin / 60).toFixed(1) : null)),
+    borderColor: getSystemSeriesColor('awake'),
     borderWidth: 2.5,
     borderDash: [8, 4],
     backgroundColor: 'transparent',
     fill: false,
     pointRadius: 3,
-    pointBackgroundColor: '#ffd54f',
+    pointBackgroundColor: getSystemSeriesColor('awake'),
     tension: 0.35,
     yAxisID: 'yRef',
   });
@@ -6947,37 +10701,19 @@ function renderStackedArea() {
   // 在每个 dataset 上保存一份原始数据副本
   pctDatasets.forEach(ds => { ds._rawData = [...ds.data]; });
 
-  /** 根据可见 dataset 动态重算百分比，保证可见部分始终堆满 100% */
-  function recalcPctData(chart) {
-    const dsList = chart.data.datasets;
-    const len = dsList[0]?.data?.length || 0;
-    for (let i = 0; i < len; i++) {
-      let sum = 0;
-      dsList.forEach((ds, di) => {
-        if (!ds._rawData) return;
-        if (!chart.getDatasetMeta(di).hidden) sum += ds._rawData[i] || 0;
-      });
-      dsList.forEach((ds, di) => {
-        if (!ds._rawData) return;
-        if (chart.getDatasetMeta(di).hidden) {
-          ds.data[i] = 0;
-        } else {
-          ds.data[i] = sum > 0 ? +((ds._rawData[i] / sum) * 100).toFixed(1) : 0;
-        }
-      });
-    }
-    chart.update('none');
-  }
-
   // 创建图表前先归一化（避免首帧用原始分钟数渲染）
   (function preNormalize() {
     const len = pctDatasets[0]?.data?.length || 0;
     for (let i = 0; i < len; i++) {
+      if (chartDateStatus(dateStrs[i]) !== 'recorded') {
+        pctDatasets.forEach(ds => { ds.data[i] = null; });
+        continue;
+      }
       let sum = 0;
-      pctDatasets.forEach(ds => { if (ds._rawData) sum += ds._rawData[i] || 0; });
+      pctDatasets.forEach(ds => { if (ds._rawData && !ds.hidden) sum += ds._rawData[i] || 0; });
       pctDatasets.forEach(ds => {
         if (!ds._rawData) return;
-        ds.data[i] = sum > 0 ? +((ds._rawData[i] / sum) * 100).toFixed(1) : 0;
+        ds.data[i] = !ds.hidden && sum > 0 ? +((ds._rawData[i] / sum) * 100).toFixed(1) : 0;
       });
     }
   })();
@@ -6992,202 +10728,114 @@ function renderStackedArea() {
   const daysWithData = breakdowns.filter(bd => bd.awakeMin != null && (bd.totalTaskMin > 0 || bd.totalSpecialMin > 0)).length;
   const pctOf = (part) => totalAwake > 0 ? Math.round(part / totalAwake * 100) : 0;
 
-  document.getElementById('tab-stacked').innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
-      <div style="display:flex;gap:4px;background:var(--card2);border-radius:8px;padding:2px">
-        <button class="btn btn-sm ${mode === 'week' ? 'btn-primary' : 'btn-ghost'}" onclick="switchStackedMode('week')">周览</button>
-        <button class="btn btn-sm ${mode === 'month' ? 'btn-primary' : 'btn-ghost'}" onclick="switchStackedMode('month')">月览</button>
-      </div>
-      <span style="color:var(--dim);font-size:11px">│</span>
-      <span style="font-size:11px;color:var(--muted)">类别层级：</span>
-      <div style="display:flex;gap:4px;background:var(--card2);border-radius:8px;padding:2px">
-        <button class="btn btn-sm ${groupLevel === 1 ? 'btn-primary' : 'btn-ghost'}" onclick="switchStackedLevel(1)">一级</button>
-        <button class="btn btn-sm ${groupLevel === 2 ? 'btn-primary' : 'btn-ghost'}" onclick="switchStackedLevel(2)">二级</button>
-        <button class="btn btn-sm ${groupLevel === 3 ? 'btn-primary' : 'btn-ghost'}" onclick="switchStackedLevel(3)">三级</button>
-      </div>
-      <span style="color:var(--dim);font-size:11px">│</span>
-      <button class="btn btn-ghost btn-sm" onclick="${prevAction}">← ${mode === 'week' ? '上周' : '上月'}</button>
-      <span style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--hp)">${rangeLabel}</span>
-      <button class="btn btn-ghost btn-sm" onclick="${nextAction}">${mode === 'week' ? '下周' : '下月'} →</button>
-      <button class="btn btn-ghost btn-sm" onclick="${todayAction}">${mode === 'week' ? '本周' : '本月'}</button>
-    </div>
+  const totals = {
+    awake: totalAwake,
+    task: totalTask,
+    special: totalSpecial,
+    rest: totalRest,
+    distract: totalDistract,
+    idle: totalIdle,
+    daysWithData,
+  };
+  const hasBreakdownData = breakdowns.some(breakdown =>
+    breakdown.awakeMin != null || breakdown.totalTaskMin > 0 || breakdown.totalSpecialMin > 0 ||
+    breakdown.focusRestMin > 0 || breakdown.focusDistractMin > 0
+  );
+  const host = document.getElementById('tab-stacked');
+  host.innerHTML = `<div class="stacked-page">
+    ${stackedToolbarHtml(rangeMeta, mode, groupLevel, daysWithData)}
+    ${analysisRangePlannerHtml('stacked', sharedRange)}
+    ${hasBreakdownData ? `${stackedSummaryHtml(rangeMeta, totals)}
+      ${stackedChartPanelHtml(mode, chartView, absDatasets)}
+      ${stackedDetailTableHtml({
+        dateStrs, breakdowns, taskCats, specialCats, taskColors, specialColors, totals,
+      })}` : stackedEmptyStateHtml()}
+  </div>`;
 
-    <div class="three-time" style="margin-bottom:16px">
-      <div class="time-block clock"><div class="label">清醒总时长${tipIcon('stackAwake')}</div><div class="value">${fmtMin(totalAwake, true)}</div><div class="sub">${daysWithData} 天有数据</div></div>
-      <div class="time-block actual"><div class="label">任务记录总时长${tipIcon('stackTask')}</div><div class="value">${fmtMin(totalTask, true)}</div><div class="sub">占清醒 ${pctOf(totalTask)}%</div></div>
-      <div class="time-block nominal"><div class="label">特殊时段总时长${tipIcon('stackSpecial')}</div><div class="value">${fmtMin(totalSpecial, true)}</div><div class="sub">占清醒 ${pctOf(totalSpecial)}%</div></div>
-    </div>
-    <div class="three-time" style="margin-bottom:20px">
-      <div class="time-block" style="border-color:var(--sleep)"><div class="label">休息时间${tipIcon('stackRest')}</div><div class="value" style="color:var(--sleep)">${fmtMin(totalRest, true)}</div><div class="sub">占清醒 ${pctOf(totalRest)}%</div></div>
-      <div class="time-block" style="border-color:var(--red)"><div class="label">分心时间${tipIcon('stackDistract')}</div><div class="value" style="color:var(--red)">${fmtMin(totalDistract, true)}</div><div class="sub">占清醒 ${pctOf(totalDistract)}%</div></div>
-      <div class="time-block" style="border-color:var(--dim)"><div class="label">空闲/未记录${tipIcon('stackIdle')}</div><div class="value" style="color:var(--dim)">${fmtMin(totalIdle, true)}</div><div class="sub">占清醒 ${pctOf(totalIdle)}%</div></div>
-    </div>
-
-    <div class="chart-grid">
-      <div class="chart-card full">
-        <div class="chart-title">时间分解 · 堆积面积图（绝对值）</div>
-        <div class="chart-sub">纵轴=小时 · 每天清醒时段的时间去向 · 黄色虚线为清醒总时长</div>
-        <canvas id="stackedAbsChart" height="${mode === 'week' ? '140' : '160'}"></canvas>
-      </div>
-      <div class="chart-card full">
-        <div class="chart-title">时间分解 · 百分比堆积面积图</div>
-        <div class="chart-sub">纵轴=占清醒时长百分比 · 各部分占比随时间变化趋势</div>
-        <canvas id="stackedPctChart" height="${mode === 'week' ? '140' : '160'}"></canvas>
-      </div>
-      <div class="chart-card full">
-        <div class="chart-title">每日时间分解明细</div>
-        <div class="chart-sub">清醒时长 → 各类别占用 → 空闲</div>
-        <div class="table-wrap" style="max-height:520px">
-          <table>
-            <thead><tr>
-              <th>日期</th><th>清醒</th>
-              ${taskCats.map((c, ci) => {
-    const thColor = groupLevel === 1 ? (getActColor(c).color || 'var(--text)') : getStackedColor(ci);
-    return `<th style="color:${thColor}">${escHtmlApp(c)}</th>`;
-  }).join('')}
-              ${specialCats.map(c => `<th style="color:var(--thesis)">🔸${escHtmlApp(c)}</th>`).join('')}
-              <th style="color:var(--sleep)">休息${tipIcon('stackRest')}</th>
-              <th style="color:var(--red)">分心${tipIcon('stackDistract')}</th>
-              <th style="color:var(--dim)">空闲${tipIcon('stackIdle')}</th>
-            </tr></thead>
-            <tbody>
-              ${breakdowns.map((bd, i) => {
-    const ds = dateStrs[i];
-    const hasData = bd.awakeMin != null;
-    return `<tr>
-                  <td class="fw-mono" style="white-space:nowrap">${formatShort(ds)}</td>
-                  <td class="fw-mono" style="color:var(--wake)">${hasData ? fmtMin(bd.awakeMin) : '-'}</td>
-                  ${taskCats.map(c => `<td class="fw-mono">${bd.taskMap[c] ? fmtMin(bd.taskMap[c]) : '-'}</td>`).join('')}
-                  ${specialCats.map(c => `<td class="fw-mono">${bd.specialMap[c] ? fmtMin(bd.specialMap[c]) : '-'}</td>`).join('')}
-                  <td class="fw-mono">${bd.focusRestMin ? fmtMin(bd.focusRestMin) : '-'}</td>
-                  <td class="fw-mono">${bd.focusDistractMin ? fmtMin(bd.focusDistractMin) : '-'}</td>
-                  <td class="fw-mono">${hasData ? fmtMin(bd.idleMin) : '-'}</td>
-                </tr>`;
-  }).join('')}
-            </tbody>
-            <tfoot><tr>
-              <td>合计</td>
-              <td class="fw-mono" style="color:var(--wake)">${fmtMin(totalAwake, true)}</td>
-              ${taskCats.map(c => {
-    const sum = breakdowns.reduce((s, bd) => s + (bd.taskMap[c] || 0), 0);
-    return `<td class="fw-mono">${sum ? fmtMin(sum) : '-'}</td>`;
-  }).join('')}
-              ${specialCats.map(c => {
-    const sum = breakdowns.reduce((s, bd) => s + (bd.specialMap[c] || 0), 0);
-    return `<td class="fw-mono">${sum ? fmtMin(sum) : '-'}</td>`;
-  }).join('')}
-              <td class="fw-mono">${fmtMin(totalRest, true)}</td>
-              <td class="fw-mono">${fmtMin(totalDistract, true)}</td>
-              <td class="fw-mono">${fmtMin(totalIdle, true)}</td>
-            </tr></tfoot>
-          </table>
-        </div>
-      </div>
-    </div>
-  `;
+  if (!hasBreakdownData) return;
 
   // ── 计算 y 轴上限（取最大清醒时长向上取整） ──
   const maxAwakeHrs = Math.max(...breakdowns.map(bd => bd.awakeMin || 0)) / 60;
   const yMax = Math.ceil(maxAwakeHrs + 1);
 
-  // ── 绝对值堆积面积图 ──
-  mkChart('stackedAbsChart', {
+  const isAbsolute = chartView === 'absolute';
+  const chartDatasets = isAbsolute ? absDatasets : pctDatasets;
+  mkChart('stackedMainChart', {
     type: 'line',
-    data: { labels, datasets: absDatasets },
+    data: { labels, datasets: chartDatasets },
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { position: 'bottom', labels: { color: '#6b7a9e', boxWidth: 12, padding: 8, font: { size: 11 } } },
-        tooltip: { callbacks: { label: ctx => { const v = ctx.parsed.y; if (!v) return null; return `${ctx.dataset.label}: ${fmtMin(Math.round(v * 60))}`; } } },
-        filler: { propagate: true },
-      },
-      scales: {
-        x: { ticks: { color: '#6b7a9e', maxRotation: mode === 'month' ? 45 : 0 }, grid: gridCfg },
-        y: {
-          stacked: true,
-          ticks: { color: '#6b7a9e', callback: v => v + 'h' },
-          grid: gridCfg,
-          title: { display: true, text: '小时', color: '#6b7a9e' },
-          min: 0, max: yMax > 0 ? yMax : undefined,
-        },
-        yRef: {
-          display: false,
-          stacked: false,
-          min: 0, max: yMax > 0 ? yMax : undefined,
-        }
-      }
-    }
-  });
-
-  // ── 百分比堆积面积图 ──
-  mkChart('stackedPctChart', {
-    type: 'line',
-    data: { labels, datasets: pctDatasets },
-    options: {
-      responsive: true,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: {
-          position: 'bottom',
-          labels: { color: '#6b7a9e', boxWidth: 12, padding: 8, font: { size: 11 } },
-          onClick: function (e, legendItem, legend) {
-            // 默认行为：切换 dataset 可见性
-            const idx = legendItem.datasetIndex;
-            const meta = legend.chart.getDatasetMeta(idx);
-            meta.hidden = meta.hidden === null ? !legend.chart.data.datasets[idx].hidden : null;
-            // 重新归一化
-            recalcPctData(legend.chart);
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: context => {
+              const value = context.parsed.y;
+              if (value == null || value === 0) return null;
+              return isAbsolute
+                ? `${context.dataset.label}: ${fmtMin(Math.round(value * 60))}`
+                : `${context.dataset.label}: ${value.toFixed(1)}%`;
+            }
           }
         },
-        tooltip: { callbacks: { label: ctx => { const v = ctx.parsed.y; if (!v) return null; return `${ctx.dataset.label}: ${v.toFixed(1)}%`; } } },
         filler: { propagate: true },
       },
       scales: {
-        x: { ticks: { color: '#6b7a9e', maxRotation: mode === 'month' ? 45 : 0 }, grid: gridCfg },
+        x: {
+          ticks: {
+            color: '#6b7a9e',
+            maxRotation: mode === 'week' ? 0 : 45,
+            autoSkip: true,
+            maxTicksLimit: mode === 'all' ? 24 : undefined,
+          },
+          grid: gridCfg,
+        },
         y: {
           stacked: true,
-          ticks: { color: '#6b7a9e', callback: v => v + '%' },
+          ticks: { color: '#6b7a9e', callback: value => `${value}${isAbsolute ? 'h' : '%'}` },
           grid: gridCfg,
-          title: { display: true, text: '占清醒时长 %', color: '#6b7a9e' },
-          min: 0, max: 100,
-        }
+          title: { display: true, text: isAbsolute ? '小时' : '可见组成 %', color: '#6b7a9e' },
+          min: 0,
+          max: isAbsolute ? (yMax > 0 ? yMax : undefined) : 100,
+        },
+        ...(isAbsolute ? {
+          yRef: {
+            display: false,
+            stacked: false,
+            min: 0,
+            max: yMax > 0 ? yMax : undefined,
+          }
+        } : {}),
       }
-    }
+    },
+    plugins: [noRecordRegionPlugin(dateStrs)],
   });
-  // recalcPctData 只在图例点击时触发，初始数据已在创建前归一化
+
 }
 
-function switchStackedMode(mode) {
-  state.stackedMode = mode;
+function switchStackedChartView(view) {
+  state.stackedChartView = view === 'percent' ? 'percent' : 'absolute';
+  renderStackedArea();
+}
+
+function stackedToggleSeries(encodedKey) {
+  const key = decodeURIComponent(encodedKey);
+  const hidden = stackedHiddenSeriesSet();
+  if (hidden.has(key)) hidden.delete(key);
+  else hidden.add(key);
+  state.stackedHiddenSeries = [...hidden];
+  renderStackedArea();
+}
+
+function stackedShowAllSeries() {
+  state.stackedHiddenSeries = [];
   renderStackedArea();
 }
 
 function switchStackedLevel(level) {
   state.stackedGroupLevel = level;
-  renderStackedArea();
-}
-
-function stackedNav(mode, delta) {
-  if (mode === 'week') {
-    state.stackedWeekStart = addDays(state.stackedWeekStart, delta);
-  } else {
-    let m = state.stackedMonth.month + delta;
-    let y = state.stackedMonth.year;
-    if (m < 0) { m = 11; y--; }
-    if (m > 11) { m = 0; y++; }
-    state.stackedMonth = { year: y, month: m };
-  }
-  renderStackedArea();
-}
-
-function stackedGoToday(mode) {
-  const now = new Date();
-  if (mode === 'week') {
-    state.stackedWeekStart = getMondayOfDate(now);
-  } else {
-    state.stackedMonth = { year: now.getFullYear(), month: now.getMonth() };
-  }
   renderStackedArea();
 }
 
@@ -7284,6 +10932,206 @@ function forecastModeFromTemplate(template) {
   if (namedItemEnabled) return template.quantityEnabled ? 'chapterQuantity' : 'chapter';
   if (template?.quantityEnabled) return 'quantity';
   return '';
+}
+
+function stackedToolbarHtml(meta, mode, groupLevel, daysWithData) {
+  return `<section class="stacked-hero">
+    <div class="stacked-hero-head">
+      <div>
+        <div class="stacked-eyebrow">TIME COMPOSITION</div>
+        <h2>时间堆积分析</h2>
+        <p>按任务、特殊时段和时间状态查看清醒时间的组成变化。</p>
+      </div>
+      <div class="stacked-range-overview">
+        <span>当前范围</span>
+        <strong>${escHtmlApp(meta.rangeLabel)}</strong>
+        <small>${daysWithData} 天具有完整清醒与分解数据${meta.excludedCount ? ` · ${meta.excludedCount} 天不评分已排除` : ''}</small>
+      </div>
+    </div>
+    <div class="stacked-toolbar">
+      <div class="stacked-control-group">
+        <span>类别层级</span>
+        <div class="stacked-segmented compact">
+          <button class="${groupLevel === 1 ? 'active' : ''}" onclick="switchStackedLevel(1)">一级</button>
+          <button class="${groupLevel === 2 ? 'active' : ''}" onclick="switchStackedLevel(2)">二级</button>
+          <button class="${groupLevel === 3 ? 'active' : ''}" onclick="switchStackedLevel(3)">三级</button>
+        </div>
+      </div>
+    </div>
+  </section>`;
+}
+
+function stackedSummaryMetricHtml(label, value, percent, tone, tipKey, color) {
+  return `<div class="stacked-summary-metric ${tone}" style="--metric-color:${color}">
+    <span class="stacked-summary-label">${label}${tipIcon(tipKey)}</span>
+    <strong>${value}</strong>
+    <small>占清醒 ${percent}%</small>
+    <i></i>
+  </div>`;
+}
+
+function stackedSummaryHtml(meta, totals) {
+  const pctOf = value => totals.awake > 0 ? Math.round(value / totals.awake * 100) : 0;
+  const accounted = totals.task + totals.special + totals.rest + totals.distract;
+  const overlap = Math.max(0, accounted - totals.awake);
+  return `<section class="stacked-summary">
+    <div class="stacked-awake-summary" style="--awake-color:${getSystemSeriesColor('awake')}">
+      <span>清醒总时长${tipIcon('stackAwake')}</span>
+      <strong>${fmtMin(totals.awake, true)}</strong>
+      <div>${totals.daysWithData} 天有效数据 · ${escHtmlApp(meta.rangeLabel)}</div>
+    </div>
+    <div class="stacked-summary-grid">
+      ${stackedSummaryMetricHtml('任务记录', fmtMin(totals.task, true), pctOf(totals.task), 'task', 'stackTask', getSystemSeriesColor('taskTotal'))}
+      ${stackedSummaryMetricHtml('特殊时段', fmtMin(totals.special, true), pctOf(totals.special), 'special', 'stackSpecial', getSystemSeriesColor('specialTotal'))}
+      ${stackedSummaryMetricHtml('休息时间', fmtMin(totals.rest, true), pctOf(totals.rest), 'rest', 'stackRest', getSystemSeriesColor('rest'))}
+      ${stackedSummaryMetricHtml('分心时间', fmtMin(totals.distract, true), pctOf(totals.distract), 'distract', 'stackDistract', getSystemSeriesColor('distract'))}
+      ${stackedSummaryMetricHtml('空闲/未记录', fmtMin(totals.idle, true), pctOf(totals.idle), 'idle', 'stackIdle', getSystemSeriesColor('idle'))}
+    </div>
+    ${overlap > 0 ? `<div class="stacked-accounting-note">任务记录和时段记录采用独立口径，当前可识别时间比清醒总时长多 ${fmtMin(overlap, true)}；图表保留原始记录，不自动扣减。</div>` : ''}
+  </section>`;
+}
+
+function stackedHiddenSeriesSet() {
+  return new Set(Array.isArray(state.stackedHiddenSeries) ? state.stackedHiddenSeries : []);
+}
+
+function stackedLegendHtml(datasets, chartView) {
+  const hidden = stackedHiddenSeriesSet();
+  const hiddenCount = datasets.filter(dataset => dataset._seriesKey && hidden.has(dataset._seriesKey)).length;
+  const groups = [
+    { key: 'task', label: '任务类别' },
+    { key: 'special', label: '特殊时段' },
+    { key: 'status', label: '时间状态' },
+  ];
+  const groupHtml = groups.map(group => {
+    const items = datasets.filter(dataset => dataset._seriesGroup === group.key);
+    if (!items.length) return '';
+    return `<div class="stacked-legend-group">
+      <span class="stacked-legend-label">${group.label}</span>
+      <div class="stacked-legend-items">
+        ${items.map(dataset => {
+          const encodedKey = encodeURIComponent(dataset._seriesKey).replace(/'/g, '%27');
+          const isHidden = hidden.has(dataset._seriesKey);
+          return `<button type="button" class="stacked-legend-item ${isHidden ? 'is-hidden' : ''}"
+            style="--stack-color:${dataset._seriesColor}" onclick="stackedToggleSeries('${encodedKey}')" aria-pressed="${!isHidden}">
+            <i></i><span>${escHtmlApp(dataset.label)}</span>
+          </button>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }).join('');
+  return `<div class="stacked-legend">
+    <div class="stacked-legend-head">
+      <span>显示系列</span>
+      <button class="btn btn-ghost btn-sm" onclick="stackedShowAllSeries()" ${hiddenCount ? '' : 'disabled'}>全部显示</button>
+    </div>
+    ${groupHtml}
+    ${chartView === 'absolute' ? `<div class="stacked-legend-reference" style="--awake-color:${getSystemSeriesColor('awake')}"><i></i><span>清醒时长参考线</span></div>` : ''}
+  </div>`;
+}
+
+function stackedChartPanelHtml(mode, chartView, datasets) {
+  const isAbsolute = chartView === 'absolute';
+  return `<section class="stacked-chart-panel range-${mode}">
+    <div class="stacked-chart-head">
+      <div>
+        <div class="stacked-eyebrow">COMPOSITION TREND</div>
+        <h3>${isAbsolute ? '每日时间分解' : '可见时间组成占比'}</h3>
+        <p>${isAbsolute ? '纵轴为小时，黄色虚线表示当天清醒总时长。' : '当前可见系列会重新归一化为 100%。'}</p>
+      </div>
+      <div class="stacked-segmented chart-view">
+        <button class="${isAbsolute ? 'active' : ''}" onclick="switchStackedChartView('absolute')">绝对时长</button>
+        <button class="${!isAbsolute ? 'active' : ''}" onclick="switchStackedChartView('percent')">结构占比</button>
+      </div>
+    </div>
+    ${stackedLegendHtml(datasets, chartView)}
+    <div class="stacked-chart-canvas"><canvas id="stackedMainChart"></canvas></div>
+  </section>`;
+}
+
+function stackedTableHeaderCellHtml(label, color, sortKey = '') {
+  const heading = `<span class="stacked-table-heading" style="--stack-color:${color}"><i></i>${escHtmlApp(label)}</span>`;
+  return sortKey ? sortableTableHeaderHtml('stacked-detail', sortKey, heading) : `<th>${heading}</th>`;
+}
+
+function stackedDetailSortKey(group, label) {
+  return `${group}:${encodeURIComponent(String(label || '')).replace(/'/g, '%27')}`;
+}
+
+function stackedDetailTableHtml(context) {
+  const { dateStrs, breakdowns, taskCats, specialCats, taskColors, specialColors, totals } = context;
+  return `<details class="stacked-detail-panel">
+    <summary>
+      <div><strong>每日时间分解明细</strong><span>逐日核对各类别的实际组成</span></div>
+      <div>${dateStrs.length} 天 · ${taskCats.length} 个任务类别 · ${specialCats.length} 个特殊时段</div>
+    </summary>
+    <div class="stacked-detail-body">
+      <div class="stacked-table-wrap">
+        <table class="stacked-detail-table" data-sort-table="stacked-detail">
+          <thead>
+            <tr class="stacked-table-groups">
+              <th colspan="2">基础信息</th>
+              ${taskCats.length ? `<th colspan="${taskCats.length}">任务类别</th>` : ''}
+              ${specialCats.length ? `<th colspan="${specialCats.length}">特殊时段</th>` : ''}
+              <th colspan="3">时间状态</th>
+            </tr>
+            <tr>
+              ${sortableTableHeaderHtml('stacked-detail', 'date', '日期', 'date')}${sortableTableHeaderHtml('stacked-detail', 'awake', '清醒')}
+              ${taskCats.map((cat, index) => stackedTableHeaderCellHtml(cat, taskColors[index], stackedDetailSortKey('task', cat))).join('')}
+              ${specialCats.map((cat, index) => stackedTableHeaderCellHtml(cat, specialColors[index], stackedDetailSortKey('special', cat))).join('')}
+              ${stackedTableHeaderCellHtml('休息', getSystemSeriesColor('rest'), 'rest')}
+              ${stackedTableHeaderCellHtml('分心', getSystemSeriesColor('distract'), 'distract')}
+              ${stackedTableHeaderCellHtml('空闲', getSystemSeriesColor('idle'), 'idle')}
+            </tr>
+          </thead>
+          <tbody>
+            ${breakdowns.map((breakdown, index) => {
+              const hasData = breakdown.awakeMin != null;
+              const sortValues = {
+                date: dateStrs[index], awake: hasData ? breakdown.awakeMin : null,
+                rest: Number(breakdown.focusRestMin) || 0,
+                distract: Number(breakdown.focusDistractMin) || 0,
+                idle: hasData ? Number(breakdown.idleMin) || 0 : null,
+              };
+              taskCats.forEach(cat => { sortValues[stackedDetailSortKey('task', cat)] = Number(breakdown.taskMap[cat]) || 0; });
+              specialCats.forEach(cat => { sortValues[stackedDetailSortKey('special', cat)] = Number(breakdown.specialMap[cat]) || 0; });
+              return `<tr ${sortableTableRowAttrs(sortValues, index)}>
+                <td class="fw-mono">${formatShort(dateStrs[index])}</td>
+                <td class="fw-mono stacked-awake-cell">${hasData ? fmtMin(breakdown.awakeMin) : '-'}</td>
+                ${taskCats.map(cat => `<td class="fw-mono">${breakdown.taskMap[cat] ? fmtMin(breakdown.taskMap[cat]) : '-'}</td>`).join('')}
+                ${specialCats.map(cat => `<td class="fw-mono">${breakdown.specialMap[cat] ? fmtMin(breakdown.specialMap[cat]) : '-'}</td>`).join('')}
+                <td class="fw-mono">${breakdown.focusRestMin ? fmtMin(breakdown.focusRestMin) : '-'}</td>
+                <td class="fw-mono">${breakdown.focusDistractMin ? fmtMin(breakdown.focusDistractMin) : '-'}</td>
+                <td class="fw-mono">${hasData ? fmtMin(breakdown.idleMin) : '-'}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+          <tfoot><tr>
+            <td>合计</td>
+            <td class="fw-mono stacked-awake-cell">${fmtMin(totals.awake, true)}</td>
+            ${taskCats.map(cat => {
+              const sum = breakdowns.reduce((total, breakdown) => total + (breakdown.taskMap[cat] || 0), 0);
+              return `<td class="fw-mono">${sum ? fmtMin(sum) : '-'}</td>`;
+            }).join('')}
+            ${specialCats.map(cat => {
+              const sum = breakdowns.reduce((total, breakdown) => total + (breakdown.specialMap[cat] || 0), 0);
+              return `<td class="fw-mono">${sum ? fmtMin(sum) : '-'}</td>`;
+            }).join('')}
+            <td class="fw-mono">${fmtMin(totals.rest, true)}</td>
+            <td class="fw-mono">${fmtMin(totals.distract, true)}</td>
+            <td class="fw-mono">${fmtMin(totals.idle, true)}</td>
+          </tr></tfoot>
+        </table>
+      </div>
+    </div>
+  </details>`;
+}
+
+function stackedEmptyStateHtml() {
+  return `<div class="stacked-empty-state">
+    <strong>当前范围暂无可分解记录</strong>
+    <p>录入起床与睡觉时间，并添加任务或时段记录后，这里会显示时间组成。</p>
+  </div>`;
 }
 
 function migrateForecastUnitModel() {
@@ -7405,6 +11253,32 @@ function migrateTaskTemplateIds() {
   });
 }
 
+function migrateTaskTemplateAccuracySettings() {
+  const legacyTemplateIds = new Set(getTaskTemplates()
+    .filter(template => typeof template.accuracyEnabled !== 'boolean')
+    .map(template => template.id));
+  if (!legacyTemplateIds.size) return;
+  const evidenceUnits = new Map();
+  forEachStoredTask(task => {
+    const templateId = resolveTaskTemplateId(task);
+    if (!legacyTemplateIds.has(templateId)) return;
+    const evidence = taskAccuracyEvidence(task, true);
+    if (!evidence) return;
+    task.accuracy = evidence.accuracy;
+    if (!evidenceUnits.has(templateId)) evidenceUnits.set(templateId, evidence.quantityUnit);
+    else if (!evidenceUnits.get(templateId) && evidence.quantityUnit) evidenceUnits.set(templateId, evidence.quantityUnit);
+  });
+  getTaskTemplates().forEach(template => {
+    if (!legacyTemplateIds.has(template.id)) return;
+    const enabled = evidenceUnits.has(template.id);
+    template.accuracyEnabled = enabled;
+    if (enabled) {
+      template.quantityEnabled = true;
+      if (!String(template.quantityUnit || '').trim()) template.quantityUnit = evidenceUnits.get(template.id) || '数量';
+    }
+  });
+}
+
 function getForecastTaskEntries() {
   const entries = [];
   Object.entries(state.data).forEach(([date, day]) => {
@@ -7428,23 +11302,6 @@ function forecastGoalContext(goal) {
     ordinalUnit: template?.ordinalUnit || '',
     quantityUnit: template?.quantityUnit || '',
   };
-}
-
-function taskOrdinalCardHtml(value, unit, completed) {
-  return `<div class="forecast-chapter-chip task-ordinal-card" data-ordinal="${value}" style="display:flex;align-items:center;gap:8px">
-    <input type="checkbox" class="task-chapter-involved" value="${value}" checked hidden>
-    <b>第${value}${escHtmlApp(unit)}</b>
-    <label style="display:flex;align-items:center;gap:4px;font-weight:400">
-      <input type="checkbox" class="task-chapter-completed" value="${value}" ${completed ? 'checked' : ''}> 本次完成
-    </label>
-    <button type="button" class="btn btn-ghost btn-sm" onclick="taskOrdinalRemove(${value})" title="移除">×</button>
-  </div>`;
-}
-
-function taskOrdinalCardsHtml(values, unit) {
-  const involved = taskOrdinalNumbers(values);
-  const completed = new Set(taskCompletedOrdinals(values));
-  return involved.map(value => taskOrdinalCardHtml(value, unit, completed.has(value))).join('');
 }
 
 function taskNamedItemAllocations(task) {
@@ -7481,6 +11338,70 @@ function taskNamedItemCardHtml(allocation, quantityEnabled) {
   </div>`;
 }
 
+function taskNamedItemStatusHtml(template, allocations = []) {
+  if (!template) return '';
+  const activeItems = [...(template.namedItems || [])]
+    .filter(item => !item.archived)
+    .sort((a, b) => a.order - b.order);
+  const selectedById = new Map(allocations.map(item => [item.itemId, item]));
+  const selectedByName = new Map(allocations.map(item => [
+    String(item.itemName || '').trim().toLocaleLowerCase(),
+    item,
+  ]));
+  const libraryProgress = namedItemLibraryProgress(template.id).progress;
+  let completedCount = 0;
+  let availableCount = 0;
+
+  const rows = activeItems.map(item => {
+    const selected = selectedById.get(item.id) ||
+      selectedByName.get(String(item.name || '').trim().toLocaleLowerCase());
+    const completionInfo = taskNamedItemCompletionInfo(template.id, item.id, item.name);
+    const completedInCurrentTask = Boolean(selected?.completed);
+    const completed = Boolean(completionInfo || completedInCurrentTask);
+    const itemProgress = libraryProgress.get(item.id);
+    if (completed) completedCount++;
+    if (!completed && !selected) availableCount++;
+
+    let detail = '未开始';
+    if (completionInfo) {
+      detail = `已于 ${completionInfo.date} 的任务“${completionInfo.taskName}”中完成`;
+    } else if (completedInCurrentTask) {
+      detail = '已在当前任务中标记为完成';
+    } else if (itemProgress?.records?.length) {
+      detail = `进行中 · 累计 ${forecastDisplayMetric(itemProgress.minutes)} 分钟`;
+      if (template.quantityEnabled && itemProgress.quantity > 0) {
+        detail += ` · ${forecastDisplayMetric(itemProgress.quantity)} ${template.quantityUnit || '数量'}`;
+      }
+    }
+
+    const rowClass = `${selected ? ' selected' : ''}${completed ? ' completed' : ''}`;
+    const action = selected
+      ? '<button type="button" class="task-named-status-action selected" disabled>本次已添加</button>'
+      : completed
+        ? '<button type="button" class="task-named-status-action completed" disabled>已完成，不可选择</button>'
+        : `<button type="button" class="task-named-status-action"
+            data-template-id="${escHtmlApp(template.id)}" data-item-id="${escHtmlApp(item.id)}"
+            onclick="taskNamedItemPick(this)">＋ 选择</button>`;
+    return `<div class="task-named-status-row${rowClass}" data-item-id="${escHtmlApp(item.id)}">
+      <div class="task-named-status-copy">
+        <b>${escHtmlApp(item.name)}</b>
+        <span>${escHtmlApp(detail)}</span>
+      </div>
+      ${action}
+    </div>`;
+  }).join('');
+
+  return `<div class="task-named-status-summary">
+      <span>章节库 <b>${activeItems.length}</b> 个</span>
+      <span>本次已添加 <b>${allocations.length}</b> 个</span>
+      <span>已完成 <b data-task-named-summary="completed">${completedCount}</b> 个</span>
+      <span>可选 <b>${availableCount}</b> 个</span>
+    </div>
+    <div class="task-named-status-list">
+      ${rows || '<div class="form-hint">共享章节库中还没有章节。</div>'}
+    </div>`;
+}
+
 function taskNamedItemsEditorHtml(template, values, quantityEnabled) {
   const templateItems = Array.isArray(template?.namedItems) ? template.namedItems : [];
   const allocations = taskNamedItemAllocations(values).map(allocation => {
@@ -7493,6 +11414,9 @@ function taskNamedItemsEditorHtml(template, values, quantityEnabled) {
       : { ...allocation, isNew: true };
   });
   const activeItems = [...(template?.namedItems || [])].filter(item => !item.archived).sort((a, b) => a.order - b.order);
+  const selectableItems = template
+    ? activeItems.filter(item => !taskNamedItemCompletionInfo(template.id, item.id, item.name))
+    : activeItems;
   return `<div id="task_named_item_editor" style="margin-top:12px" data-template-id="${template?.id || ''}" data-quantity-enabled="${quantityEnabled ? 'true' : 'false'}">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
       <label>本次涉及的命名章节 *</label>
@@ -7501,12 +11425,13 @@ function taskNamedItemsEditorHtml(template, values, quantityEnabled) {
     <div style="display:flex;gap:8px;align-items:center;margin:6px 0">
       <input id="task_named_item_input" list="task_named_item_options" placeholder="搜索已有章节或输入新章节名称"
         onkeydown="if(event.key==='Enter'){event.preventDefault();taskNamedItemAdd('${template?.id || ''}')}">
-      <datalist id="task_named_item_options">${activeItems.map(item => `<option value="${escHtmlApp(item.name)}">`).join('')}</datalist>
+      <datalist id="task_named_item_options">${selectableItems.map(item => `<option value="${escHtmlApp(item.name)}">`).join('')}</datalist>
       <button type="button" class="btn btn-primary btn-sm" onclick="taskNamedItemAdd('${template?.id || ''}')">添加</button>
     </div>
+    <div id="task_named_item_status">${taskNamedItemStatusHtml(template, allocations)}</div>
     <div id="task_named_item_suggestion" style="display:none;margin:6px 0"></div>
     <div id="task_named_item_cards" style="display:grid;gap:8px">${allocations.map(item => taskNamedItemCardHtml(item, quantityEnabled)).join('')}</div>
-    <div class="form-hint" style="margin-top:6px">时长${quantityEnabled ? '和数量' : ''}请在下方任务字段填写；选择多个章节时系统会在后台平均分配，且所有章节必须全部标记为“本次完成”。点击已添加章节可切换状态。新名称只在保存任务后同步到共享章节库。</div>
+    <div class="form-hint" style="margin-top:6px">灰色章节已经在历史任务中完成，不能再次选择。时长${quantityEnabled ? '和数量' : ''}请在下方任务字段填写；选择多个章节时系统会在后台平均分配，且所有章节必须全部标记为“本次完成”。点击已添加章节可切换状态。新名称只在保存任务后同步到共享章节库。</div>
   </div>`;
 }
 
@@ -7520,6 +11445,7 @@ function taskDimensionPanelHtml(templateId, values = {}) {
   const goal = template ? getForecastGoalByTemplate(templateId) : null;
   const ordinalEnabled = template ? Boolean(template.namedItemEnabled ?? template.ordinalEnabled) : Boolean(values.namedItemEnabled ?? values.ordinalEnabled);
   const quantityEnabled = template ? Boolean(template.quantityEnabled) : Boolean(values.quantityEnabled);
+  const accuracyEnabled = template ? Boolean(template.accuracyEnabled) : Boolean(values.accuracyEnabled);
   const switchHtml = template
     ? `<label style="display:flex;align-items:center;gap:6px">
         <input type="checkbox" ${ordinalEnabled ? 'checked' : ''}
@@ -7530,14 +11456,23 @@ function taskDimensionPanelHtml(templateId, values = {}) {
         <input type="checkbox" ${quantityEnabled ? 'checked' : ''}
           onchange="taskTemplateToggleFeature('${template.id}','quantity',this)">
         数量记录：${escHtmlApp(template.quantityUnit || '（未设置单位）')}
+      </label>
+      <label style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" ${accuracyEnabled ? 'checked' : ''} ${quantityEnabled ? '' : 'disabled'}
+          onchange="taskTemplateToggleFeature('${template.id}','accuracy',this)">
+        正确率记录（错题数必填）
       </label>`
     : `<label style="display:flex;align-items:center;gap:6px">
         <input type="checkbox" id="task_new_ordinal_enabled" ${ordinalEnabled ? 'checked' : ''} onchange="taskNewUnitToggle()">
         新模板开启命名章节记录
       </label>
       <label style="display:flex;align-items:center;gap:6px">
-        <input type="checkbox" id="task_new_quantity_enabled" ${quantityEnabled ? 'checked' : ''} onchange="taskNewUnitToggle()">
+        <input type="checkbox" id="task_new_quantity_enabled" ${quantityEnabled ? 'checked' : ''} onchange="taskNewUnitToggle('quantity')">
         新模板开启数量记录
+      </label>
+      <label style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="task_new_accuracy_enabled" ${accuracyEnabled ? 'checked' : ''} ${quantityEnabled ? '' : 'disabled'} onchange="taskNewUnitToggle('accuracy')">
+        新模板开启正确率记录（错题数必填）
       </label>`;
   return `<div class="forecast-task-fields">
     <div style="display:flex;gap:18px;flex-wrap:wrap;padding:8px 0">${switchHtml}</div>
@@ -7643,6 +11578,55 @@ function taskNamedItemCompletionInfo(templateId, itemId, itemName) {
   return null;
 }
 
+function taskRefreshNamedItemStatus(templateId) {
+  const host = document.getElementById('task_named_item_status');
+  const template = getTaskTemplateById(templateId);
+  if (!host || !template) return;
+  const previousScrollTop = host.querySelector('.task-named-status-list')?.scrollTop || 0;
+  host.innerHTML = taskNamedItemStatusHtml(template, taskCollectNamedItemAllocations(false));
+  const list = host.querySelector('.task-named-status-list');
+  if (list) list.scrollTop = previousScrollTop;
+}
+
+function taskNamedItemPick(button) {
+  const templateId = button?.dataset.templateId || '';
+  const itemId = button?.dataset.itemId || '';
+  const template = getTaskTemplateById(templateId);
+  const item = template?.namedItems?.find(candidate => candidate.id === itemId);
+  if (item) taskNamedItemAdd(templateId, item.name);
+}
+
+function taskUpdateNamedItemStatusCompletion(templateId, itemId, completed) {
+  const host = document.getElementById('task_named_item_status');
+  const template = getTaskTemplateById(templateId);
+  if (!host || !template) return;
+  const row = [...host.querySelectorAll('.task-named-status-row')]
+    .find(candidate => candidate.dataset.itemId === itemId);
+  const item = template.namedItems?.find(candidate => candidate.id === itemId);
+  if (!row || !item) return;
+
+  row.classList.toggle('completed', completed);
+  const detail = row.querySelector('.task-named-status-copy span');
+  if (detail) {
+    if (completed) {
+      detail.textContent = '已在当前任务中标记为完成';
+    } else {
+      const itemProgress = namedItemLibraryProgress(templateId).progress.get(itemId);
+      if (itemProgress?.records?.length) {
+        detail.textContent = `进行中 · 累计 ${forecastDisplayMetric(itemProgress.minutes)} 分钟`;
+        if (template.quantityEnabled && itemProgress.quantity > 0) {
+          detail.textContent += ` · ${forecastDisplayMetric(itemProgress.quantity)} ${template.quantityUnit || '数量'}`;
+        }
+      } else {
+        detail.textContent = '未开始';
+      }
+    }
+  }
+  const completedTotal = host.querySelectorAll('.task-named-status-row.completed').length;
+  const completedSummary = host.querySelector('[data-task-named-summary="completed"]');
+  if (completedSummary) completedSummary.textContent = String(completedTotal);
+}
+
 function taskOriginalNamedItemAllocation(itemId, itemName) {
   const editingTaskId = state._editingTaskId || '';
   if (!editingTaskId) return null;
@@ -7700,8 +11684,8 @@ function taskNamedItemAdd(templateId, suppliedName = '') {
   }
   if (matched) {
     const completionInfo = taskNamedItemCompletionInfo(templateId, matched.id, matched.name);
-    if (completionInfo && state.selectedDate >= completionInfo.date) {
-      alert(`章节“${matched.name}”已于 ${completionInfo.date} 的任务“${completionInfo.taskName}”中完成。\n完成日当天及之后不能再添加；完成日前仍可添加为“进行中”。`);
+    if (completionInfo) {
+      alert(`章节“${matched.name}”已于 ${completionInfo.date} 的任务“${completionInfo.taskName}”中完成，不能再次选择。`);
       return;
     }
   }
@@ -7726,6 +11710,7 @@ function taskNamedItemAdd(templateId, suppliedName = '') {
   cards.appendChild(holder.firstElementChild);
   if (input) input.value = '';
   taskRecalculateNamedItemTotals();
+  taskRefreshNamedItemStatus(templateId);
   taskUpdateNamedItemSuggestion(templateId, itemId, matched?.name || name);
 }
 
@@ -7733,12 +11718,12 @@ function taskToggleNamedItemCompleted(event, card) {
   if (!card || event?.target?.closest('button')) return;
   const checkbox = card.querySelector('.task-named-completed');
   const status = card.querySelector('.task-named-completed-status');
+  const templateId = document.getElementById('task_named_item_editor')?.dataset.templateId || '';
   if (!checkbox) return;
   if (!checkbox.checked) {
     const itemId = card.dataset.itemId || '';
     const itemName = card.dataset.itemName || '';
     const original = taskOriginalNamedItemAllocation(itemId, itemName);
-    const templateId = document.getElementById('task_named_item_editor')?.dataset.templateId || '';
     const completionInfo = taskNamedItemCompletionInfo(templateId, itemId, itemName);
     const restoringEarliestOriginal = Boolean(
       completionInfo && original?.completed && state.selectedDate < completionInfo.date
@@ -7756,12 +11741,14 @@ function taskToggleNamedItemCompleted(event, card) {
     status.textContent = checkbox.checked ? '✓ 本次完成' : '进行中';
     status.style.color = checkbox.checked ? '#66bb6a' : 'var(--muted)';
   }
+  taskUpdateNamedItemStatusCompletion(templateId, card.dataset.itemId || '', checkbox.checked);
 }
 
 function taskNamedItemRemove(itemId) {
   document.querySelector(`.task-named-item-card[data-item-id="${itemId}"]`)?.remove();
   taskRecalculateNamedItemTotals();
   const templateId = document.getElementById('task_named_item_editor')?.dataset.templateId || '';
+  taskRefreshNamedItemStatus(templateId);
   taskUpdateNamedItemSuggestion(templateId);
 }
 
@@ -7872,56 +11859,6 @@ function taskCommitDraftNamedItems(template, allocations) {
   return changed;
 }
 
-function taskOrdinalAdd(templateId) {
-  const input = document.getElementById('task_ordinal_input');
-  const raw = String(input?.value || '').trim();
-  const value = Number(raw);
-  if (!/^\d+$/.test(raw) || !Number.isInteger(value) || value <= 0) {
-    alert('序数必须是大于 0 的整数。');
-    return;
-  }
-  const template = getTaskTemplateById(templateId);
-  const goal = template ? getForecastGoalByTemplate(templateId) : null;
-  if ((goal?.mode === 'chapter' || goal?.mode === 'chapterQuantity') &&
-    (value < goal.startOrdinal || value > goal.endOrdinal)) {
-    alert(`序数必须在预测目标范围第 ${goal.startOrdinal}-${goal.endOrdinal}${goal.ordinalUnit}内。`);
-    return;
-  }
-  const existing = forecastSelectedChapters('.task-chapter-involved');
-  const currentUnit = document.getElementById('task_template_ordinal_unit')?.value.trim() ||
-    document.getElementById('task_new_ordinal_unit')?.value.trim() || template?.ordinalUnit || '';
-  if (existing.includes(value)) {
-    alert(`第${value}${currentUnit}已经添加。`);
-    return;
-  }
-  const completed = forecastSelectedChapters('.task-chapter-completed');
-  const cards = document.getElementById('task_ordinal_cards');
-  if (cards) {
-    const values = [...existing, value].sort((a, b) => a - b);
-    cards.innerHTML = values.map(item => taskOrdinalCardHtml(item, currentUnit, completed.includes(item))).join('');
-  }
-  if (input) input.value = '';
-}
-
-function taskOrdinalRemove(value) {
-  document.querySelector(`.task-ordinal-card[data-ordinal="${value}"]`)?.remove();
-}
-
-function forecastChapterCheckboxChanged(chapter, kind, checked) {
-  const involved = [...document.querySelectorAll('.task-chapter-involved')]
-    .find(input => Number(input.value) === chapter);
-  const completed = [...document.querySelectorAll('.task-chapter-completed')]
-    .find(input => Number(input.value) === chapter);
-  if (kind === 'completed' && checked && involved) {
-    involved.checked = true;
-    if (completed) completed.disabled = false;
-  }
-  if (kind === 'involved' && completed) {
-    completed.disabled = !checked;
-    if (!checked) completed.checked = false;
-  }
-}
-
 function forecastSelectedChapters(selector) {
   return [...document.querySelectorAll(selector)]
     .filter(input => input.checked)
@@ -7940,16 +11877,58 @@ function forecastLinkedTasks(goal) {
   return getForecastTaskEntries().filter(entry => resolveTaskTemplateId(entry.task) === goal.templateId);
 }
 
+function forecastSortedTaskEntries(entries) {
+  return (entries || []).map((entry, sourceIndex) => ({ ...entry, sourceIndex }))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.sourceIndex - b.sourceIndex);
+}
+
+function forecastTaskRecord(entry, extra = {}) {
+  const task = entry.task || {};
+  return {
+    date: entry.date,
+    taskId: task.id || '',
+    taskName: task.name || '未命名任务',
+    minutes: Math.max(0, Number(task.minutes) || 0),
+    quantity: task.quantity != null && Number.isFinite(Number(task.quantity)) ? Number(task.quantity) : null,
+    quantityUnit: task.quantityUnit || '',
+    ...extra,
+  };
+}
+
+function forecastQuantityEntryReasons(goal, task) {
+  const reasons = [];
+  const quantity = Number(task?.quantity);
+  const minutes = Number(task?.minutes);
+  if (!Number.isInteger(quantity) || quantity <= 0) reasons.push('未填写有效题数');
+  if (!Number.isInteger(minutes) || minutes <= 0) reasons.push('未填写有效任务时长');
+  if (String(task?.quantityUnit || '') !== String(goal.quantityUnit || '')) {
+    reasons.push(`数量单位不同（记录为${task?.quantityUnit || '未标单位'}，目标为${goal.quantityUnit || '未标单位'}）`);
+  }
+  return reasons;
+}
+
 function forecastQuantityResult(goal, entries) {
-  const valid = entries.filter(({ task }) =>
-    Number.isInteger(Number(task.quantity)) &&
-    Number(task.quantity) > 0 &&
-    Number.isInteger(Number(task.minutes)) &&
-    Number(task.minutes) > 0 &&
-    task.quantityUnit === goal.quantityUnit
-  );
-  const completed = valid.reduce((sum, entry) => sum + Number(entry.task.quantity), 0);
-  const minutes = valid.reduce((sum, entry) => sum + Number(entry.task.minutes), 0);
+  const records = [];
+  const excludedRecords = [];
+  let cumulativeQuantity = 0;
+  forecastSortedTaskEntries(entries).forEach(entry => {
+    const reasons = forecastQuantityEntryReasons(goal, entry.task);
+    if (reasons.length) {
+      excludedRecords.push(forecastTaskRecord(entry, { reasons }));
+      return;
+    }
+    const quantity = Number(entry.task.quantity);
+    const minutes = Number(entry.task.minutes);
+    cumulativeQuantity += quantity;
+    records.push(forecastTaskRecord(entry, {
+      quantity,
+      cumulativeQuantity,
+      efficiency: quantity / minutes,
+    }));
+  });
+  const valid = records;
+  const completed = valid.reduce((sum, record) => sum + Number(record.quantity), 0);
+  const minutes = valid.reduce((sum, record) => sum + Number(record.minutes), 0);
   const speed = minutes > 0 ? completed / minutes : 0;
   const remaining = Math.max(0, Number(goal.totalQuantity) - completed);
   const complete = remaining === 0;
@@ -7963,7 +11942,10 @@ function forecastQuantityResult(goal, entries) {
     completed,
     remaining,
     speed,
-    excluded: entries.length - valid.length,
+    completedEffortMinutes: speed > 0 ? Number(goal.totalQuantity) / speed : minutes,
+    excluded: excludedRecords.length,
+    records,
+    excludedRecords,
     summary: `已完成 ${completed} / ${goal.totalQuantity} ${goal.quantityUnit}`,
     efficiency: speed > 0 ? `${speed.toFixed(2)} ${goal.quantityUnit}/分钟` : '数据不足',
   };
@@ -7976,67 +11958,107 @@ function forecastActiveNamedItems(goal) {
 }
 
 function forecastNamedItemGroups(goal, entries, requireQuantity = false) {
-  const items = forecastActiveNamedItems(goal);
+  const items = [...(Array.isArray(goal.namedItems) ? goal.namedItems : [])]
+    .filter(item => item.id && String(item.name || '').trim())
+    .sort((a, b) => Number(a.order) - Number(b.order));
   const groups = new Map(items.map((item, index) => [item.id, {
     itemId: item.id,
     name: String(item.name || '').trim(),
     order: index,
+    archived: Boolean(item.archived),
     minutes: 0,
     quantity: 0,
     quantityMinutes: 0,
     speedQuantity: 0,
     completed: false,
+    records: [],
   }]));
   const byName = new Map(items.map(item => [String(item.name || '').trim().toLocaleLowerCase(), item.id]));
   let excluded = 0;
-  entries.forEach(({ task }) => {
+  const excludedRecords = [];
+  forecastSortedTaskEntries(entries).forEach(entry => {
+    const task = entry.task || {};
     let contributed = false;
+    let matched = false;
     taskNamedItemAllocations(task).forEach(allocation => {
       const fallbackId = byName.get(allocation.itemName.toLocaleLowerCase());
       const group = groups.get(allocation.itemId) || groups.get(fallbackId);
-      if (!group) return;
+      if (!group) {
+        excludedRecords.push(forecastTaskRecord(entry, {
+          itemName: allocation.itemName || '未知章节',
+          allocatedMinutes: Math.max(0, Number(allocation.minutes) || 0),
+          allocatedQuantity: allocation.quantity != null && Number.isFinite(Number(allocation.quantity)) ? Math.max(0, Number(allocation.quantity)) : null,
+          completed: Boolean(allocation.completed),
+          reasons: ['没有匹配活动章节'],
+        }));
+        return;
+      }
+      matched = true;
       const minutes = Number(allocation.minutes);
       const quantity = Number(allocation.quantity);
       const validMinutes = Number.isFinite(minutes) && minutes > 0;
       const validQuantity = Number.isFinite(quantity) && quantity > 0 &&
         task.quantityUnit === goal.quantityUnit;
-      if (validMinutes) group.minutes += minutes;
-      if (validQuantity) group.quantity += quantity;
-      if (validMinutes && validQuantity) {
-        group.quantityMinutes += minutes;
-        group.speedQuantity += quantity;
+      const reasons = [];
+      if (group.archived) reasons.push('章节已归档，不参与当前目标预测');
+      if (!validMinutes) reasons.push('章节分配缺少有效分钟');
+      if (requireQuantity && !(Number.isFinite(quantity) && quantity > 0)) reasons.push('章节分配缺少有效题数');
+      if (requireQuantity && Number.isFinite(quantity) && quantity > 0 && task.quantityUnit !== goal.quantityUnit) {
+        reasons.push(`数量单位不同（记录为${task.quantityUnit || '未标单位'}，目标为${goal.quantityUnit || '未标单位'}）`);
       }
       if (allocation.completed) group.completed = true;
-      if (validMinutes && (!requireQuantity || validQuantity)) contributed = true;
+      const counted = !group.archived && validMinutes && (!requireQuantity || validQuantity);
+      const record = forecastTaskRecord(entry, {
+        itemId: group.itemId,
+        itemName: group.name,
+        allocatedMinutes: validMinutes ? minutes : 0,
+        allocatedQuantity: Number.isFinite(quantity) && quantity >= 0 ? quantity : null,
+        completed: Boolean(allocation.completed),
+        validMinutes,
+        validQuantity,
+        counted,
+        reasons,
+      });
+      group.records.push(record);
+      if (!group.archived) {
+        if (validMinutes) group.minutes += minutes;
+        if (validQuantity) group.quantity += quantity;
+        if (validMinutes && validQuantity) {
+          group.quantityMinutes += minutes;
+          group.speedQuantity += quantity;
+        }
+      }
+      if (counted) contributed = true;
+      if (reasons.length) excludedRecords.push(record);
     });
+    if (!matched && !taskNamedItemAllocations(task).length) {
+      excludedRecords.push(forecastTaskRecord(entry, { reasons: ['没有匹配活动章节'] }));
+    }
     if (!contributed) excluded++;
   });
-  return { groups: [...groups.values()].sort((a, b) => a.order - b.order), excluded };
+  return {
+    groups: [...groups.values()].filter(group => !group.archived || group.records.length).sort((a, b) => a.order - b.order),
+    excluded,
+    excludedRecords,
+  };
 }
 
 function forecastChapterResult(goal, entries) {
-  const { groups, excluded } = forecastNamedItemGroups(goal, entries, false);
-  const chapterCount = groups.length;
-  const completedGroups = groups.filter(group => group.completed);
+  const { groups, excluded, excludedRecords } = forecastNamedItemGroups(goal, entries, false);
+  const activeGroups = groups.filter(group => !group.archived);
+  const chapterCount = activeGroups.length;
+  const completedGroups = activeGroups.filter(group => group.completed);
   const validCompletedGroups = completedGroups.filter(group => group.minutes > 0);
   const completed = completedGroups.length;
   const remaining = chapterCount - completed;
   const complete = chapterCount > 0 && remaining === 0;
   const baseItems = groups.map(group => ({ ...group, estimatedRemainingMinutes: 0, estimatedRemainingQuantity: null }));
-  if (complete) {
-    return {
-      goal, complete: true, ready: true, reason: '', warning: '', requiredMinutes: 0,
-      progress: 100, completed, remaining: 0, speed: 0, excluded, items: baseItems,
-      summary: `已完成 ${completed} / ${chapterCount} 个章节`,
-      efficiency: '目标已完成',
-    };
-  }
   if (!validCompletedGroups.length) {
     return {
-      goal, complete: false, ready: false,
-      reason: '至少需要完成并勾选一个具有有效时长的章节后才能估算。',
-      warning: '', requiredMinutes: null, progress: chapterCount ? completed / chapterCount * 100 : 0,
-      completed, remaining, speed: 0, excluded, items: baseItems,
+      goal, complete, ready: false,
+      reason: complete ? '目标已完成，但缺少有效章节时长，无法保留效率估算。' : '至少需要完成并勾选一个具有有效时长的章节后才能估算。',
+      warning: '', requiredMinutes: complete ? 0 : null, progress: chapterCount ? completed / chapterCount * 100 : 0,
+      completed, remaining, speed: 0, excluded, excludedRecords, items: baseItems,
       summary: `已完成 ${completed} / ${chapterCount} 个章节`,
       efficiency: '数据不足',
     };
@@ -8044,46 +12066,39 @@ function forecastChapterResult(goal, entries) {
   const averageMinutes = validCompletedGroups.reduce((sum, group) => sum + group.minutes, 0) / validCompletedGroups.length;
   const items = groups.map(group => ({
     ...group,
-    estimatedRemainingMinutes: group.completed ? 0 : Math.max(0, averageMinutes - group.minutes),
+    estimatedRemainingMinutes: group.archived || group.completed ? 0 : Math.max(0, averageMinutes - group.minutes),
     estimatedRemainingQuantity: null,
   }));
-  const requiredMinutes = items.reduce((sum, item) => sum + item.estimatedRemainingMinutes, 0);
+  const requiredMinutes = complete ? 0 : items.filter(item => !item.archived).reduce((sum, item) => sum + item.estimatedRemainingMinutes, 0);
   return {
-    goal, complete: false, ready: true, reason: '', warning: '', requiredMinutes,
+    goal, complete, ready: true, reason: '', warning: '', requiredMinutes,
     progress: chapterCount ? completed / chapterCount * 100 : 0, completed, remaining,
-    speed: averageMinutes > 0 ? 1 / averageMinutes : 0, excluded, items,
-    averageMinutes,
+    speed: averageMinutes > 0 ? 1 / averageMinutes : 0, excluded, excludedRecords, items,
+    averageMinutes, completedEffortMinutes: averageMinutes * chapterCount,
     summary: `已完成 ${completed} / ${chapterCount} 个章节`,
     efficiency: `平均 ${averageMinutes.toFixed(1)} 分钟/章节`,
   };
 }
 
 function forecastChapterQuantityResult(goal, entries) {
-  const { groups, excluded } = forecastNamedItemGroups(goal, entries, true);
-  const chapterCount = groups.length;
-  const completedGroups = groups.filter(group => group.completed);
+  const { groups, excluded, excludedRecords } = forecastNamedItemGroups(goal, entries, true);
+  const activeGroups = groups.filter(group => !group.archived);
+  const chapterCount = activeGroups.length;
+  const completedGroups = activeGroups.filter(group => group.completed);
   const validCompletedGroups = completedGroups.filter(group => group.quantity > 0 && group.quantityMinutes > 0);
   const completed = completedGroups.length;
   const remaining = chapterCount - completed;
   const complete = chapterCount > 0 && remaining === 0;
   const baseItems = groups.map(group => ({ ...group, estimatedRemainingMinutes: 0, estimatedRemainingQuantity: 0 }));
-  if (complete) {
-    return {
-      goal, complete: true, ready: true, reason: '', warning: '', requiredMinutes: 0,
-      progress: 100, completed, remaining: 0, speed: 0, excluded, items: baseItems,
-      summary: `已完成 ${completed} / ${chapterCount} 个章节`,
-      efficiency: '目标已完成',
-    };
-  }
-  const totalQuestions = groups.reduce((sum, group) => sum + group.speedQuantity, 0);
-  const questionMinutes = groups.reduce((sum, group) => sum + group.quantityMinutes, 0);
+  const totalQuestions = activeGroups.reduce((sum, group) => sum + group.speedQuantity, 0);
+  const questionMinutes = activeGroups.reduce((sum, group) => sum + group.quantityMinutes, 0);
   const questionSpeed = questionMinutes > 0 ? totalQuestions / questionMinutes : 0;
   if (!validCompletedGroups.length || !questionSpeed) {
     return {
-      goal, complete: false, ready: false,
-      reason: `至少需要完成一个章节，并为它记录有效的${goal.quantityUnit || '数量'}和时长。`,
-      warning: '', requiredMinutes: null, progress: chapterCount ? completed / chapterCount * 100 : 0,
-      completed, remaining, speed: questionSpeed, excluded, items: baseItems,
+      goal, complete, ready: false,
+      reason: complete ? `目标已完成，但缺少有效的${goal.quantityUnit || '数量'}和时长，无法保留效率估算。` : `至少需要完成一个章节，并为它记录有效的${goal.quantityUnit || '数量'}和时长。`,
+      warning: '', requiredMinutes: complete ? 0 : null, progress: chapterCount ? completed / chapterCount * 100 : 0,
+      completed, remaining, speed: questionSpeed, excluded, excludedRecords, items: baseItems,
       summary: `已完成 ${completed} / ${chapterCount} 个章节`,
       efficiency: questionSpeed > 0 ? `${questionSpeed.toFixed(2)} ${goal.quantityUnit}/分钟` : '数据不足',
     };
@@ -8091,24 +12106,25 @@ function forecastChapterQuantityResult(goal, entries) {
   const averageQuestions = validCompletedGroups.reduce((sum, group) => sum + group.quantity, 0) / validCompletedGroups.length;
   const averageMinutes = validCompletedGroups.reduce((sum, group) => sum + group.minutes, 0) / validCompletedGroups.length;
   const items = groups.map(group => {
-    const estimatedRemainingQuantity = group.completed ? 0 : Math.max(0, averageQuestions - group.quantity);
+    const estimatedRemainingQuantity = group.archived || group.completed ? 0 : Math.max(0, averageQuestions - group.quantity);
     return {
       ...group,
       estimatedRemainingQuantity,
       estimatedRemainingMinutes: estimatedRemainingQuantity / questionSpeed,
-      quantityExceededAverage: !group.completed && group.quantity >= averageQuestions,
+      quantityExceededAverage: !group.archived && !group.completed && group.quantity >= averageQuestions,
     };
   });
-  const exceededCount = items.filter(item => item.quantityExceededAverage).length;
-  const requiredMinutes = items.reduce((sum, item) => sum + item.estimatedRemainingMinutes, 0);
+  const exceededCount = items.filter(item => !item.archived && item.quantityExceededAverage).length;
+  const requiredMinutes = complete ? 0 : items.filter(item => !item.archived).reduce((sum, item) => sum + item.estimatedRemainingMinutes, 0);
   return {
-    goal, complete: false, ready: true, reason: '',
+    goal, complete, ready: true, reason: '',
     warning: exceededCount
       ? `${exceededCount} 个未完成章节的累计${goal.quantityUnit || '数量'}已达到或超过已完成章节平均值，这些章节暂按剩余 0 分钟估算，请确认是否应勾选完成。`
       : '',
     requiredMinutes,
     progress: chapterCount ? completed / chapterCount * 100 : 0, completed, remaining,
-    speed: questionSpeed, excluded, items, averageQuestions, averageMinutes,
+    speed: questionSpeed, excluded, excludedRecords, items, averageQuestions, averageMinutes,
+    completedEffortMinutes: averageMinutes * chapterCount,
     summary: `已完成 ${completed} / ${chapterCount} 个章节 · 平均 ${averageQuestions.toFixed(1)} ${goal.quantityUnit}/章节`,
     efficiency: `${questionSpeed.toFixed(2)} ${goal.quantityUnit}/分钟 · 平均 ${averageMinutes.toFixed(1)} 分钟/章节`,
   };
@@ -8128,6 +12144,8 @@ function calculateForecastGoal(goal) {
     remaining: 0,
     speed: 0,
     excluded: 0,
+    records: [],
+    excludedRecords: [],
     items: [],
     warning: '',
     summary: '预测配置不完整',
@@ -8174,27 +12192,20 @@ function forecastCapacityStats(settings = getForecastSettings()) {
       endDate: '',
       averageMinutes,
       eligibleDays: 0,
-      excludedDays: 0,
       totalActualMinutes: 0,
     };
   }
   const start = settings.capacityStartDate;
   const end = settings.capacityTrackLatest ? getTodayStr() : settings.capacityEndDate;
   if (!start || !end || start > end) {
-    return { source: 'range', valid: false, startDate: start, endDate: end, averageMinutes: 0, eligibleDays: 0, excludedDays: 0, totalActualMinutes: 0 };
+    return { source: 'range', valid: false, startDate: start, endDate: end, averageMinutes: 0, eligibleDays: 0, totalActualMinutes: 0 };
   }
   let cursor = start;
   let eligibleDays = 0;
-  let excludedDays = 0;
   let totalActualMinutes = 0;
   while (cursor <= end) {
-    const day = state.data[cursor];
-    if (day?.excludeFromRating) {
-      excludedDays++;
-    } else {
-      eligibleDays++;
-      totalActualMinutes += forecastActualMinutesForDay(cursor);
-    }
+    eligibleDays++;
+    totalActualMinutes += forecastActualMinutesForDay(cursor);
     cursor = forecastDateAfter(cursor, 1);
   }
   return {
@@ -8204,7 +12215,6 @@ function forecastCapacityStats(settings = getForecastSettings()) {
     endDate: end,
     averageMinutes: eligibleDays > 0 ? totalActualMinutes / eligibleDays : 0,
     eligibleDays,
-    excludedDays,
     totalActualMinutes,
   };
 }
@@ -8215,8 +12225,10 @@ function calculateForecastOverall(results) {
   const unfinished = results.filter(result => !result.complete);
   const insufficient = unfinished.filter(result => !result.ready);
   const today = getTodayStr();
-  const todayExcluded = Boolean(state.data[today]?.excludeFromRating);
-  const todayUsed = todayExcluded ? 0 : forecastActualMinutesForDay(today);
+  const todayUsed = forecastActualMinutesForDay(today);
+  if (!results.length) {
+    return { label: '暂无参与预测目标', totalMinutes: null, todayUsed, insufficient: 0, capacity };
+  }
   if (!unfinished.length) {
     return { label: '全部目标已完成', totalMinutes: 0, todayUsed, insufficient: 0, capacity };
   }
@@ -8242,19 +12254,17 @@ function calculateForecastOverall(results) {
     };
   }
   const totalMinutes = unfinished.reduce((sum, result) => sum + result.requiredMinutes, 0);
-  const availableToday = todayExcluded ? 0 : Math.max(0, capacity.averageMinutes - todayUsed);
+  const availableToday = Math.max(0, capacity.averageMinutes - todayUsed);
   if (totalMinutes <= availableToday) {
     return { label: today, totalMinutes, todayUsed, insufficient: 0, capacity };
   }
-  // 从明天起逐日分配学习能力；已标记“不参与评分”的日期不分配时长，也不计入完成天数。
+  // 从明天起逐日分配学习能力。
   let remainingMinutes = totalMinutes - availableToday;
   let completionDate = today;
   let guard = 0;
   while (remainingMinutes > 0 && guard < 36600) {
     completionDate = forecastDateAfter(completionDate, 1);
-    if (!state.data[completionDate]?.excludeFromRating) {
-      remainingMinutes -= capacity.averageMinutes;
-    }
+    remainingMinutes -= capacity.averageMinutes;
     guard++;
   }
   return {
@@ -8274,6 +12284,51 @@ function forecastStartNew() {
 function forecastEdit(id) {
   state.forecastEditingId = id;
   renderForecast();
+  requestAnimationFrame(() => {
+    const editor = document.querySelector('.forecast-editor-panel');
+    editor?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.getElementById('forecast_goal_name')?.focus({ preventScroll: true });
+  });
+}
+
+function renderSleepIntervalDistributionChart(chartId, distribution, color, label) {
+  if (!document.getElementById(chartId) || !distribution?.bins?.length) return;
+  mkChart(chartId, {
+    type: 'line',
+    data: {
+      labels: distribution.bins.map(bin => [bin.label, `${distribution.width}分钟`]),
+      datasets: [{
+        label,
+        data: distribution.bins.map(bin => bin.count),
+        borderColor: color,
+        backgroundColor: `${color}1f`,
+        pointBackgroundColor: color,
+        pointBorderColor: '#07111f',
+        pointBorderWidth: 2,
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        borderWidth: 2.2,
+        tension: .22,
+        fill: true,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: contexts => distribution.bins[contexts[0]?.dataIndex]?.label || '',
+          label: context => `${Number(context.parsed.y) || 0} 次`,
+        } },
+      },
+      scales: {
+        x: { ticks: { color: '#a8b5d0', maxRotation: 0, autoSkip: true, maxTicksLimit: 16 }, grid: { display: false }, title: { display: true, text: `时间区间（${distribution.width}分钟/格）`, color: '#6b7a9e' } },
+        y: { beginAtZero: true, ticks: { color: '#6b7a9e', precision: 0 }, grid: { color: 'rgba(107,122,158,.12)', drawBorder: false }, title: { display: true, text: '出现次数', color: '#6b7a9e' } },
+      },
+    },
+  });
 }
 
 function forecastNamedItemRecordsHtml(records = [], quantityUnit = '') {
@@ -8727,6 +12782,7 @@ async function forecastSaveGoal() {
   const templateId = document.getElementById('forecast_goal_template')?.value || '';
   const template = getTaskTemplates().find(item => item.id === templateId);
   const name = document.getElementById('forecast_goal_name')?.value.trim() || '';
+  const excludedFromForecast = Boolean(document.getElementById('forecast_goal_excluded')?.checked);
   const mode = forecastModeFromTemplate(template);
   const goals = getForecastGoals();
   const existingIndex = goals.findIndex(goal => goal.id === state.forecastEditingId);
@@ -8776,6 +12832,7 @@ async function forecastSaveGoal() {
     templateId,
     name,
     totalQuantity: mode === 'quantity' ? totalQuantity : null,
+    excludedFromForecast,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   };
@@ -8800,6 +12857,106 @@ async function forecastDelete(id) {
   renderForecast();
 }
 
+function forecastGoalIsExcluded(resultOrGoal) {
+  const goal = resultOrGoal?.goal || resultOrGoal;
+  return Boolean(goal?.excludedFromForecast);
+}
+
+function forecastActiveResults(results) {
+  return results.filter(result => !forecastGoalIsExcluded(result));
+}
+
+function forecastSetCategoryFilter(level, value) {
+  const filter = state.forecastCategoryFilter ||= { level1: '', level2: '', level3: '' };
+  filter[`level${level}`] = value || '';
+  if (level <= 1) {
+    filter.level2 = '';
+    filter.level3 = '';
+  } else if (level === 2) {
+    filter.level3 = '';
+  }
+  renderForecast();
+}
+
+function forecastClearCategoryFilter() {
+  state.forecastCategoryFilter = { level1: '', level2: '', level3: '' };
+  renderForecast();
+}
+
+function forecastCategoryFilterContext(results) {
+  const filter = state.forecastCategoryFilter ||= { level1: '', level2: '', level3: '' };
+  const templates = new Map(getTaskTemplates().map(template => [template.id, template]));
+  const entries = results.map(result => ({
+    result,
+    parts: parseActPath(templates.get(result.goal.templateId)?.activityType || ''),
+  }));
+  const uniqueValues = values => [...new Set(values.filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const level1Options = uniqueValues(entries.map(entry => entry.parts[0]));
+  if (filter.level1 && !level1Options.includes(filter.level1)) {
+    filter.level1 = '';
+    filter.level2 = '';
+    filter.level3 = '';
+  }
+  const level2Options = filter.level1
+    ? uniqueValues(entries.filter(entry => entry.parts[0] === filter.level1).map(entry => entry.parts[1]))
+    : [];
+  if (filter.level2 && !level2Options.includes(filter.level2)) {
+    filter.level2 = '';
+    filter.level3 = '';
+  }
+  const level3Options = filter.level1 && filter.level2
+    ? uniqueValues(entries
+      .filter(entry => entry.parts[0] === filter.level1 && entry.parts[1] === filter.level2)
+      .map(entry => entry.parts[2]))
+    : [];
+  if (filter.level3 && !level3Options.includes(filter.level3)) filter.level3 = '';
+  const filteredResults = entries
+    .filter(entry => !filter.level1 || entry.parts[0] === filter.level1)
+    .filter(entry => !filter.level2 || entry.parts[1] === filter.level2)
+    .filter(entry => !filter.level3 || entry.parts[2] === filter.level3)
+    .map(entry => entry.result);
+  return {
+    filter,
+    level1Options,
+    level2Options,
+    level3Options,
+    filteredResults,
+    total: results.length,
+    hasFilter: Boolean(filter.level1 || filter.level2 || filter.level3),
+  };
+}
+
+function forecastCategoryFilterHtml(context) {
+  if (!context.total) return '';
+  const { filter, level1Options, level2Options, level3Options } = context;
+  return `<section class="template-filter-grid forecast-category-filter">
+    <label><span>一级分类</span><select onchange="forecastSetCategoryFilter(1,this.value)">
+      <option value="">全部目标</option>
+      ${level1Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level1 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
+    </select></label>
+    <label><span>二级分类</span><select onchange="forecastSetCategoryFilter(2,this.value)" ${filter.level1 ? '' : 'disabled'}>
+      <option value="">全部二级</option>
+      ${level2Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level2 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
+    </select></label>
+    <label><span>三级分类</span><select onchange="forecastSetCategoryFilter(3,this.value)" ${filter.level1 && filter.level2 ? '' : 'disabled'}>
+      <option value="">全部三级</option>
+      ${level3Options.map(value => `<option value="${escHtmlApp(value)}" ${filter.level3 === value ? 'selected' : ''}>${escHtmlApp(value)}</option>`).join('')}
+    </select></label>
+    <span class="template-filter-count">显示 ${context.filteredResults.length}/${context.total}</span>
+    ${context.hasFilter ? '<button class="btn btn-ghost btn-sm" onclick="forecastClearCategoryFilter()">清除筛选</button>' : ''}
+  </section>`;
+}
+
+async function forecastToggleExcluded(id) {
+  const goal = getForecastGoals().find(item => item.id === id);
+  if (!goal) return;
+  goal.excludedFromForecast = !Boolean(goal.excludedFromForecast);
+  goal.updatedAt = new Date().toISOString();
+  await saveAllStorage();
+  renderForecast();
+}
+
 function forecastGoalFormHtml() {
   const goals = getForecastGoals();
   const editing = goals.find(goal => goal.id === state.forecastEditingId) || null;
@@ -8807,46 +12964,71 @@ function forecastGoalFormHtml() {
   const boundIds = new Set(goals.filter(goal => goal.id !== editing?.id).map(goal => goal.templateId));
   const editingTemplate = getTaskTemplates().find(template => template.id === editing?.templateId);
   const mode = forecastModeFromTemplate(editingTemplate);
-  return `<div class="card forecast-editor">
-    <div class="card-title">${editing ? '编辑预测目标' : '新建预测目标'}</div>
-    ${templates.length ? `<div class="form-grid forecast-goal-grid">
-      <div class="form-group">
-        <label>任务模板 *</label>
-        <select id="forecast_goal_template" onchange="forecastUpdateGoalFields(true)" ${editing ? 'disabled' : ''}>
-          <option value="">-- 选择模板 --</option>
-          ${templates.map(template => `<option value="${template.id}"
-            ${template.id === editing?.templateId ? 'selected' : ''}
-            ${boundIds.has(template.id) || !forecastModeFromTemplate(template) ? 'disabled' : ''}>${escHtmlApp(forecastTemplateLabel(template))}${boundIds.has(template.id) ? '（已绑定）' : !forecastModeFromTemplate(template) ? '（未开启单位）' : ''}</option>`).join('')}
-        </select>
+  const primaryLabel = (editingTemplate?.namedItemEnabled ?? editingTemplate?.ordinalEnabled)
+    ? `命名章节主目标${editingTemplate.quantityEnabled ? '（题数辅助估算）' : ''}`
+    : editingTemplate?.quantityEnabled
+      ? `数量主目标：${escHtmlApp(editingTemplate.quantityUnit)}`
+      : '请先在模板库开启单位';
+  const modeCopy = mode
+    ? forecastPrimaryTargetLabel({ ...editing, mode, quantityUnit: editingTemplate?.quantityUnit || '' })
+    : '选择模板后自动识别预测模式';
+
+  return `<section class="forecast-editor-panel">
+    <div class="forecast-panel-head">
+      <div>
+        <div class="forecast-eyebrow">Goal Builder</div>
+        <h3>${editing ? '编辑预测目标' : '新建预测目标'}</h3>
+        <p>${escHtmlApp(modeCopy)}</p>
       </div>
-      <div class="form-group">
-        <label>目标名称 *</label>
-        <input id="forecast_goal_name" value="${escHtmlApp(editing?.name || '')}" placeholder="例：完成数学800题">
-      </div>
-      <div class="form-group">
-        <label>预测主目标</label>
-        <input id="forecast_goal_primary_label" readonly value="${(editingTemplate?.namedItemEnabled ?? editingTemplate?.ordinalEnabled) ? `命名章节主目标${editingTemplate.quantityEnabled ? '（题数辅助估算）' : ''}` : editingTemplate?.quantityEnabled ? `数量主目标：${escHtmlApp(editingTemplate.quantityUnit)}` : '请先在模板库开启单位'}">
-        <div class="form-hint">命名章节开启时始终以章节清单为主目标。</div>
-      </div>
+      ${editing ? '<span class="forecast-editor-badge">正在编辑</span>' : '<span class="forecast-editor-badge muted">新目标</span>'}
     </div>
-    <div id="forecast_quantity_group" class="form-grid forecast-goal-grid">
-      <div class="form-group" id="forecast_total_field">
-        <label>总任务量 *</label>
-        <input type="number" id="forecast_goal_total" min="1" step="1" value="${editing?.totalQuantity ?? ''}">
+    ${templates.length ? `<div class="forecast-editor-body">
+      <div class="form-grid forecast-goal-grid">
+        <div class="form-group">
+          <label>任务模板 *</label>
+          <select id="forecast_goal_template" onchange="forecastUpdateGoalFields(true)" ${editing ? 'disabled' : ''}>
+            <option value="">-- 选择模板 --</option>
+            ${templates.map(template => `<option value="${template.id}"
+              ${template.id === editing?.templateId ? 'selected' : ''}
+              ${boundIds.has(template.id) || !forecastModeFromTemplate(template) ? 'disabled' : ''}>${escHtmlApp(forecastTemplateLabel(template))}${boundIds.has(template.id) ? '（已绑定）' : !forecastModeFromTemplate(template) ? '（未开启单位）' : ''}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>目标名称 *</label>
+          <input id="forecast_goal_name" value="${escHtmlApp(editing?.name || '')}" placeholder="例：完成数学800题">
+        </div>
+        <div class="form-group">
+          <label>预测主目标</label>
+          <input id="forecast_goal_primary_label" readonly value="${primaryLabel}">
+          <div class="form-hint">命名章节开启时始终以章节清单为主目标。</div>
+        </div>
       </div>
-      <div class="form-group">
-        <label>数量单位</label>
-        <input id="forecast_goal_unit" readonly value="${escHtmlApp(editingTemplate?.quantityUnit || '')}">
+      <div id="forecast_quantity_group" class="form-grid forecast-goal-grid">
+        <div class="form-group" id="forecast_total_field">
+          <label>总任务量 *</label>
+          <input type="number" id="forecast_goal_total" min="1" step="1" value="${editing?.totalQuantity ?? ''}">
+        </div>
+        <div class="form-group">
+          <label>数量单位</label>
+          <input id="forecast_goal_unit" readonly value="${escHtmlApp(editingTemplate?.quantityUnit || '')}">
+        </div>
       </div>
-    </div>
-    <div id="forecast_chapter_group">
-      ${forecastNamedItemsEditorHtml(editingTemplate?.namedItems || [], editingTemplate?.id || '')}
-    </div>
-    <div class="forecast-editor-actions">
-      <button class="btn btn-success" onclick="forecastSaveGoal()">💾 保存预测目标</button>
-      <button class="btn btn-ghost" onclick="forecastStartNew()">新建空白目标</button>
-    </div>` : '<div class="empty-state"><p>请先在模板库建立任务模板。</p></div>'}
-  </div>`;
+      <div id="forecast_chapter_group" class="forecast-editor-chapters">
+        ${forecastNamedItemsEditorHtml(editingTemplate?.namedItems || [], editingTemplate?.id || '')}
+      </div>
+      <label class="forecast-exclude-toggle">
+        <input type="checkbox" id="forecast_goal_excluded" ${editing?.excludedFromForecast ? 'checked' : ''}>
+        <span>
+          <b>暂不参与总预测</b>
+          <small>目标仍保留在列表中，只是不计入顶部预计完成日和剩余总时长。</small>
+        </span>
+      </label>
+      <div class="forecast-editor-actions">
+        <button class="btn btn-success" onclick="forecastSaveGoal()">💾 保存预测目标</button>
+        <button class="btn btn-ghost" onclick="forecastStartNew()">新建空白目标</button>
+      </div>
+    </div>` : '<div class="forecast-empty-panel"><p>请先在模板库建立任务模板。</p></div>'}
+  </section>`;
 }
 
 function forecastDisplayMetric(value) {
@@ -8854,71 +13036,367 @@ function forecastDisplayMetric(value) {
   return Number.isInteger(number) ? String(number) : number.toFixed(1);
 }
 
-function forecastNamedItemProgressHtml(result) {
+function forecastDailyOutputMeta(result, capacity) {
+  const dailyMinutes = Number(capacity?.averageMinutes) || 0;
+  const capacityValid = Boolean(capacity?.valid) && dailyMinutes > 0;
+  const base = {
+    effortLabel: capacityValid ? '等待预测数据' : '设置每日能力后可计算',
+    effortDetail: capacityValid ? `按每日 ${fmtMin(Math.round(dailyMinutes), true)} 全部投入` : '保存能力设置后自动计算',
+    primary: '',
+    secondary: '',
+    state: 'unavailable',
+  };
+  if (!capacityValid) {
+    return { ...base, primary: '先设置每日能力', secondary: '保存能力设置后自动计算' };
+  }
+  if (result.configurationInvalid) {
+    return { ...base, effortLabel: '重新配置后可计算', effortDetail: '当前模板或目标设置已变化', primary: '重新配置目标后可计算', secondary: '当前模板或目标设置已变化' };
+  }
+  if (!result.ready) {
+    return result.complete
+      ? { ...base, effortLabel: '已完成 · 数据不足', effortDetail: result.reason || '缺少有效历史记录', primary: '已完成 · 无法估算', secondary: '补足历史记录后可恢复完成时指标', state: 'complete' }
+      : { ...base, effortLabel: '补足记录后可计算', effortDetail: result.reason || '需要有效的完成量与用时数据', primary: '补足历史记录后可计算', secondary: '需要有效的完成量与用时数据' };
+  }
+
+  const requiredMinutes = result.complete
+    ? Math.max(0, Number(result.completedEffortMinutes) || 0)
+    : Math.max(0, Number(result.requiredMinutes) || 0);
+  const effortDays = requiredMinutes / dailyMinutes;
+  const effortLabel = result.complete
+    ? effortDays < .1
+      ? '不足 0.1 天 · 已完成'
+      : `约 ${effortDays.toFixed(1)} 天 · 已完成`
+    : requiredMinutes <= 0
+      ? '待确认章节完成状态'
+    : effortDays < .1
+      ? '不足 0.1 天'
+      : `约 ${effortDays.toFixed(1)} 天`;
+  const effortBase = {
+    ...base,
+    effortLabel,
+    effortDetail: result.complete
+      ? `完成整个目标折算用时 · 按每日 ${fmtMin(Math.round(dailyMinutes), true)} 全部投入`
+      : base.effortDetail,
+    state: result.complete ? 'complete' : 'ready',
+  };
+
+  const mode = result.goal.mode;
+  const unit = result.goal.quantityUnit || '数量';
+  if (mode === 'quantity') {
+    const dailyQuantity = dailyMinutes * (Number(result.speed) || 0);
+    return {
+      ...effortBase,
+      primary: `约 ${forecastDisplayMetric(dailyQuantity)} ${unit} / 天`,
+      secondary: '按当前数量效率估算',
+    };
+  }
+  if (mode === 'chapter') {
+    const dailyChapters = dailyMinutes * (Number(result.speed) || 0);
+    return {
+      ...effortBase,
+      primary: `约 ${forecastDisplayMetric(dailyChapters)} 章 / 天`,
+      secondary: '按已完成章节平均用时估算',
+    };
+  }
+
+  const dailyQuantity = dailyMinutes * (Number(result.speed) || 0);
+  const averageChapterMinutes = Number(result.averageMinutes) || 0;
+  const dailyChapters = averageChapterMinutes > 0 ? dailyMinutes / averageChapterMinutes : 0;
+  return {
+    ...effortBase,
+    primary: `约 ${forecastDisplayMetric(dailyQuantity)} ${unit} / 天`,
+    secondary: `约 ${forecastDisplayMetric(dailyChapters)} 章 / 天`,
+  };
+}
+
+function forecastOpenTask(dateStr, encodedTaskId) {
+  const taskId = decodeURIComponent(encodedTaskId || '');
+  if (!dateStr || !taskId) return;
+  monthEditTask(dateStr, taskId);
+}
+
+function forecastTaskNameHtml(record) {
+  if (!record.taskId) return `<span class="forecast-ledger-task disabled" title="该历史任务缺少ID，无法编辑">${escHtmlApp(record.taskName)}</span>`;
+  const encodedId = encodeURIComponent(record.taskId).replace(/'/g, '%27');
+  return `<button type="button" class="forecast-ledger-task" onclick="forecastOpenTask('${record.date}','${encodedId}')">${escHtmlApp(record.taskName)}</button>`;
+}
+
+function forecastTaskEditHtml(record) {
+  if (!record.taskId) return '<button type="button" class="btn btn-ghost btn-sm" disabled>不可编辑</button>';
+  const encodedId = encodeURIComponent(record.taskId).replace(/'/g, '%27');
+  return `<button type="button" class="btn btn-ghost btn-sm" onclick="forecastOpenTask('${record.date}','${encodedId}')">编辑</button>`;
+}
+
+function forecastQuantityHistoryHtml(result) {
+  if (result.goal.mode !== 'quantity') return '';
+  const records = Array.isArray(result.records) ? result.records : [];
+  return `<details class="forecast-history-panel">
+    <summary><span><b>题数完成明细</b><small>${records.length} 条有效任务 · 累计 ${forecastDisplayMetric(result.completed)} ${escHtmlApp(result.goal.quantityUnit)}</small></span><span>展开</span></summary>
+    ${records.length ? `<div class="forecast-ledger-wrap"><table class="forecast-ledger-table">
+      <thead><tr><th>日期</th><th>任务</th><th>任务用时</th><th>本次增加</th><th>累计题数</th><th>本次效率</th><th>操作</th></tr></thead>
+      <tbody>${records.map(record => `<tr><td class="fw-mono">${formatShort(record.date)}</td><td>${forecastTaskNameHtml(record)}</td><td class="fw-mono">${fmtMin(record.minutes, true)}</td><td class="fw-mono c-actual">+${forecastDisplayMetric(record.quantity)} ${escHtmlApp(result.goal.quantityUnit)}</td><td class="fw-mono">${forecastDisplayMetric(record.cumulativeQuantity)} ${escHtmlApp(result.goal.quantityUnit)}</td><td class="fw-mono">${record.efficiency.toFixed(3)} ${escHtmlApp(result.goal.quantityUnit)}/分钟</td><td>${forecastTaskEditHtml(record)}</td></tr>`).join('')}</tbody>
+    </table></div>` : '<div class="forecast-ledger-empty">当前还没有参与预测的题数任务。</div>'}
+  </details>`;
+}
+
+function forecastChapterTaskListHtml(item, result) {
+  const quantityEnabled = result.goal.mode === 'chapterQuantity';
+  const records = Array.isArray(item.records) ? [...item.records] : [];
+  let cumulativeMinutes = 0;
+  let cumulativeQuantity = 0;
+  const rows = records.map(record => {
+    if (record.validMinutes) cumulativeMinutes += Number(record.allocatedMinutes) || 0;
+    if (record.validQuantity) cumulativeQuantity += Number(record.allocatedQuantity) || 0;
+    const efficiency = record.validMinutes && record.validQuantity
+      ? Number(record.allocatedQuantity) / Number(record.allocatedMinutes)
+      : null;
+    return `<tr class="${record.reasons?.length ? 'forecast-ledger-invalid' : ''}">
+      <td class="fw-mono">${formatShort(record.date)}</td>
+      <td>${forecastTaskNameHtml(record)}</td>
+      <td class="fw-mono">${record.validMinutes ? fmtMin(record.allocatedMinutes, true) : '-'}</td>
+      <td class="fw-mono">${fmtMin(cumulativeMinutes, true)}</td>
+      ${quantityEnabled ? `<td class="fw-mono c-actual">${record.allocatedQuantity != null ? `+${forecastDisplayMetric(record.allocatedQuantity)} ${escHtmlApp(result.goal.quantityUnit)}` : '-'}</td><td class="fw-mono">${forecastDisplayMetric(cumulativeQuantity)} ${escHtmlApp(result.goal.quantityUnit)}</td><td class="fw-mono">${efficiency == null ? '-' : `${efficiency.toFixed(3)} ${escHtmlApp(result.goal.quantityUnit)}/分钟`}</td>` : ''}
+      <td>${record.completed ? '<span class="forecast-completion-badge">本次完成章节</span>' : '<span class="c-muted">贡献进度</span>'}${record.reasons?.length ? `<small class="forecast-ledger-reason">${escHtmlApp(record.reasons.join('；'))}</small>` : ''}</td>
+      <td>${forecastTaskEditHtml(record)}</td>
+    </tr>`;
+  }).join('');
+  const columnCount = quantityEnabled ? 9 : 6;
+  return `<div class="forecast-chapter-task-list"><div class="forecast-ledger-wrap"><table class="forecast-ledger-table chapter-ledger">
+    <thead><tr><th>日期</th><th>任务</th><th>本次分钟</th><th>累计分钟</th>${quantityEnabled ? '<th>本次题数</th><th>累计题数</th><th>章节效率</th>' : ''}<th>章节状态</th><th>操作</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="${columnCount}" class="forecast-ledger-empty">当前章节还没有关联任务。</td></tr>`}</tbody>
+  </table></div></div>`;
+}
+
+function forecastChapterProgressHtml(result) {
   if (!['chapter', 'chapterQuantity'].includes(result.goal.mode) || !Array.isArray(result.items)) return '';
   const quantityEnabled = result.goal.mode === 'chapterQuantity';
-  return `<details style="margin-top:10px">
-    <summary style="cursor:pointer;font-size:12px;color:var(--muted)">逐章进度（${result.items.length} 项）</summary>
-    <div style="display:grid;gap:6px;max-height:360px;overflow-y:auto;margin-top:8px;padding-right:3px">
+  return `<details class="forecast-chapter-progress">
+    <summary class="forecast-chapter-progress-head"><span><b>逐章进度</b><small>${result.items.filter(item => !item.archived).length} 个活动章节</small></span></summary>
+    <div class="forecast-chapter-list">
       ${result.items.map(item => {
-        const hasProgress = item.minutes > 0 || item.quantity > 0;
-        const stateLabel = item.completed ? '✓ 已完成' : hasProgress ? '进行中' : '未开始';
-        const stateColor = item.completed ? 'var(--success)' : hasProgress ? 'var(--wake)' : 'var(--muted)';
+        const records = Array.isArray(item.records) ? item.records : [];
+        const displayMinutes = item.archived ? records.reduce((sum, record) => sum + (record.validMinutes ? Number(record.allocatedMinutes) || 0 : 0), 0) : item.minutes;
+        const displayQuantity = item.archived ? records.reduce((sum, record) => sum + (record.validQuantity ? Number(record.allocatedQuantity) || 0 : 0), 0) : item.quantity;
+        const hasProgress = displayMinutes > 0 || displayQuantity > 0;
+        const stateLabel = item.archived ? '已归档' : item.completed ? '✓ 已完成' : hasProgress ? '进行中' : '未开始';
+        const stateClass = item.archived ? 'archived' : item.completed ? 'complete' : hasProgress ? 'active' : 'idle';
         let estimate = '';
-        if (!item.completed && result.ready) {
+        if (!item.archived && !item.completed && result.ready) {
           estimate = quantityEnabled
             ? `预计剩余 ${forecastDisplayMetric(item.estimatedRemainingQuantity)} ${escHtmlApp(result.goal.quantityUnit)} · ${fmtMin(Math.ceil(item.estimatedRemainingMinutes), true)}`
             : `预计剩余 ${fmtMin(Math.ceil(item.estimatedRemainingMinutes), true)}`;
         }
-        return `<div style="display:grid;grid-template-columns:minmax(160px,1fr) auto;gap:8px;padding:8px;border:1px solid var(--border);border-radius:7px">
-          <div>
-            <b style="font-size:12px">${escHtmlApp(item.name)}</b>
-            ${item.quantityExceededAverage ? '<div class="c-wake" style="font-size:10px;margin-top:3px">累计数量已达到平均值，但尚未勾选完成</div>' : ''}
-          </div>
-          <div style="text-align:right;font-size:11px">
-            <div style="color:${stateColor}">${stateLabel}</div>
-            <div class="c-muted">累计 ${forecastDisplayMetric(item.minutes)} 分钟${quantityEnabled ? ` · ${forecastDisplayMetric(item.quantity)} ${escHtmlApp(result.goal.quantityUnit)}` : ''}</div>
-            ${estimate ? `<div>${estimate}</div>` : ''}
-          </div>
-        </div>`;
+        return `<details class="forecast-chapter-item ${stateClass}">
+          <summary><div class="forecast-chapter-main"><b>${escHtmlApp(item.name)}</b>${item.quantityExceededAverage ? '<span class="forecast-chapter-warning">累计数量已达到平均值，但尚未勾选完成</span>' : ''}</div><div class="forecast-chapter-meta"><span class="forecast-chapter-state">${stateLabel}</span><span>累计 ${forecastDisplayMetric(displayMinutes)} 分钟${quantityEnabled ? ` · ${forecastDisplayMetric(displayQuantity)} ${escHtmlApp(result.goal.quantityUnit)}` : ''}</span><span>${records.length} 条任务</span>${estimate ? `<span class="forecast-chapter-estimate">${estimate}</span>` : ''}</div></summary>
+          ${forecastChapterTaskListHtml(item, result)}
+        </details>`;
       }).join('')}
     </div>
   </details>`;
 }
 
-function forecastGoalCardsHtml(results) {
-  if (!results.length) return '<div class="empty-state"><p>暂无预测目标。</p></div>';
-  return `<div class="forecast-goal-list">${results.map(result => {
-    const status = result.complete
-      ? '<span class="forecast-status complete">已完成</span>'
-      : result.ready
-        ? `<span class="forecast-status ready">预计还需 ${fmtMin(Math.ceil(result.requiredMinutes), true)}</span>`
-        : result.configurationInvalid
-          ? '<span class="forecast-status insufficient">需要重新配置</span>'
-          : '<span class="forecast-status insufficient">数据不足</span>';
-    return `<div class="card forecast-goal-card">
-      <div class="forecast-goal-head">
-        <div>
-          <b>${escHtmlApp(result.goal.name)}</b>
-          <span>${escHtmlApp(forecastPrimaryTargetLabel(result.goal))}</span>
-        </div>
-        <div class="forecast-goal-actions">
-          <button class="btn btn-ghost btn-sm" onclick="forecastEdit('${result.goal.id}')">编辑</button>
-          <button class="btn btn-danger btn-sm" onclick="forecastDelete('${result.goal.id}')">删除</button>
-        </div>
+function forecastExcludedRecordsHtml(result) {
+  const records = Array.isArray(result.excludedRecords) ? result.excludedRecords : [];
+  if (!records.length) return '';
+  return `<details class="forecast-excluded-records">
+    <summary><span><b>未计入记录</b><small>${records.length} 条 · 不影响主累计值</small></span><span>查看原因</span></summary>
+    <div class="forecast-ledger-wrap"><table class="forecast-ledger-table excluded-ledger"><thead><tr><th>日期</th><th>任务</th><th>章节</th><th>记录值</th><th>未计入原因</th><th>操作</th></tr></thead>
+      <tbody>${records.map(record => `<tr><td class="fw-mono">${formatShort(record.date)}</td><td>${forecastTaskNameHtml(record)}</td><td>${escHtmlApp(record.itemName || '-')}</td><td class="fw-mono">${record.allocatedQuantity != null ? `${forecastDisplayMetric(record.allocatedQuantity)} ${escHtmlApp(record.quantityUnit || result.goal.quantityUnit || '')}` : record.quantity != null ? `${forecastDisplayMetric(record.quantity)} ${escHtmlApp(record.quantityUnit || '')}` : '-'}${record.allocatedMinutes != null ? ` · ${fmtMin(record.allocatedMinutes, true)}` : record.minutes ? ` · ${fmtMin(record.minutes, true)}` : ''}</td><td><span class="forecast-ledger-reason">${escHtmlApp((record.reasons || ['记录不完整']).join('；'))}</span></td><td>${forecastTaskEditHtml(record)}</td></tr>`).join('')}</tbody>
+    </table></div>
+  </details>`;
+}
+
+function forecastGoalHistoryHtml(result) {
+  return `${forecastQuantityHistoryHtml(result)}${forecastChapterProgressHtml(result)}${forecastExcludedRecordsHtml(result)}`;
+}
+
+function forecastNamedItemProgressHtml(result) {
+  return forecastGoalHistoryHtml(result);
+}
+
+function forecastGoalStatusMeta(result) {
+  if (forecastGoalIsExcluded(result)) return { key: 'excluded', label: '已屏蔽', detail: '未参与总预测' };
+  if (result.complete) return { key: 'complete', label: '已完成', detail: '目标已完成' };
+  if (result.ready) return { key: 'ready', label: '', detail: `预计还需 ${fmtMin(Math.ceil(result.requiredMinutes), true)}` };
+  if (result.configurationInvalid) return { key: 'invalid', label: '需要重新配置', detail: '模板或目标设置已变化' };
+  return { key: 'insufficient', label: '数据不足', detail: '需要更多有效历史记录' };
+}
+
+function forecastGoalCardHtml(result, capacity) {
+  const status = forecastGoalStatusMeta(result);
+  const categoryPath = getTaskTemplates().find(template => template.id === result.goal.templateId)?.activityType || '未分类';
+  const progress = Math.max(0, Math.min(100, Number(result.progress) || 0));
+  const isExcluded = forecastGoalIsExcluded(result);
+  const dailyOutput = forecastDailyOutputMeta(result, capacity);
+  const remaining = result.complete
+    ? '0'
+    : result.ready
+      ? `预计还需 ${fmtMin(Math.ceil(result.requiredMinutes), true)}`
+      : result.reason || status.detail;
+  return `<article class="forecast-target-card ${status.key}">
+    <div class="forecast-goal-head">
+      <div>
+        ${status.label ? `<span class="forecast-status ${status.key}">${status.label}</span>` : ''}
+        <b>${escHtmlApp(result.goal.name)}</b>
+        <small>分类 · ${escHtmlApp(categoryPath)}</small>
+        <small>${escHtmlApp(forecastPrimaryTargetLabel(result.goal))}</small>
       </div>
-      <div class="forecast-progress"><span style="width:${Math.max(0, Math.min(100, result.progress)).toFixed(2)}%"></span></div>
-      <div class="forecast-goal-stats">
-        <span>${escHtmlApp(result.summary)}</span>
-        <span>当前效率：${escHtmlApp(result.efficiency)}</span>
-        ${result.excluded ? `<span class="c-wake">${result.excluded} 条记录未计入</span>` : ''}
+      <div class="forecast-goal-actions">
+        <button class="btn btn-ghost btn-sm" onclick="forecastToggleExcluded('${result.goal.id}')">${isExcluded ? '解除屏蔽' : '屏蔽'}</button>
+        <button class="btn btn-ghost btn-sm" onclick="forecastEdit('${result.goal.id}')">编辑</button>
+        <button class="btn btn-danger btn-sm" onclick="forecastDelete('${result.goal.id}')">删除</button>
       </div>
-      ${status}
-      ${result.warning ? `<div class="forecast-reason c-wake">${escHtmlApp(result.warning)}</div>` : ''}
-      ${result.reason ? `<div class="forecast-reason">${escHtmlApp(result.reason)}</div>` : ''}
-      ${forecastNamedItemProgressHtml(result)}
-    </div>`;
-  }).join('')}</div>`;
+    </div>
+    <div class="forecast-progress" aria-label="完成进度 ${progress.toFixed(0)}%">
+      <span style="width:${progress.toFixed(2)}%"></span>
+    </div>
+    <div class="forecast-daily-output ${dailyOutput.state}">
+      <div class="forecast-effort-days">
+        <span>全力完成时间</span>
+        <strong>${escHtmlApp(dailyOutput.effortLabel)}</strong>
+        <small>${escHtmlApp(dailyOutput.effortDetail)}</small>
+      </div>
+      <div class="forecast-daily-throughput">
+        <span>若全天投入此目标</span>
+        <strong>${escHtmlApp(dailyOutput.primary)}</strong>
+        <small>${escHtmlApp(dailyOutput.secondary)}</small>
+      </div>
+    </div>
+    <div class="forecast-goal-metrics">
+      <div><span>进度</span><strong>${progress.toFixed(0)}%</strong></div>
+      <div><span>剩余</span><strong>${escHtmlApp(remaining)}</strong></div>
+      <div><span>效率</span><strong>${escHtmlApp(result.efficiency)}</strong></div>
+    </div>
+    <div class="forecast-goal-stats">
+      <span>${escHtmlApp(result.summary)}</span>
+      ${result.excludedRecords?.length ? `<span class="c-wake">${result.excludedRecords.length} 条记录未计入</span>` : ''}
+    </div>
+    ${result.warning ? `<div class="forecast-reason c-wake">${escHtmlApp(result.warning)}</div>` : ''}
+    ${result.reason ? `<div class="forecast-reason">${escHtmlApp(result.reason)}</div>` : ''}
+    ${forecastNamedItemProgressHtml(result)}
+  </article>`;
+}
+
+function forecastGoalCardsHtml(results, capacity, filtered = false) {
+  if (!results.length) return `<div class="forecast-empty-panel"><p>${filtered ? '当前分类下暂无预测目标。' : '暂无预测目标。'}</p></div>`;
+  const activeCount = forecastActiveResults(results).length;
+  return `<section class="forecast-target-section">
+    <div class="forecast-section-head">
+      <div>
+        <div class="forecast-eyebrow">Targets</div>
+        <h3>预测目标</h3>
+      </div>
+      <span>${results.length} 个目标 · ${activeCount} 个参与总预测</span>
+    </div>
+    <div class="forecast-target-grid">${results.map(result => forecastGoalCardHtml(result, capacity)).join('')}</div>
+  </section>`;
+}
+
+function forecastKpiCardHtml(label, value, sub, tone = '') {
+  return `<div class="forecast-kpi-card ${tone}">
+    <span>${label}</span>
+    <strong>${value}</strong>
+    <small>${sub}</small>
+  </div>`;
+}
+
+function forecastDashboardKpisHtml(results, activeResults, overall, capacity) {
+  const completeCount = activeResults.filter(result => result.complete).length;
+  const excludedCount = results.length - activeResults.length;
+  const blockedCount = activeResults.filter(result => !result.complete && !result.ready).length;
+  const readyCount = activeResults.filter(result => !result.complete && result.ready).length;
+  return `<div class="forecast-kpi-grid">
+    ${forecastKpiCardHtml('目标总数', `${results.length} 个`, `${activeResults.length} 个参与总预测 · ${completeCount} 个已完成`, 'total')}
+    ${forecastKpiCardHtml('可预测目标', `${readyCount} 个`, blockedCount ? `${blockedCount} 个待补数据` : '无阻塞目标', blockedCount ? 'warn' : 'ready')}
+    ${forecastKpiCardHtml('已屏蔽目标', `${excludedCount} 个`, excludedCount ? '暂不参与顶部总预测' : '没有屏蔽目标', 'excluded')}
+    ${forecastKpiCardHtml('有效统计天数', capacity.source === 'range' ? `${capacity.eligibleDays} 天` : '-', capacity.source === 'range' ? '按完整日期范围计算' : '手动模式不使用范围', 'days')}
+  </div>`;
+}
+
+function forecastHeroHtml(overall, results, activeResults, filtered = false) {
+  const completeCount = activeResults.filter(result => result.complete).length;
+  const unfinishedCount = activeResults.length - completeCount;
+  const capacity = overall.capacity;
+  const dailyCapacity = capacity.valid && capacity.averageMinutes > 0
+    ? fmtMin(Math.round(capacity.averageMinutes), true)
+    : '-';
+  const remainingLabel = overall.totalMinutes == null
+    ? '需要补足目标数据'
+    : fmtMin(Math.ceil(overall.totalMinutes), true);
+  const summary = activeResults.length
+    ? (unfinishedCount ? `参与预测 ${activeResults.length} 个 · 未完成 ${unfinishedCount} 个 · 剩余约 ${remainingLabel}` : '参与预测的目标已经完成')
+    : (results.length ? '所有目标已屏蔽，顶部总预测暂不计算' : '尚未建立预测目标');
+  return `<section class="forecast-hero">
+    <div>
+      <div class="forecast-eyebrow">Forecast Dashboard</div>
+      <h2>完成预测</h2>
+      <p>把目标进度、历史效率和每日能力统一换算成预计完成时间。</p>
+    </div>
+    <div class="forecast-hero-result">
+      <span>${filtered ? '当前筛选预计完成日' : '全部目标预计完成日'}</span>
+      <strong>${escHtmlApp(overall.label)}</strong>
+      <small>${summary}</small>
+    </div>
+    <div class="forecast-hero-strip">
+      <div><span>每日能力</span><b>${dailyCapacity}</b></div>
+      <div><span>今日已用</span><b>${fmtMin(overall.todayUsed || 0, true)}</b></div>
+      <div><span>已完成目标</span><b>${completeCount}/${activeResults.length}</b></div>
+    </div>
+  </section>`;
+}
+
+function forecastCapacityPanelHtml(settings, capacity, overall) {
+  const capacityEndDate = settings.capacityTrackLatest ? getTodayStr() : settings.capacityEndDate;
+  return `<aside class="forecast-capacity-panel">
+    <div class="forecast-panel-head">
+      <div>
+        <div class="forecast-eyebrow">Capacity</div>
+        <h3>每日学习能力</h3>
+        <p>${capacity.source === 'manual' ? '使用手动每日时长' : '按历史实际专注计算日均'}</p>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>每日可用学习时长来源</label>
+      <select id="forecast_capacity_mode" onchange="forecastToggleCapacityMode()">
+        <option value="range" ${settings.capacityMode === 'range' ? 'selected' : ''}>按统计范围计算日均</option>
+        <option value="manual" ${settings.capacityMode === 'manual' ? 'selected' : ''}>手动设置每日时长</option>
+      </select>
+    </div>
+    <div id="forecast_capacity_range_panel" class="forecast-capacity-mode-panel" style="${settings.capacityMode === 'manual' ? 'display:none' : ''}">
+      <label class="forecast-track-toggle">
+        <input type="checkbox" id="forecast_capacity_track_latest"
+          ${settings.capacityTrackLatest ? 'checked' : ''}
+          onchange="forecastToggleCapacityTracking()">
+        跟踪今天（结束日期每天自动更新）
+      </label>
+      <div class="forecast-capacity-range">
+        ${editableDateInputHtml('forecast_capacity_start', settings.capacityStartDate)}
+        <span>至</span>
+        ${editableDateInputHtml('forecast_capacity_end', capacityEndDate)}
+        <button class="btn btn-primary btn-sm" onclick="forecastSaveCapacityRange()">计算并保存</button>
+      </div>
+      <div class="forecast-capacity-stats">
+        <span>统计范围 <b>${capacity.source === 'range' ? capacity.startDate || '-' : settings.capacityStartDate} 至 ${capacity.source === 'range' ? capacity.endDate || '-' : capacityEndDate}</b></span>
+        <span>有效天数 <b>${capacity.source === 'range' ? capacity.eligibleDays : '-'}</b></span>
+        <span>累计实际 <b>${capacity.source === 'range' ? fmtMin(Math.round(capacity.totalActualMinutes), true) : '-'}</b></span>
+        <span>日均实际 <b>${capacity.source === 'range' ? fmtMin(Math.round(capacity.averageMinutes), true) : '切换并保存后计算'}</b></span>
+      </div>
+      <div class="form-hint">${settings.capacityTrackLatest ? '正在持续跟踪：开始日期保持不变，结束日期会在每天打开本页时自动变为当天。' : '当前为固定范围；启用“跟踪今天”后结束日期将自动前移。'}</div>
+    </div>
+    <div id="forecast_capacity_manual_panel" class="forecast-capacity-mode-panel" style="${settings.capacityMode === 'manual' ? '' : 'display:none'}">
+      <div class="forecast-capacity-range manual">
+        <input type="number" id="forecast_manual_daily_minutes" min="1" max="1440" step="1"
+          value="${settings.manualDailyMinutes || ''}" placeholder="例如 480">
+        <span>分钟 / 天</span>
+        <button class="btn btn-primary btn-sm" onclick="forecastSaveCapacityRange()">保存并计算</button>
+      </div>
+      <div class="form-hint">当前手动每日时长：${settings.manualDailyMinutes > 0 ? fmtMin(settings.manualDailyMinutes, true) : '尚未设置'}。</div>
+    </div>
+    <div class="forecast-capacity-note">
+      <span>历史日均按所选日期范围完整计算。</span>
+      <span>今天已完成实际学习 ${fmtMin(overall.todayUsed || 0, true)}；预测会先扣除今天已经使用的时间。</span>
+    </div>
+  </aside>`;
 }
 
 function renderForecast() {
@@ -8927,67 +13405,23 @@ function renderForecast() {
   const templateManager = document.getElementById('template-named-items-manager');
   if (templateManager) templateManager.innerHTML = '';
   const settings = getForecastSettings();
-  const capacityEndDate = settings.capacityTrackLatest ? getTodayStr() : settings.capacityEndDate;
   const results = getForecastGoals().map(calculateForecastGoal);
-  const overall = calculateForecastOverall(results);
+  const categoryContext = forecastCategoryFilterContext(results);
+  const visibleResults = categoryContext.filteredResults;
+  const activeResults = forecastActiveResults(visibleResults);
+  const overall = calculateForecastOverall(activeResults);
   const capacity = overall.capacity;
-  host.innerHTML = `<div class="forecast-page">
-    <div class="forecast-heading">
-      <div>
-        <h2>📅 完成预测</h2>
-        <p>按模板隔离历史进度和效率，将全部目标换算为剩余时间。</p>
-      </div>
+  host.innerHTML = `<div class="forecast-page forecast-dashboard">
+    ${forecastHeroHtml(overall, visibleResults, activeResults, categoryContext.hasFilter)}
+    ${forecastDashboardKpisHtml(visibleResults, activeResults, overall, capacity)}
+    ${forecastCategoryFilterHtml(categoryContext)}
+    <div class="forecast-main-layout">
+      <main class="forecast-main-column">
+          ${forecastGoalCardsHtml(visibleResults, capacity, categoryContext.hasFilter)}
+        ${forecastGoalFormHtml()}
+      </main>
+      ${forecastCapacityPanelHtml(settings, capacity, overall)}
     </div>
-    <div class="forecast-overall-grid">
-      <div class="card forecast-overall-primary">
-        <div class="stat-label">全部目标预计完成日</div>
-        <div class="forecast-date">${escHtmlApp(overall.label)}</div>
-        <div class="stat-sub">${overall.totalMinutes == null ? '请先补足目标所需历史数据' : `剩余约 ${fmtMin(Math.ceil(overall.totalMinutes), true)}`}</div>
-      </div>
-      <div class="card">
-        <div class="form-group">
-          <label>每日可用学习时长来源</label>
-          <select id="forecast_capacity_mode" onchange="forecastToggleCapacityMode()" style="margin-bottom:10px">
-            <option value="range" ${settings.capacityMode === 'range' ? 'selected' : ''}>按统计范围计算日均</option>
-            <option value="manual" ${settings.capacityMode === 'manual' ? 'selected' : ''}>手动设置每日时长</option>
-          </select>
-          <div id="forecast_capacity_range_panel" style="${settings.capacityMode === 'manual' ? 'display:none' : ''}">
-            <label style="display:flex;align-items:center;gap:7px;margin:2px 0 9px;font-weight:400">
-              <input type="checkbox" id="forecast_capacity_track_latest"
-                ${settings.capacityTrackLatest ? 'checked' : ''}
-                onchange="forecastToggleCapacityTracking()">
-              跟踪今天（结束日期每天自动更新）
-            </label>
-            <div class="forecast-capacity-range">
-              ${editableDateInputHtml('forecast_capacity_start', settings.capacityStartDate)}
-              <span>至</span>
-              ${editableDateInputHtml('forecast_capacity_end', capacityEndDate)}
-              <button class="btn btn-primary btn-sm" onclick="forecastSaveCapacityRange()">计算并保存</button>
-            </div>
-            <div class="form-hint">
-              当前统计 ${capacity.source === 'range' ? capacity.startDate || '-' : settings.capacityStartDate} 至 ${capacity.source === 'range' ? capacity.endDate || '-' : capacityEndDate} ·
-              有效 ${capacity.source === 'range' ? capacity.eligibleDays : '-'} 天 · 排除不评分 ${capacity.source === 'range' ? capacity.excludedDays : '-'} 天 ·
-              累计实际 ${capacity.source === 'range' ? fmtMin(Math.round(capacity.totalActualMinutes), true) : '-'} ·
-              日均实际 ${capacity.source === 'range' ? fmtMin(Math.round(capacity.averageMinutes), true) : '切换并保存后计算'}
-            </div>
-            <div class="form-hint">${settings.capacityTrackLatest ? '正在持续跟踪：开始日期保持不变，结束日期会在每天打开本页时自动变为当天。' : '当前为固定范围；启用“跟踪今天”后结束日期将自动前移。'}</div>
-          </div>
-          <div id="forecast_capacity_manual_panel" style="${settings.capacityMode === 'manual' ? '' : 'display:none'}">
-            <div class="forecast-capacity-range">
-              <input type="number" id="forecast_manual_daily_minutes" min="1" max="1440" step="1"
-                value="${settings.manualDailyMinutes || ''}" placeholder="例如 480">
-              <span>分钟 / 天</span>
-              <button class="btn btn-primary btn-sm" onclick="forecastSaveCapacityRange()">保存并计算</button>
-            </div>
-            <div class="form-hint">当前手动每日时长：${settings.manualDailyMinutes > 0 ? fmtMin(settings.manualDailyMinutes, true) : '尚未设置'}。</div>
-          </div>
-          <div class="form-hint">标记为“不参与评分”的日期不会进入历史日均，也不会分配预测学习时长。</div>
-          <div class="form-hint">今天已完成实际学习 ${overall.todayUsed} 分钟；预测会先扣除今天已经使用的时间。</div>
-        </div>
-      </div>
-    </div>
-    ${forecastGoalFormHtml()}
-    ${forecastGoalCardsHtml(results)}
   </div>`;
   requestAnimationFrame(() => {
     forecastUpdateGoalFields();
@@ -9064,6 +13498,77 @@ function workbookTotals(sections) {
 
 function workbookPct(value) {
   return `${Number(value || 0).toFixed(2)}%`;
+}
+
+function workbookChartSeries(sections) {
+  let cumulativeTotal = 0;
+  let cumulativeWrong = 0;
+  const rows = (sections || []).map((section, index) => {
+    const metric = workbookMetric(section);
+    cumulativeTotal += metric.total;
+    cumulativeWrong += metric.wrong;
+    return {
+      label: String(section?.name || '').trim() || `分段 ${index + 1}`,
+      total: metric.total,
+      wrong: metric.wrong,
+      errorRate: metric.total > 0 ? Number(metric.errorRate.toFixed(2)) : null,
+      cumulativeTotal,
+      cumulativeWrong,
+      cumulativeErrorRate: cumulativeTotal > 0
+        ? Number((cumulativeWrong / cumulativeTotal * 100).toFixed(2))
+        : null,
+    };
+  });
+  return {
+    rows,
+    labels: rows.map(row => row.label),
+    totals: rows.map(row => row.total),
+    errorRates: rows.map(row => row.errorRate),
+    cumulativeTotals: rows.map(row => row.cumulativeTotal),
+    cumulativeErrorRates: rows.map(row => row.cumulativeErrorRate),
+  };
+}
+
+function workbookInsights(sections) {
+  const totals = workbookTotals(sections);
+  const rows = (sections || []).map((section, index) => ({
+    name: String(section?.name || '').trim() || `分段 ${index + 1}`,
+    ...workbookMetric(section),
+  })).filter(row => row.total > 0);
+  const highestErrorRate = [...rows].sort((a, b) => b.errorRate - a.errorRate || b.wrong - a.wrong)[0] || null;
+  const mostWrong = [...rows].sort((a, b) => b.wrong - a.wrong || b.errorRate - a.errorRate)[0] || null;
+  const largestSection = [...rows].sort((a, b) => b.total - a.total || b.wrong - a.wrong)[0] || null;
+  const aboveAverageCount = rows.filter(row => row.errorRate > totals.errorRate).length;
+  return { rows, totals, highestErrorRate, mostWrong, largestSection, aboveAverageCount };
+}
+
+function workbookLibrarySummary(reviews) {
+  const subjects = new Set();
+  let total = 0;
+  let wrong = 0;
+  (reviews || []).forEach(review => {
+    const subject = String(review?.subject || '').trim();
+    if (subject) subjects.add(subject);
+    const metrics = workbookTotals(review?.sections);
+    total += metrics.total;
+    wrong += metrics.wrong;
+  });
+  return { reviewCount: reviews.length, subjectCount: subjects.size, total, wrong };
+}
+
+function workbookFilteredReviews(reviews) {
+  const query = String(state.workbookReviewQuery || '').trim().toLocaleLowerCase();
+  const filtered = (reviews || []).filter(review => {
+    if (!query) return true;
+    return `${review.title || ''} ${review.subject || ''}`.toLocaleLowerCase().includes(query);
+  });
+  const sort = state.workbookReviewSort || 'updatedDesc';
+  return [...filtered].sort((a, b) => {
+    if (sort === 'completedDesc') return String(b.completedDate || '').localeCompare(String(a.completedDate || ''));
+    if (sort === 'totalDesc') return workbookTotals(b.sections).total - workbookTotals(a.sections).total;
+    if (sort === 'errorDesc') return workbookTotals(b.sections).errorRate - workbookTotals(a.sections).errorRate;
+    return String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || ''));
+  });
 }
 
 function workbookUniqueTitle(requestedTitle, editingId = null) {
@@ -9144,6 +13649,34 @@ function workbookRemoveSection(index) {
   renderWorkbookReview();
 }
 
+function workbookMoveSection(index, direction) {
+  ensureWorkbookDraft();
+  const targetIndex = index + Number(direction || 0);
+  const sections = state.workbookDraft.sections;
+  if (!sections[index] || targetIndex < 0 || targetIndex >= sections.length) return;
+  [sections[index], sections[targetIndex]] = [sections[targetIndex], sections[index]];
+  renderWorkbookReview();
+  document.getElementById(`workbook-section-name-${targetIndex}`)?.focus();
+}
+
+function workbookDuplicateSection(index) {
+  ensureWorkbookDraft();
+  const source = state.workbookDraft.sections[index];
+  if (!source) return;
+  const names = new Set(state.workbookDraft.sections.map(section => String(section?.name || '').trim()).filter(Boolean));
+  const originalName = String(source.name || '').trim();
+  let copyName = originalName ? `${originalName}（副本）` : '';
+  let copyNumber = 2;
+  while (copyName && names.has(copyName)) copyName = `${originalName}（副本${copyNumber++}）`;
+  state.workbookDraft.sections.splice(index + 1, 0, {
+    ...cloneWorkbookReview(source),
+    id: uid(),
+    name: copyName,
+  });
+  renderWorkbookReview();
+  document.getElementById(`workbook-section-name-${index + 1}`)?.focus();
+}
+
 function workbookStartNew() {
   state.workbookReviewId = null;
   state.workbookDraft = createWorkbookDraft();
@@ -9163,6 +13696,42 @@ function workbookResetDraft() {
   state.workbookDraft = review ? cloneWorkbookReview(review) : createWorkbookDraft();
   if (!review) state.workbookReviewId = null;
   renderWorkbookReview();
+}
+
+function workbookDuplicateReview(id) {
+  const review = getWorkbookReviews().find(item => item.id === id);
+  if (!review) return;
+  state.workbookReviewId = null;
+  state.workbookDraft = {
+    ...cloneWorkbookReview(review),
+    id: undefined,
+    title: workbookUniqueTitle(String(review.title || '未命名资料').trim()),
+    sections: (review.sections || []).map(section => ({ ...cloneWorkbookReview(section), id: uid() })),
+    createdAt: undefined,
+    updatedAt: undefined,
+  };
+  renderWorkbookReview();
+}
+
+function workbookSetQuery(value) {
+  state.workbookReviewQuery = String(value || '');
+  workbookRefreshLibrary();
+}
+
+function workbookSetSort(value) {
+  state.workbookReviewSort = ['updatedDesc', 'completedDesc', 'totalDesc', 'errorDesc'].includes(value)
+    ? value
+    : 'updatedDesc';
+  workbookRefreshLibrary();
+}
+
+function workbookRefreshLibrary() {
+  const reviews = getWorkbookReviews();
+  const filtered = workbookFilteredReviews(reviews);
+  const host = document.getElementById('workbook-library-results');
+  const count = document.getElementById('workbook-library-count');
+  if (host) host.innerHTML = workbookCardsHtml(filtered);
+  if (count) count.textContent = `显示 ${filtered.length}/${reviews.length}`;
 }
 
 function workbookValidateDraft(draft) {
@@ -9244,20 +13813,131 @@ async function workbookDelete(id) {
 
 function workbookCardsHtml(reviews) {
   if (!reviews.length) {
-    return '<div class="empty-state workbook-empty"><p>暂无整册复盘，点击右上角新建第一份。</p></div>';
+    return '<div class="workbook-library-empty"><b>没有匹配的整册复盘</b><span>可以调整搜索条件，或新建一份复盘。</span></div>';
   }
   return reviews.map(review => {
     const totals = workbookTotals(review.sections);
     const active = review.id === state.workbookReviewId;
-    return `<div class="workbook-card ${active ? 'active' : ''}">
+    return `<article class="workbook-card ${active ? 'active' : ''}">
       <button class="workbook-card-main" onclick="workbookOpenReview('${review.id}')">
-        <b>${escHtmlApp(review.title || '未命名资料')}</b>
+        <span class="workbook-card-heading"><b>${escHtmlApp(review.title || '未命名资料')}</b><i>${workbookPct(totals.errorRate)}</i></span>
         <span>${escHtmlApp(review.subject || '未填写学科')} · ${escHtmlApp(review.completedDate || '-')}</span>
-        <span>${totals.total} 题 · 错 ${totals.wrong} 题 · 错误率 ${workbookPct(totals.errorRate)}</span>
+        <span>${(review.sections || []).length} 个分段 · ${totals.total} 题 · 错 ${totals.wrong} 题</span>
       </button>
-      <button class="btn btn-danger btn-sm" onclick="workbookDelete('${review.id}')">删除</button>
-    </div>`;
+      <details class="workbook-card-menu">
+        <summary title="更多操作">更多</summary>
+        <div>
+          <button type="button" onclick="workbookDuplicateReview('${review.id}')">复制为新复盘</button>
+          <button type="button" class="danger" onclick="workbookDelete('${review.id}')">删除复盘</button>
+        </div>
+      </details>
+    </article>`;
   }).join('');
+}
+
+function workbookHeroHtml(reviews) {
+  const summary = workbookLibrarySummary(reviews);
+  return `<section class="workbook-hero">
+    <div>
+      <div class="workbook-eyebrow">WORKBOOK REVIEW</div>
+      <h2>整册复盘</h2>
+      <p>把整本练习册、教材或题库拆成可比较的分段，集中查看题量、错误率和累计变化。</p>
+    </div>
+    <div class="workbook-hero-actions">
+      <div class="workbook-hero-stats">
+        <div><span>已保存整册</span><strong>${summary.reviewCount}</strong></div>
+        <div><span>涉及学科</span><strong>${summary.subjectCount}</strong></div>
+        <div><span>累计题量</span><strong>${summary.total}</strong></div>
+        <div><span>累计错题</span><strong>${summary.wrong}</strong></div>
+      </div>
+      <button class="btn btn-primary" onclick="workbookStartNew()">＋ 新建复盘</button>
+    </div>
+  </section>`;
+}
+
+function workbookLibraryHtml(reviews) {
+  const filtered = workbookFilteredReviews(reviews);
+  return `<aside class="workbook-library">
+    <div class="workbook-panel-head">
+      <div><div class="workbook-eyebrow">LIBRARY</div><h3>复盘资料库</h3></div>
+      <span id="workbook-library-count">显示 ${filtered.length}/${reviews.length}</span>
+    </div>
+    <div class="workbook-library-tools">
+      <label><span>搜索标题或学科</span><input type="search" value="${escHtmlApp(state.workbookReviewQuery || '')}" placeholder="输入关键词" oninput="workbookSetQuery(this.value)"></label>
+      <label><span>排序</span><select onchange="workbookSetSort(this.value)">
+        <option value="updatedDesc" ${state.workbookReviewSort === 'updatedDesc' ? 'selected' : ''}>最近更新</option>
+        <option value="completedDesc" ${state.workbookReviewSort === 'completedDesc' ? 'selected' : ''}>完成日期</option>
+        <option value="totalDesc" ${state.workbookReviewSort === 'totalDesc' ? 'selected' : ''}>总题数</option>
+        <option value="errorDesc" ${state.workbookReviewSort === 'errorDesc' ? 'selected' : ''}>错误率</option>
+      </select></label>
+    </div>
+    <div class="workbook-list" id="workbook-library-results">${workbookCardsHtml(filtered)}</div>
+  </aside>`;
+}
+
+function workbookSummaryHtml(totals, sectionCount) {
+  return `<section class="workbook-summary-panel">
+    <div class="workbook-panel-head"><div><div class="workbook-eyebrow">OVERVIEW</div><h3>整册概览</h3></div></div>
+    <div class="workbook-primary-kpis">
+      <div><span>总题数</span><strong id="workbook-total">${totals.total}</strong><small>全部分段题量</small></div>
+      <div><span>错题数</span><strong class="c-red" id="workbook-wrong">${totals.wrong}</strong><small>累计错误题目</small></div>
+      <div><span>整体错误率</span><strong class="c-red" id="workbook-error-rate">${workbookPct(totals.errorRate)}</strong><small>错题数 ÷ 总题数</small></div>
+    </div>
+    <div class="workbook-secondary-kpis">
+      <div><span>正确数</span><strong class="c-green" id="workbook-correct">${totals.correct}</strong></div>
+      <div><span>正确率</span><strong class="c-green" id="workbook-accuracy">${workbookPct(totals.accuracy)}</strong></div>
+      <div><span>分段数量</span><strong id="workbook-section-count">${sectionCount}</strong></div>
+    </div>
+  </section>`;
+}
+
+function workbookInsightsHtml(sections) {
+  const insight = workbookInsights(sections);
+  if (!insight.rows.length) {
+    return '<div class="workbook-insight-empty">录入有效题数后，这里会自动识别薄弱分段。</div>';
+  }
+  return `<div class="workbook-insight-grid">
+    <div><span>错误率最高</span><b>${escHtmlApp(insight.highestErrorRate.name)}</b><strong class="c-red">${workbookPct(insight.highestErrorRate.errorRate)}</strong></div>
+    <div><span>错题数量最多</span><b>${escHtmlApp(insight.mostWrong.name)}</b><strong class="c-red">${insight.mostWrong.wrong} 题</strong></div>
+    <div><span>题量最大</span><b>${escHtmlApp(insight.largestSection.name)}</b><strong>${insight.largestSection.total} 题</strong></div>
+    <div><span>高于整册平均</span><b>${insight.aboveAverageCount} / ${insight.rows.length} 个分段</b><strong>${workbookPct(insight.totals.errorRate)}</strong></div>
+  </div>`;
+}
+
+function workbookChartsHtml(sections) {
+  const series = workbookChartSeries(sections);
+  if (!series.rows.some(row => row.total > 0)) {
+    return '<div class="workbook-chart-empty"><b>暂无可分析数据</b><span>填写分段总题数和错误数后，四张图表会实时生成。</span></div>';
+  }
+  const views = [
+    ['questions', '分段总题数', '各分段题量'],
+    ['errorRate', '分段错误率', '对照整册平均'],
+    ['cumulativeQuestions', '累计总题数', '逐段累加题量'],
+    ['cumulativeErrorRate', '累计错误率', '累计加权结果'],
+  ];
+  const active = views.some(([key]) => key === state.workbookChartView)
+    ? state.workbookChartView
+    : 'questions';
+  state.workbookChartView = active;
+  const activeMeta = views.find(([key]) => key === active);
+  return `<div class="workbook-chart-switcher" role="tablist" aria-label="整册复盘图表">
+      ${views.map(([key, title, note]) => `<button type="button" role="tab" aria-selected="${key === active}" class="${key === active ? 'active' : ''}" onclick="switchWorkbookChartView('${key}')">
+        <b>${title}</b><span>${note}</span>
+      </button>`).join('')}
+    </div>
+    <article class="workbook-chart-stage">
+      <div class="workbook-chart-stage-head">
+        <div><span>ACTIVE ANALYSIS</span><h4>${activeMeta[1]}</h4></div>
+        <p>${activeMeta[2]}，按当前表格顺序实时计算</p>
+      </div>
+      <div class="workbook-chart-canvas"><canvas id="workbookActiveChart"></canvas></div>
+    </article>`;
+}
+
+function switchWorkbookChartView(view) {
+  if (!['questions', 'errorRate', 'cumulativeQuestions', 'cumulativeErrorRate'].includes(view)) return;
+  state.workbookChartView = view;
+  renderWorkbookCharts();
 }
 
 function workbookSectionsHtml(sections) {
@@ -9272,7 +13952,12 @@ function workbookSectionsHtml(sections) {
       <td class="fw-mono" id="workbook-accuracy-${index}">${workbookPct(metric.accuracy)}</td>
       <td class="fw-mono" id="workbook-error-rate-${index}">${workbookPct(metric.errorRate)}</td>
       <td><input value="${escHtmlApp(section.note || '')}" placeholder="可选" oninput="workbookSetSection(${index},'note',this.value)"></td>
-      <td><button class="btn btn-danger btn-sm" onclick="workbookRemoveSection(${index})">删除</button></td>
+      <td><div class="workbook-row-actions">
+        <button type="button" title="上移" onclick="workbookMoveSection(${index},-1)" ${index === 0 ? 'disabled' : ''}>↑</button>
+        <button type="button" title="下移" onclick="workbookMoveSection(${index},1)" ${index === sections.length - 1 ? 'disabled' : ''}>↓</button>
+        <button type="button" title="复制分段" onclick="workbookDuplicateSection(${index})">复制</button>
+        <button type="button" class="danger" title="删除分段" onclick="workbookRemoveSection(${index})">删除</button>
+      </div></td>
     </tr>`;
   }).join('');
 }
@@ -9287,19 +13972,16 @@ function renderWorkbookReview() {
   if (!host) return;
 
   host.innerHTML = `
-    <div class="workbook-page">
-      <div class="workbook-heading">
-        <div>
-          <h2>📚 整册复盘</h2>
-          <p>整本练习册、教材或题库完成后，按章节、单元、试卷或页段汇总题量和错题情况。</p>
-        </div>
-        <button class="btn btn-primary" onclick="workbookStartNew()">＋ 新建复盘</button>
-      </div>
-
-      <div class="workbook-list">${workbookCardsHtml(reviews)}</div>
-
-      <div class="card workbook-editor">
-        <div class="card-title">${state.workbookReviewId ? '编辑整册复盘' : '新建整册复盘'}</div>
+    <div class="workbook-dashboard">
+      ${workbookHeroHtml(reviews)}
+      <div class="workbook-layout">
+        ${workbookLibraryHtml(reviews)}
+        <main class="workbook-workspace">
+          <section class="workbook-info-panel">
+            <div class="workbook-panel-head">
+              <div><div class="workbook-eyebrow">CURRENT REVIEW</div><h3>${state.workbookReviewId ? '编辑整册复盘' : '新建整册复盘'}</h3></div>
+              <span class="workbook-draft-status ${state.workbookReviewId ? 'saved' : ''}">${state.workbookReviewId ? '已保存记录' : '尚未保存'}</span>
+            </div>
         <div class="form-grid workbook-meta-grid">
           <div class="form-group">
             <label>资料标题 *</label>
@@ -9315,46 +13997,60 @@ function renderWorkbookReview() {
           </div>
           <div class="form-group">
             <label>整册备注</label>
-            <input value="${escHtmlApp(draft.note || '')}" placeholder="可选" oninput="workbookSetMeta('note',this.value)">
+            <textarea rows="2" maxlength="500" placeholder="记录资料版本、复盘结论或后续安排" oninput="workbookSetMeta('note',this.value)">${escHtmlApp(draft.note || '')}</textarea>
           </div>
         </div>
+          </section>
 
-        <div class="workbook-summary-grid">
-          <div class="mini-card"><div class="lbl">总题数</div><div class="val" id="workbook-total">${totals.total}</div></div>
-          <div class="mini-card"><div class="lbl">正确数</div><div class="val c-green" id="workbook-correct">${totals.correct}</div></div>
-          <div class="mini-card"><div class="lbl">错题数</div><div class="val c-red" id="workbook-wrong">${totals.wrong}</div></div>
-          <div class="mini-card"><div class="lbl">正确率</div><div class="val c-green" id="workbook-accuracy">${workbookPct(totals.accuracy)}</div></div>
-          <div class="mini-card"><div class="lbl">错误率</div><div class="val c-red" id="workbook-error-rate">${workbookPct(totals.errorRate)}</div></div>
-        </div>
+          ${workbookSummaryHtml(totals, draft.sections.length)}
 
-        <div class="table-wrap workbook-table-wrap">
-          <table class="workbook-table">
-            <thead><tr><th>#</th><th>分段名称 *</th><th>总题数 *</th><th>错误数 *</th><th>正确数</th><th>正确率</th><th>错误率</th><th>备注</th><th>操作</th></tr></thead>
-            <tbody>${workbookSectionsHtml(draft.sections)}</tbody>
-          </table>
-        </div>
-        <div class="workbook-editor-actions">
-          <button class="btn btn-primary btn-sm" onclick="workbookAddSection()" title="新增空白分段">＋ 新增空白分段</button>
-          <button type="button" id="workbook-section-predict" class="btn btn-ghost btn-sm"
-            onclick="workbookAddPredictedSection()" ${sectionPrediction.predictedName ? '' : 'disabled'}>
-            ${sectionPrediction.predictedName ? `⚡＋ ${escHtmlApp(sectionPrediction.predictedName)}` : '⚡＋预测下一项'}
-          </button>
-          <span id="workbook-section-predict-hint" class="form-hint" style="margin:0">
-            ${sectionPrediction.predictedName ? '' : (sectionPrediction.lastName ? '当前名称无法推测下一项' : '请先填写一个分段名称')}
-          </span>
-          <button class="btn btn-success" onclick="workbookSave()">💾 保存整册复盘</button>
-          <button class="btn btn-ghost" onclick="workbookResetDraft()">撤销未保存修改</button>
-          <span id="workbook-save-message"></span>
-        </div>
-      </div>
+          <section class="workbook-insight-panel">
+            <div class="workbook-panel-head">
+              <div><div class="workbook-eyebrow">WEAKNESS SIGNALS</div><h3>薄弱分段洞察</h3></div>
+              <span>根据当前录入实时计算</span>
+            </div>
+            <div id="workbook-insights">${workbookInsightsHtml(draft.sections)}</div>
+          </section>
 
-      <div class="card workbook-chart-card">
-        <div class="card-title">章节题量与错误率</div>
-        <canvas id="workbookReviewChart" height="110"></canvas>
+          <section class="workbook-section-editor">
+            <div class="workbook-section-toolbar">
+              <div><div class="workbook-eyebrow">SECTION EDITOR</div><h3>分段明细</h3><p>当前共 <b id="workbook-section-toolbar-count">${draft.sections.length}</b> 个分段，累计图按此顺序计算。</p></div>
+              <div class="workbook-section-tools">
+                <button class="btn btn-primary btn-sm" onclick="workbookAddSection()" title="新增空白分段">＋ 新增空白分段</button>
+                <button type="button" id="workbook-section-predict" class="btn btn-ghost btn-sm"
+                  onclick="workbookAddPredictedSection()" ${sectionPrediction.predictedName ? '' : 'disabled'}>
+                  ${sectionPrediction.predictedName ? `⚡＋ ${escHtmlApp(sectionPrediction.predictedName)}` : '⚡＋预测下一项'}
+                </button>
+                <span id="workbook-section-predict-hint" class="form-hint">
+                  ${sectionPrediction.predictedName ? '' : (sectionPrediction.lastName ? '当前名称无法推测下一项' : '请先填写一个分段名称')}
+                </span>
+              </div>
+            </div>
+            <div class="table-wrap workbook-table-wrap">
+              <table class="workbook-table">
+                <thead><tr><th>#</th><th>分段名称 *</th><th>总题数 *</th><th>错误数 *</th><th>正确数</th><th>正确率</th><th>错误率</th><th>备注</th><th>操作</th></tr></thead>
+                <tbody>${workbookSectionsHtml(draft.sections)}</tbody>
+              </table>
+            </div>
+            <div class="workbook-editor-actions">
+              <button class="btn btn-success" onclick="workbookSave()">💾 保存整册复盘</button>
+              <button class="btn btn-ghost" onclick="workbookResetDraft()">撤销未保存修改</button>
+              <span id="workbook-save-message"></span>
+            </div>
+          </section>
+
+          <section class="workbook-analysis-panel">
+            <div class="workbook-panel-head">
+              <div><div class="workbook-eyebrow">FOUR-CHART ANALYSIS</div><h3>题量与错误趋势</h3></div>
+              <span>累计指标按当前分段顺序计算</span>
+            </div>
+            <div id="workbook-charts"></div>
+          </section>
+        </main>
       </div>
     </div>`;
 
-  requestAnimationFrame(renderWorkbookChart);
+  scheduleWorkbookCharts();
 }
 
 function updateWorkbookCalculations() {
@@ -9380,72 +14076,169 @@ function updateWorkbookCalculations() {
     const element = document.getElementById(id);
     if (element) element.textContent = value;
   });
-  renderWorkbookChart();
+  const insightsHost = document.getElementById('workbook-insights');
+  if (insightsHost) insightsHost.innerHTML = workbookInsightsHtml(state.workbookDraft.sections);
+  scheduleWorkbookCharts();
 }
 
-function renderWorkbookChart() {
-  if (!document.getElementById('workbookReviewChart') || !state.workbookDraft) return;
-  const sections = state.workbookDraft.sections || [];
-  mkChart('workbookReviewChart', {
-    type: 'bar',
-    data: {
-      labels: sections.map((section, index) => String(section.name || '').trim() || `分段 ${index + 1}`),
-      datasets: [
-        {
-          label: '总题数',
-          data: sections.map(section => workbookMetric(section).total),
-          backgroundColor: 'rgba(79,195,247,.45)',
-          borderColor: '#4fc3f7',
-          borderWidth: 1,
-          yAxisID: 'y',
-        },
-        {
-          type: 'line',
-          label: '错误率',
-          data: sections.map(section => Number(workbookMetric(section).errorRate.toFixed(2))),
-          borderColor: '#ef9a9a',
-          backgroundColor: '#ef9a9a',
-          pointRadius: 4,
-          borderWidth: 2,
-          tension: .25,
-          yAxisID: 'y1',
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        tooltip: {
-          callbacks: {
-            label(context) {
-              return context.dataset.yAxisID === 'y1'
-                ? `${context.dataset.label}: ${Number(context.parsed.y).toFixed(2)}%`
-                : `${context.dataset.label}: ${context.parsed.y} 题`;
-            },
-          },
-        },
-      },
-      scales: {
-        x: { ticks: { color: '#6b7a9e' }, grid: gridCfg },
-        y: {
-          beginAtZero: true,
-          position: 'left',
-          title: { display: true, text: '题数' },
-          ticks: { precision: 0 },
-          grid: gridCfg,
-        },
-        y1: {
-          beginAtZero: true,
-          min: 0,
-          max: 100,
-          position: 'right',
-          title: { display: true, text: '错误率 (%)' },
-          grid: { drawOnChartArea: false },
-        },
-      },
-    },
+let workbookChartFrame = null;
+function scheduleWorkbookCharts() {
+  if (workbookChartFrame != null) cancelAnimationFrame(workbookChartFrame);
+  workbookChartFrame = requestAnimationFrame(() => {
+    workbookChartFrame = null;
+    renderWorkbookCharts();
   });
+}
+
+function renderWorkbookCharts() {
+  const host = document.getElementById('workbook-charts');
+  if (!host || !state.workbookDraft || state.tab !== 'workbookReview') return;
+  const chartIds = [
+    'workbookActiveChart',
+    'workbookQuestionsChart',
+    'workbookErrorRateChart',
+    'workbookCumulativeQuestionsChart',
+    'workbookCumulativeErrorRateChart',
+  ];
+  chartIds.forEach(destroyChart);
+  const sections = state.workbookDraft.sections || [];
+  host.innerHTML = workbookChartsHtml(sections);
+  const series = workbookChartSeries(sections);
+  if (!series.rows.some(row => row.total > 0)) return;
+  const totals = workbookTotals(sections);
+  const questionTooltip = context => `${context.dataset.label}: ${Number(context.parsed.y || 0)} 题`;
+  const percentTooltip = context => {
+    const value = context.parsed.y;
+    return `${context.dataset.label}: ${value == null ? '-' : `${Number(value).toFixed(2)}%`}`;
+  };
+  const xScale = {
+    ticks: { color: '#6b7a9e', autoSkip: true, autoSkipPadding: 18, maxRotation: 35, minRotation: 0 },
+    grid: gridCfg,
+  };
+  const questionScale = {
+    beginAtZero: true,
+    ticks: { precision: 0, color: '#6b7a9e' },
+    title: { display: true, text: '题数', color: '#7f8fb3' },
+    grid: gridCfg,
+  };
+  const percentScale = {
+    beginAtZero: true,
+    min: 0,
+    max: 100,
+    ticks: { color: '#6b7a9e', callback: value => `${value}%` },
+    title: { display: true, text: '错误率 (%)', color: '#7f8fb3' },
+    grid: gridCfg,
+  };
+  const chartOptions = (yScale, tooltipLabel, showLegend = false) => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: showLegend
+        ? { labels: { color: '#6b7a9e', boxWidth: 10, padding: 12 } }
+        : { display: false },
+      tooltip: { callbacks: { label: tooltipLabel } },
+    },
+    scales: { x: xScale, y: yScale },
+  });
+
+  const view = state.workbookChartView || 'questions';
+  let config;
+  if (view === 'errorRate') {
+    const errorRateColor = getChartSeriesColor('workbookErrorRate');
+    const averageErrorRateColor = getChartSeriesColor('workbookAverageErrorRate');
+    config = {
+      type: 'line',
+      data: {
+        labels: series.labels,
+        datasets: [
+          {
+            label: '分段错误率',
+            data: series.errorRates,
+            borderColor: errorRateColor,
+            backgroundColor: hexRgba(errorRateColor, .12),
+            pointBackgroundColor: errorRateColor,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            borderWidth: 2.2,
+            tension: .18,
+            spanGaps: false,
+          },
+          {
+            label: `整册平均 ${workbookPct(totals.errorRate)}`,
+            data: series.labels.map(() => Number(totals.errorRate.toFixed(2))),
+            borderColor: hexRgba(averageErrorRateColor, .8),
+            pointRadius: 0,
+            borderWidth: 1.5,
+            borderDash: [6, 5],
+            tension: 0,
+          },
+        ],
+      },
+      options: chartOptions(percentScale, percentTooltip, true),
+    };
+  } else if (view === 'cumulativeQuestions') {
+    const cumulativeQuestionsColor = getChartSeriesColor('workbookCumulativeQuestions');
+    config = {
+      type: 'line',
+      data: {
+        labels: series.labels,
+        datasets: [{
+          label: '累计总题数',
+          data: series.cumulativeTotals,
+          borderColor: cumulativeQuestionsColor,
+          backgroundColor: hexRgba(cumulativeQuestionsColor, .12),
+          pointBackgroundColor: cumulativeQuestionsColor,
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          borderWidth: 2.2,
+          tension: .18,
+          fill: true,
+        }],
+      },
+      options: chartOptions(questionScale, questionTooltip),
+    };
+  } else if (view === 'cumulativeErrorRate') {
+    const cumulativeErrorRateColor = getChartSeriesColor('workbookCumulativeErrorRate');
+    config = {
+      type: 'line',
+      data: {
+        labels: series.labels,
+        datasets: [{
+          label: '累计错误率',
+          data: series.cumulativeErrorRates,
+          borderColor: cumulativeErrorRateColor,
+          backgroundColor: hexRgba(cumulativeErrorRateColor, .1),
+          pointBackgroundColor: cumulativeErrorRateColor,
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          borderWidth: 2.2,
+          tension: .18,
+          fill: true,
+          spanGaps: false,
+        }],
+      },
+      options: chartOptions(percentScale, percentTooltip),
+    };
+  } else {
+    const questionsColor = getChartSeriesColor('workbookQuestions');
+    config = {
+      type: 'bar',
+      data: {
+        labels: series.labels,
+        datasets: [{
+          label: '分段总题数',
+          data: series.totals,
+          backgroundColor: hexRgba(questionsColor, .36),
+          borderColor: questionsColor,
+          borderWidth: 1.5,
+          borderRadius: 4,
+        }],
+      },
+      options: chartOptions(questionScale, questionTooltip),
+    };
+  }
+  mkChart('workbookActiveChart', config);
 }
 
 // ============================================================
@@ -9456,15 +14249,20 @@ async function init() {
   applyThemeColors(SETTINGS);
   await loadStorage();
   migrateOldTypes();
+  migrateSessionTemplateTypes();
+  migrateVisualColors();
   migrateForecastUnitModel();
   migrateTaskTemplateIds();
+  migrateTaskTemplateAccuracySettings();
+  migrateDayTypeModel();
   await saveAllStorage();
   await loadServerSnapshot();
 
   const sd = strToDate(state.selectedDate);
   state.cal = { year: sd.getFullYear(), month: sd.getMonth() };
-  state.monthView = { year: sd.getFullYear(), month: sd.getMonth() };
 
+  setupPrimaryNavigation();
+  startSortableTableObserver();
   showTab(state.tab || 'entry');
   startDraftAutoSave();
 }
