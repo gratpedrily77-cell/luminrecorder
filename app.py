@@ -20,6 +20,7 @@ else:
     import fcntl
 
 from analysis_formula import calculate_range, normalize_config, validate_range
+from chapter_limits import ChapterLimitError, validate_chapter_limits
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DATA_FOLDER_NAME = "学习追踪器数据"
@@ -174,6 +175,11 @@ ONEDRIVE_ROOTS = find_onedrive_roots()
 
 app = Flask(__name__, static_folder=PROJECT_DIR, static_url_path="")
 
+
+@app.errorhandler(ChapterLimitError)
+def handle_chapter_limit_error(error):
+    return jsonify({"error": str(error), "code": "chapter_limit"}), 400
+
 # ── 先定位 OneDrive，再定位其中的数据目录 ──────────────────────
 DATA_DIR = resolve_data_dir(ONEDRIVE_ROOTS)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -286,6 +292,7 @@ def load_data() -> dict:
 
 def save_data(data: dict) -> None:
     with data_file_lock():
+        validate_chapter_limits(data, load_data())
         atomic_write_json(DATA_FILE, data)
 
 

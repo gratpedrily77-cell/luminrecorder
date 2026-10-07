@@ -520,7 +520,12 @@ async function apiFetch(path, options = {}) {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
-  if (!res.ok) throw new Error(`API ${path} → ${res.status}`);
+  if (!res.ok) {
+    const payload = res.headers.get('Content-Type')?.includes('application/json') ? await res.json() : {};
+    const error = new Error(payload.error || `API ${path} → ${res.status}`);
+    error.code = payload.code;
+    throw error;
+  }
   return res.json();
 }
 
@@ -551,7 +556,10 @@ async function loadStorage() {
 
 async function saveAllStorage() {
   cacheToLocal();
-  try { await apiFetch('/api/data', { method: 'POST', body: JSON.stringify(state.data) }); } catch (e) { console.error('API保存失败，已缓存到本地', e); }
+  try { await apiFetch('/api/data', { method: 'POST', body: JSON.stringify(state.data) }); } catch (e) {
+    if (e.code === 'chapter_limit') { alert(e.message); throw e; }
+    console.error('API保存失败，已缓存到本地', e);
+  }
 }
 
 // ── 表单草稿缓存 ─────────────────────────────────────────────
@@ -2510,6 +2518,8 @@ async function deleteTaskTemplate(id) {
 }
 
 async function saveTaskTemplate(tmpl) {
+  const error = chapterQuestionCountError(tmpl);
+  if (error) { alert(error); return false; }
   const list = getTaskTemplates();
   const idx = list.findIndex(t => t.id === tmpl.id);
   const previous = idx >= 0 ? list[idx] : null;
@@ -4281,13 +4291,19 @@ async function tmplTransferNamedItems(sourceId) {
     `\n\n源模板保持不变；归档章节和完成进度不会复制。是否继续？`;
   if (!confirm(confirmText)) return;
 
-  targets.forEach(target => {
-    target.namedItems = mode === 'overwrite'
+  const updates = targets.map(target => ({
+    ...target,
+    namedItems: mode === 'overwrite'
       ? tmplOverwriteNamedItemsInTarget(sourceActive, target)
-      : tmplMergeNamedItemsIntoTarget(sourceActive, target);
-    target.namedItemEnabled = true;
-    target.ordinalEnabled = true;
-  });
+      : tmplMergeNamedItemsIntoTarget(sourceActive, target),
+    namedItemEnabled: true,
+    ordinalEnabled: true,
+  }));
+  for (const target of updates) {
+    const error = chapterQuestionCountError(target);
+    if (error) { alert(`不能更新模板“${forecastTemplateLabel(target)}”：${error}`); return; }
+  }
+  targets.forEach((target, index) => Object.assign(target, updates[index]));
   await saveAllStorage();
   alert(`已将章节库${modeLabel}到 ${targets.length} 个目标模板。`);
   renderTemplates();
@@ -4308,6 +4324,9 @@ async function tmplSaveNamedItems(id) {
     alert('同一个模板内不能存在完全同名的章节。');
     return;
   }
+  const effectiveTemplate = { ...template, namedItems, namedItemEnabled: true, ordinalEnabled: true, chapterQuantityOnly: Boolean(document.getElementById('forecast_chapter_quantity_only')?.checked) };
+  const error = chapterQuestionCountError(effectiveTemplate);
+  if (error) { alert(error); return; }
   template.namedItems = namedItems;
   template.chapterQuantityOnly = Boolean(document.getElementById('forecast_chapter_quantity_only')?.checked);
   template.namedItemEnabled = true;
@@ -8546,6 +8565,8 @@ async function saveTask(dateStr) {
     }
   }
   const editId = state._editingTaskId;
+  const chapterCountError = taskChapterQuestionCountError(template, namedItemAllocations, qty === '' ? null : Number(qty), dateStr, editId);
+  if (chapterCountError) { alert(chapterCountError); return; }
   const day = getDay(dateStr);
   const previousNote = editId ? String(day.tasks.find(task => task.id === editId)?.note || '') : '';
   const otherTaskMinutes = taskMinutesTotal(day.tasks, editId);
@@ -8564,72 +8585,80 @@ async function saveTask(dateStr) {
     await saveAllStorage();
   }
 
-  if (editId) {
-    // ── 编辑模式：原地更新 ──
-    const idx = day.tasks.findIndex(t => t.id === editId);
-    if (idx < 0) { alert('找不到要编辑的任务'); state._editingTaskId = null; return; }
-    const task = day.tasks[idx];
-    task.name = name;
-    task.activityType = activityType;
-    task.minutes = mins;
-    if (quantityEnabled) {
-      task.quantity = qty !== '' ? Number(qty) : null;
-      task.quantityUnit = quantityUnit;
+  const previousTasks = day.tasks.map(task => ({ ...task }));
+  try {
+    if (editId) {
+      // ── 编辑模式：原地更新 ──
+      const idx = day.tasks.findIndex(t => t.id === editId);
+      if (idx < 0) { alert('找不到要编辑的任务'); state._editingTaskId = null; return; }
+      const task = day.tasks[idx];
+      task.name = name;
+      task.activityType = activityType;
+      task.minutes = mins;
+      if (quantityEnabled) {
+        task.quantity = qty !== '' ? Number(qty) : null;
+        task.quantityUnit = quantityUnit;
+      }
+      if (accuracyEnabled) {
+        task.wrongCount = wrongCount;
+        task.accuracy = calculatedAccuracy;
+      }
+      if (scoreEnabled) {
+        task.score = taskScore;
+        task.scoreMax = scoreMax;
+      }
+      task.note = note;
+      task.templateId = templateId || null;
+      if (ordinalEnabled) {
+        task.namedItemAllocations = namedItemAllocations.map(item => ({
+          itemId: item.itemId,
+          itemName: item.itemName,
+          minutes: item.minutes,
+          quantity: quantityEnabled ? item.quantity : null,
+          completed: item.completed,
+          score: scoreEnabled ? (item.completed ? item.score : null)
+            : taskNamedItemAllocations(task).find(previous => previous.itemId === item.itemId)?.score ?? null,
+        }));
+        delete task.ordinalNumbers;
+        delete task.completedOrdinals;
+        delete task.chapterNumbers;
+        delete task.completedChapters;
+        delete task.chapterNumber;
+        delete task.chapterCompleted;
+      }
+      state._editingTaskId = null;
+      await apiFetch(`/api/data/${dateStr}`, { method: 'PUT', body: JSON.stringify(day) });
+    } else {
+      // ── 新增模式 ──
+      const task = {
+        id: uid(), name, activityType, minutes: mins,
+        quantity: quantityEnabled && qty !== '' ? Number(qty) : null,
+        quantityUnit: quantityEnabled ? quantityUnit : '',
+        wrongCount: accuracyEnabled ? wrongCount : null,
+        accuracy: accuracyEnabled ? calculatedAccuracy : null, note,
+        score: scoreEnabled ? taskScore : null,
+        scoreMax: scoreEnabled ? scoreMax : null,
+        templateId: templateId || null,
+        namedItemAllocations: ordinalEnabled ? namedItemAllocations.map(item => ({
+          itemId: item.itemId,
+          itemName: item.itemName,
+          minutes: item.minutes,
+          quantity: quantityEnabled ? item.quantity : null,
+          completed: item.completed,
+          score: scoreEnabled && item.completed ? item.score : null,
+        })) : [],
+      };
+      day.tasks.push(task);
+      await apiFetch(`/api/data/${dateStr}/tasks`, { method: 'POST', body: JSON.stringify(task) });
     }
-    if (accuracyEnabled) {
-      task.wrongCount = wrongCount;
-      task.accuracy = calculatedAccuracy;
-    }
-    if (scoreEnabled) {
-      task.score = taskScore;
-      task.scoreMax = scoreMax;
-    }
-    task.note = note;
-    task.templateId = templateId || null;
-    if (ordinalEnabled) {
-      task.namedItemAllocations = namedItemAllocations.map(item => ({
-        itemId: item.itemId,
-        itemName: item.itemName,
-        minutes: item.minutes,
-        quantity: quantityEnabled ? item.quantity : null,
-        completed: item.completed,
-        score: scoreEnabled ? (item.completed ? item.score : null)
-          : taskNamedItemAllocations(task).find(previous => previous.itemId === item.itemId)?.score ?? null,
-      }));
-      delete task.ordinalNumbers;
-      delete task.completedOrdinals;
-      delete task.chapterNumbers;
-      delete task.completedChapters;
-      delete task.chapterNumber;
-      delete task.chapterCompleted;
-    }
-    state._editingTaskId = null;
+  } catch (error) {
+    day.tasks = previousTasks;
+    state._editingTaskId = editId;
     cacheToLocal();
-    await apiFetch(`/api/data/${dateStr}`, { method: 'PUT', body: JSON.stringify(day) });
-  } else {
-    // ── 新增模式 ──
-    const task = {
-      id: uid(), name, activityType, minutes: mins,
-      quantity: quantityEnabled && qty !== '' ? Number(qty) : null,
-      quantityUnit: quantityEnabled ? quantityUnit : '',
-      wrongCount: accuracyEnabled ? wrongCount : null,
-      accuracy: accuracyEnabled ? calculatedAccuracy : null, note,
-      score: scoreEnabled ? taskScore : null,
-      scoreMax: scoreEnabled ? scoreMax : null,
-      templateId: templateId || null,
-      namedItemAllocations: ordinalEnabled ? namedItemAllocations.map(item => ({
-        itemId: item.itemId,
-        itemName: item.itemName,
-        minutes: item.minutes,
-        quantity: quantityEnabled ? item.quantity : null,
-        completed: item.completed,
-        score: scoreEnabled && item.completed ? item.score : null,
-      })) : [],
-    };
-    day.tasks.push(task);
-    cacheToLocal();
-    await apiFetch(`/api/data/${dateStr}/tasks`, { method: 'POST', body: JSON.stringify(task) });
+    alert(error.message);
+    return;
   }
+  cacheToLocal();
   // 请求完成后再清当前表单草稿，避免等待网络时被 3 秒定时器重新保存旧表单。
   clearEntryDraftFields(dateStr, ENTRY_TASK_DRAFT_KEYS);
   showTab('entry');
@@ -14773,7 +14802,7 @@ function taskNamedItemStatusHtml(template, allocations = []) {
     if (template.scoreEnabled && itemProgress?.records.some(record => record.score !== null)) {
       detail += ` · 累计得分 ${forecastDisplayMetric(itemProgress.score)}`;
     }
-    if (item.questionCount != null) detail += ` · 总题数 ${item.questionCount} 题`;
+    if (templateUsesChapterQuestionCounts(template) && item.questionCount != null) detail += ` · 总题数 ${item.questionCount} 题`;
 
     const rowClass = `${selected ? ' selected' : ''}${completed ? ' completed' : ''}`;
     const action = selected
@@ -15193,10 +15222,19 @@ function taskUpdateNamedItemSuggestion(templateId, sourceItemId = '', sourceName
     ? activeItems.slice(anchorIndex + 1).find(item => !selectedIds.has(item.id) && !completedIds.has(item.id))
     : null;
   let inferred = false;
+  let predictionReason = '';
   if (!suggestion && anchorName) {
-    const nextName = inferNextNamedItemName(anchorName, (template?.namedItems || []).map(item => item.name));
-    if (nextName) {
-      suggestion = { id: '', name: nextName };
+    const sequence = anchorIndex >= 0
+      ? activeItems.slice(0, anchorIndex + 1).map(item => item.name)
+      : selectedCards.map(card => card.dataset.itemName);
+    if (sequence[sequence.length - 1] !== anchorName) sequence.push(anchorName);
+    const prediction = predictNamedItemSequence(sequence, [
+      ...(template?.namedItems || []).map(item => item.name),
+      ...selectedCards.map(card => card.dataset.itemName),
+    ]);
+    if (prediction.predictedName) {
+      suggestion = { id: '', name: prediction.predictedName };
+      predictionReason = prediction.reason;
       inferred = true;
     }
   }
@@ -15213,7 +15251,7 @@ function taskUpdateNamedItemSuggestion(templateId, sourceItemId = '', sourceName
   host.innerHTML = `<button type="button" class="btn btn-ghost btn-sm"
     onclick="taskAcceptNamedItemSuggestion()">
     💡 建议下一项：${escHtmlApp(suggestion.name)}${inferred ? '（名称推测）' : ''}
-  </button>`;
+  </button>${inferred ? `<span class="form-hint">${escHtmlApp(predictionReason)}</span>` : ''}`;
 }
 
 function taskAcceptNamedItemSuggestion() {
@@ -15346,8 +15384,21 @@ function forecastQuantityResult(goal, entries) {
       excludedRecords.push(forecastTaskRecord(entry, { reasons }));
       return;
     }
-    const quantity = Number(entry.task.quantity);
-    const minutes = Number(entry.task.minutes);
+    let quantity = Number(entry.task.quantity);
+    let minutes = Number(entry.task.minutes);
+    if (goal.chapterQuantityOnly) {
+      const allocations = taskNamedItemAllocations(entry.task);
+      const active = forecastActiveNamedItems(goal);
+      const selected = allocations.filter(allocation => active.some(item => item.id === allocation.itemId ||
+        item.name.trim().toLocaleLowerCase() === allocation.itemName.toLocaleLowerCase()));
+      const allUnassigned = allocations.every(item => item.quantity == null);
+      quantity = selected.reduce((sum, item) => sum + (allUnassigned ? Number(entry.task.quantity) / allocations.length : Number(item.quantity || 0)), 0);
+      minutes = selected.reduce((sum, item) => sum + Number(item.minutes || 0), 0);
+      if (!quantity || !minutes) {
+        excludedRecords.push(forecastTaskRecord(entry, { reasons: ['未包含有效的活动章节题数或时长'] }));
+        return;
+      }
+    }
     cumulativeQuantity += quantity;
     records.push(forecastTaskRecord(entry, {
       quantity,
@@ -15591,6 +15642,8 @@ function calculateForecastGoal(goal) {
     !forecastActiveNamedItems(context).length) {
     return invalid('当前模板没有活动章节，请先在共享章节库中建立或恢复章节。');
   }
+  const countError = chapterQuestionCountError(getTaskTemplateById(context.templateId));
+  if (countError) return invalid(countError);
   const entries = forecastLinkedTasks(context);
   if (context.mode === 'quantity') return forecastQuantityResult(context, entries);
   if (context.mode === 'chapter') return forecastChapterResult(context, entries);
@@ -16000,24 +16053,31 @@ function forecastToggleNamedItemDetails(button) {
   button.textContent = opening ? '收起明细' : `录入明细（${button.dataset.count || '0'}）`;
 }
 
-function forecastNamedItemRowHtml(item, itemProgress = null, quantityEnabled = false, quantityUnit = '') {
+function forecastNamedItemRowHtml(item, itemProgress = null, quantityEnabled = false, quantityUnit = '', questionCountsEnabled = false) {
   const archived = Boolean(item.archived);
   const draft = Boolean(item.draft);
   const hasProgress = Boolean(itemProgress && (itemProgress.minutes > 0 || itemProgress.quantity > 0));
   const statusText = itemProgress?.completed ? '✓ 已完成' : hasProgress ? '进行中' : '未开始';
   const statusColor = itemProgress?.completed ? '#66bb6a' : hasProgress ? 'var(--wake)' : 'var(--muted)';
   return `<div class="forecast-named-item-row" data-item-id="${escHtmlApp(item.id)}" data-archived="${archived ? 'true' : 'false'}" data-draft="${draft ? 'true' : 'false'}"
-    style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:7px;background:rgba(255,255,255,.02)">
+    ondragend="forecastEndNamedItemDrag(this.parentElement)">
+    <div class="forecast-named-item-leading" ${archived ? 'hidden' : ''}>
+      <button type="button" class="btn btn-ghost btn-sm forecast-named-item-drag-handle" draggable="true"
+        ondragstart="forecastStartNamedItemDrag(event)" title="拖动调整章节顺序" aria-label="拖动调整章节顺序">⠿</button>
+      <button type="button" class="btn btn-primary btn-sm" onclick="forecastAddBlankNamedItem('${item.id}')"
+        title="在本章下方新增空白章节" aria-label="在本章下方新增空白章节">＋</button>
+    </div>
     <div class="forecast-named-item-fields">
       <input class="forecast-named-item-name" value="${escHtmlApp(item.name || '')}" maxlength="160"
         ${archived ? 'disabled' : ''}
+        onfocus="forecastSelectNamedItem(this)"
         oninput="forecastRefreshNamedItemEditorState()"
         onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur()}"
         aria-label="命名章节名称">
       <label class="forecast-named-item-question-count">总题数
         <input type="number" class="forecast-named-item-question-count-input" min="0" max="9007199254740991" step="1"
-          value="${escHtmlApp(item.questionCount ?? '')}" placeholder="未设置" ${archived ? 'disabled' : ''}
-          oninput="forecastRefreshNamedItemEditorState()" aria-label="章节总题数">
+          value="${escHtmlApp(item.questionCount ?? '')}" placeholder="未设置" ${archived || !questionCountsEnabled ? 'disabled' : ''}
+          onfocus="forecastSelectNamedItem(this)" oninput="forecastRefreshNamedItemEditorState()" aria-label="章节总题数">
       </label>
     </div>
     <div class="forecast-named-item-actions" style="display:flex;gap:5px;align-items:center">
@@ -16055,10 +16115,10 @@ function forecastNamedItemsEditorHtml(items = [], templateId = '') {
   const archived = normalized.filter(item => item.archived).sort((a, b) => a.order - b.order);
   const template = getTaskTemplateById(templateId);
   const libraryProgress = templateId ? namedItemLibraryProgress(templateId) : { progress: new Map(), completedActive: 0, totalQuantity: 0 };
-  const lastActiveName = [...active].reverse().find(item => item.name)?.name || '';
-  const predictedName = inferNextNamedItemName(lastActiveName, normalized.map(item => item.name));
+  const prediction = predictNamedItemSequence(active.map(item => item.name), normalized.map(item => item.name));
+  const questionCountsEnabled = templateUsesChapterQuestionCounts(template);
   const showQuestionCounts = normalized.some(item => item.questionCount != null) || templateUsesChapterQuestionCounts(template);
-  return `<div class="forecast-named-items-editor${showQuestionCounts ? ' show-question-counts' : ''}">
+  return `<div class="forecast-named-items-editor${showQuestionCounts ? ' show-question-counts' : ''}${questionCountsEnabled ? ' question-counts-enabled' : ''}">
     <div class="forecast-named-items-heading">
       <label>命名章节清单 *</label>
       <button type="button" class="btn btn-ghost btn-sm forecast-question-count-toggle" aria-pressed="${showQuestionCounts}"
@@ -16067,31 +16127,38 @@ function forecastNamedItemsEditorHtml(items = [], templateId = '') {
     ${template ? `<label class="forecast-chapter-quantity-only"><input type="checkbox" id="forecast_chapter_quantity_only"
       ${template.chapterQuantityOnly ? 'checked' : ''} ${template.quantityEnabled ? '' : 'disabled'}
       onchange="forecastChapterQuantityOnlyChanged(this)">章节仅作题数标定</label>` : ''}
+    <div class="form-hint forecast-chapter-quantity-hint">${questionCountsEnabled
+      ? '已开启：总题数用于预测，并限制同一章节所有日期、所有任务的累计题数。请为每个活动章节填写总题数。'
+      : '未开启：总题数不参与预测，也不限制任务数量；仍按章节完成情况和已录入数量估算。已填题数会保留。'}</div>
     <div class="form-hint forecast-named-item-question-summary">${forecastNamedItemQuestionSummary(active)}</div>
     ${template ? `<div class="form-hint" style="margin-top:5px">活动章节完成 ${libraryProgress.completedActive}/${active.length}${template.quantityEnabled ? ` · 已录入 ${forecastDisplayMetric(libraryProgress.totalQuantity)} ${escHtmlApp(template.quantityUnit || '数量')}` : ''}</div>` : ''}
     <div style="max-height:min(45vh,360px);overflow-y:auto;margin-top:6px;border:1px solid var(--border);border-radius:8px;background:rgba(0,0,0,.08)">
-      <div id="forecast_named_items_active" style="display:grid;gap:7px;padding:8px">
-        ${active.map(item => forecastNamedItemRowHtml(item, libraryProgress.progress.get(item.id), Boolean(template?.quantityEnabled), template?.quantityUnit || '')).join('')}
+      <div id="forecast_named_items_active" style="display:grid;gap:7px;padding:8px"
+        ondragover="forecastDragNamedItemOver(event)" ondrop="forecastDropNamedItem(event)">
+        ${active.map(item => forecastNamedItemRowHtml(item, libraryProgress.progress.get(item.id), Boolean(template?.quantityEnabled), template?.quantityUnit || '', questionCountsEnabled)).join('')}
         <div id="forecast_named_items_empty" class="form-hint" style="${active.length ? 'display:none' : ''}">尚未添加章节。点击“＋”新增空白行。</div>
       </div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--card-bg, var(--surface))">
-      <button type="button" class="btn btn-primary btn-sm" onclick="forecastAddBlankNamedItem()" title="新增空白章节" aria-label="新增空白章节">＋</button>
+      <button type="button" class="btn btn-primary btn-sm" onclick="forecastAddBlankNamedItem()"
+        aria-describedby="forecast_named_item_insert_hint" title="在选中章节下方新增；未选中时添加到末尾">＋ 新增空白章节</button>
+      <span id="forecast_named_item_insert_hint" class="form-hint" style="margin:0">点击章节名称选中插入位置；未选中时添加到末尾。</span>
       <button type="button" id="forecast_named_item_predict" class="btn btn-ghost btn-sm"
-        onclick="forecastAddPredictedNamedItem()" ${predictedName ? '' : 'disabled'}>
-        ${predictedName ? `⚡＋ ${escHtmlApp(predictedName)}` : '⚡＋预测下一项'}
+        aria-describedby="forecast_named_item_predict_hint"
+        onclick="forecastAddPredictedNamedItem()" ${prediction.predictedName ? '' : 'disabled'}>
+        ${prediction.predictedName ? `⚡＋ ${escHtmlApp(prediction.predictedName)}` : '⚡＋预测下一项'}
       </button>
-      <span id="forecast_named_item_predict_hint" class="form-hint" style="margin:0">
-        ${predictedName ? '' : (lastActiveName ? '当前名称无法推测下一项' : '请先添加并填写一个章节')}
+      <span id="forecast_named_item_predict_hint" class="form-hint" style="margin:0" aria-live="polite">
+        ${escHtmlApp(namedItemPredictionHint(prediction))}
       </span>
     </div>
     <details id="forecast_named_items_archived_wrap" style="margin-top:10px;${archived.length ? '' : 'display:none'}">
       <summary style="cursor:pointer;color:var(--muted);font-size:12px">已归档章节（<span id="forecast_named_items_archived_count">${archived.length}</span>）</summary>
       <div id="forecast_named_items_archived" style="display:grid;gap:7px;margin-top:7px">
-        ${archived.map(item => forecastNamedItemRowHtml(item, libraryProgress.progress.get(item.id), Boolean(template?.quantityEnabled), template?.quantityUnit || '')).join('')}
+        ${archived.map(item => forecastNamedItemRowHtml(item, libraryProgress.progress.get(item.id), Boolean(template?.quantityEnabled), template?.quantityUnit || '', questionCountsEnabled)).join('')}
       </div>
     </details>
-    <div class="form-hint" style="margin-top:7px">名称在同一模板内不可重复；清单顺序会同步到完成预测和任务录入。已被历史任务引用的章节只能归档，不能物理删除。</div>
+    <div class="form-hint" style="margin-top:7px">拖动每行左侧手柄可调整顺序。名称在同一模板内不可重复；清单顺序会同步到完成预测和任务录入。已被历史任务引用的章节只能归档，不能物理删除。</div>
   </div>`;
 }
 
@@ -16118,6 +16185,7 @@ function forecastChapterQuantityOnlyChanged(input) {
     editor.classList.add('show-question-counts');
     editor.querySelector('.forecast-question-count-toggle').setAttribute('aria-pressed', 'true');
   }
+  forecastSyncChapterQuestionCounts();
   forecastUpdateGoalFields();
 }
 
@@ -16128,6 +16196,7 @@ function forecastToggleNamedItemQuestionCounts(button) {
 }
 
 function forecastValidateNamedItemQuestionCounts() {
+  if (!document.getElementById('forecast_chapter_quantity_only')?.checked) return true;
   const invalid = forecastNamedItemRows()
     .map(row => row.querySelector('.forecast-named-item-question-count-input'))
     .find(input => input && (!input.validity.valid || (input.value !== '' &&
@@ -16162,57 +16231,50 @@ function forecastRefreshNamedItemEditorState() {
   if (empty) empty.style.display = activeCount ? 'none' : '';
   if (archivedWrap) archivedWrap.style.display = archivedTotal ? '' : 'none';
   if (archivedCount) archivedCount.textContent = String(archivedTotal);
-  const questionSummary = activeHost?.closest('.forecast-named-items-editor')?.querySelector('.forecast-named-item-question-summary');
-  if (questionSummary) {
-    questionSummary.textContent = forecastNamedItemQuestionSummary(forecastCollectNamedItems().filter(item => !item.archived));
-  }
-  const activeRows = [...(activeHost?.querySelectorAll('.forecast-named-item-row') || [])];
-  const lastName = activeRows
-    .map(row => String(row.querySelector('.forecast-named-item-name')?.value || '').trim())
-    .reverse()
-    .find(Boolean) || '';
-  const existingNames = forecastNamedItemRows()
-    .map(row => String(row.querySelector('.forecast-named-item-name')?.value || '').trim())
-    .filter(Boolean);
-  const predictedName = inferNextNamedItemName(lastName, existingNames);
+  const questionSummary = activeHost?.closest?.('.forecast-named-items-editor')?.querySelector('.forecast-named-item-question-summary');
+  if (questionSummary) questionSummary.textContent = forecastNamedItemQuestionSummary(forecastCollectNamedItems().filter(item => !item.archived));
+  forecastSyncChapterQuestionCounts();
+  forecastRefreshNamedItemSelection();
+  const prediction = forecastNamedItemPrediction();
   if (predictButton) {
-    predictButton.disabled = !predictedName;
-    predictButton.textContent = predictedName ? `⚡＋ ${predictedName}` : '⚡＋预测下一项';
+    predictButton.disabled = !prediction.predictedName;
+    predictButton.textContent = prediction.predictedName ? `⚡＋ ${prediction.predictedName}` : '⚡＋预测下一项';
   }
   if (predictHint) {
-    predictHint.textContent = predictedName ? '' : (lastName ? '当前名称无法推测下一项' : '请先添加并填写一个章节');
+    predictHint.textContent = namedItemPredictionHint(prediction);
   }
 }
 
 function chineseNamedItemNumberToValue(text) {
   const digits = { '零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9 };
-  const units = { '十': 10, '百': 100, '千': 1000, '万': 10000, '亿': 100000000 };
+  const units = { '十': 10, '百': 100, '千': 1000 };
   const chars = [...String(text || '')];
-  if (!chars.length || chars.some(char => digits[char] === undefined && units[char] === undefined)) return null;
-  if (!chars.some(char => units[char] !== undefined)) {
+  if (!chars.length || !/^[零〇一二两三四五六七八九十百千万亿]+$/.test(text)) return null;
+  if (!/[十百千万亿]/.test(text)) {
     const value = Number(chars.map(char => digits[char]).join(''));
     return Number.isSafeInteger(value) ? value : null;
   }
-  let total = 0;
-  let section = 0;
-  let number = 0;
-  chars.forEach(char => {
-    if (digits[char] !== undefined) {
-      number = digits[char];
-      return;
+  const parse = source => {
+    for (const [label, unit] of [['亿', 100000000], ['万', 10000]]) {
+      if (!source.includes(label)) continue;
+      const parts = source.split(label);
+      if (parts.length !== 2) return NaN;
+      return parse(parts[0] || '一') * unit + parse(parts[1]);
     }
-    const unit = units[char];
-    if (unit < 10000) {
-      section += (number || 1) * unit;
-    } else {
-      section += number;
-      total += (section || 1) * unit;
-      section = 0;
+    let total = 0;
+    let number = 0;
+    for (const char of source) {
+      if (digits[char] !== undefined) number = digits[char];
+      else {
+        total += (number || 1) * units[char];
+        number = 0;
+      }
     }
-    number = 0;
-  });
-  const value = total + section + number;
-  return Number.isSafeInteger(value) ? value : null;
+    return total + number;
+  };
+  const value = parse(String(text));
+  const canonical = String(text).replace(/两/g, '二').replace(/〇/g, '零').replace(/^一十/, '十');
+  return Number.isSafeInteger(value) && namedItemValueToChineseNumber(value) === canonical ? value : null;
 }
 
 function namedItemValueToChineseNumber(value) {
@@ -16255,57 +16317,313 @@ function namedItemValueToChineseNumber(value) {
   return value === 0 ? '零' : convert(value);
 }
 
-function inferNextNamedItemName(name, existingNames = []) {
-  const source = String(name || '').trim();
-  const matches = [...source.matchAll(/\d+|[零〇一二两三四五六七八九十百千万亿]+/g)];
-  const match = matches[matches.length - 1];
-  if (!match) return '';
-  const token = match[0];
-  const isArabic = /^\d+$/.test(token);
-  const start = isArabic ? Number(token) : chineseNamedItemNumberToValue(token);
-  if (!Number.isSafeInteger(start)) return '';
-  const used = new Set(existingNames.map(value => String(value || '').trim().toLocaleLowerCase()));
-  for (let offset = 1; offset <= 1000; offset++) {
-    const nextNumber = isArabic
-      ? String(start + offset).padStart(token.length, '0')
-      : namedItemValueToChineseNumber(start + offset);
-    if (!nextNumber) return '';
-    const candidate = source.slice(0, match.index) + nextNumber + source.slice(match.index + token.length);
-    if (!used.has(candidate.toLocaleLowerCase())) return candidate;
-  }
-  return '';
+function namedItemNumberToken(raw, index) {
+  const arabic = /^[0-9０-９]+$/.test(raw);
+  const ascii = raw.replace(/[０-９]/g, char => String(char.charCodeAt(0) - 0xff10));
+  const value = arabic ? Number(ascii) : chineseNamedItemNumberToValue(raw);
+  return {
+    raw, index, value,
+    kind: arabic ? 'arabic' : 'chinese',
+    format(number) {
+      if (!Number.isSafeInteger(number) || number < 0) return '';
+      if (arabic) {
+        const result = String(number).padStart(raw.length, '0');
+        return /^[０-９]+$/.test(raw)
+          ? result.replace(/\d/g, digit => String.fromCharCode(0xff10 + Number(digit)))
+          : result;
+      }
+      if (!/[十百千万亿]/.test(raw)) {
+        const digits = raw.includes('〇') ? '〇一二三四五六七八九' : '零一二三四五六七八九';
+        // “九 → 十”是计数；“〇九 → 一〇”是保留宽度的逐位编号。
+        if (raw.length > 1 || raw.includes('〇') || raw.includes('零')) {
+          return String(number).padStart(raw.length, '0').replace(/\d/g, digit => digits[Number(digit)]);
+        }
+      }
+      return namedItemValueToChineseNumber(number);
+    },
+  };
 }
 
-function forecastAppendNamedItem(name = '') {
+function namedItemSequencePattern(name) {
+  const source = String(name || '').trim();
+  const date = source.match(/^(\d{4})([-/年])(\d{1,2})([-/月])(\d{1,2})(日?)$/);
+  if (date) {
+    const [, year, firstSeparator, month, secondSeparator, day, suffix] = date;
+    if (!((firstSeparator === secondSeparator && firstSeparator !== '年' && !suffix)
+      || (firstSeparator === '年' && secondSeparator === '月'))) {
+      return { error: '日期格式不一致，请先修正日期。' };
+    }
+    const timestamp = Date.UTC(Number(year), Number(month) - 1, Number(day));
+    const parsed = new Date(timestamp);
+    if (parsed.getUTCFullYear() !== Number(year) || parsed.getUTCMonth() + 1 !== Number(month)
+      || parsed.getUTCDate() !== Number(day)) return { error: '日期不存在，请先修正日期。' };
+    return {
+      key: `date:${firstSeparator}:${secondSeparator}:${suffix}`,
+      kind: 'date', values: [timestamp / 86400000],
+      format(values) {
+        const next = new Date(values[0] * 86400000);
+        if (next.getUTCFullYear() < 1000 || next.getUTCFullYear() > 9999) return '';
+        return `${next.getUTCFullYear()}${firstSeparator}${String(next.getUTCMonth() + 1).padStart(month.length, '0')}${secondSeparator}${String(next.getUTCDate()).padStart(day.length, '0')}${suffix}`;
+      },
+    };
+  }
+  const letters = source.match(/^((?:附录|Appendix|Section)\s*)?([A-Z]|[a-z])$/);
+  if (letters) {
+    const prefix = letters[1] || '';
+    const letter = letters[2];
+    const lower = letter === letter.toLowerCase();
+    return {
+      key: `letter:${prefix}:${lower}`, kind: 'letter', values: [letter.toUpperCase().charCodeAt(0) - 65],
+      format(values) {
+        if (values[0] < 0 || values[0] > 25) return '';
+        return prefix + String.fromCharCode((lower ? 97 : 65) + values[0]);
+      },
+    };
+  }
+  // 标题由用户填写；只延续“第 N 章”，避免沿用上一章的内容或改动“三角函数”。
+  const heading = source.match(/^(.*?第\s*)([0-9０-９零〇一二两三四五六七八九十百千万亿]+)(\s*(?:章|节|卷|篇|课|讲|组|回|册|单元|部分))(.+)$/);
+  const omitTitle = heading && !/^\s*第[0-9０-９零〇一二两三四五六七八九十百千万亿]/.test(heading[4]);
+  const patternSource = omitTitle ? heading[1] + heading[2] + heading[3] : source;
+  const tokens = [...patternSource.matchAll(/[0-9０-９]+|[零〇一二两三四五六七八九十百千万亿]+/g)]
+    .filter(match => {
+      if (/^[0-9０-９]+$/.test(match[0])) return true;
+      const before = patternSource.slice(0, match.index);
+      const after = patternSource.slice(match.index + match[0].length);
+      return /(?:章|节|卷|篇|课|讲|组|回|册|单元|部分)\s*$/.test(before)
+        || /^\s*(?:章|节|卷|篇|课|讲|组|回|册|单元|部分|题|页)/.test(after)
+        || ((!before || /[\s（(、，,：:]$/.test(before)) && (!after || /^[\s）)、，,：:]/.test(after)));
+    })
+    .map(match => namedItemNumberToken(match[0], match.index));
+  if (!tokens.length) return { error: '未识别到编号；请使用“第一章”“1.1”或“P20-35”等名称。' };
+  if (tokens.some(token => !Number.isSafeInteger(token.value))) return { error: '编号无效或超出安全整数范围，请先修正。' };
+  const parts = [];
+  let cursor = 0;
+  tokens.forEach(token => {
+    parts.push(patternSource.slice(cursor, token.index));
+    cursor = token.index + token.raw.length;
+  });
+  parts.push(patternSource.slice(cursor));
+  const range = tokens.length === 2 && /^\s*[-–—~～至]\s*$/.test(parts[1])
+    && (/(?:^|[\s：:])(?:p(?:age)?|页码|题号|页|题)\s*$/i.test(parts[0]) || /^\s*(?:页|题)$/.test(parts[2]));
+  if (range && tokens[1].value < tokens[0].value) return { error: '范围终点小于起点，请先修正。' };
+  const ordinalIndexes = tokens.map((token, index) => (
+    /(?:章|节|卷|篇|课|讲|组|回|册|单元|部分)\s*$/.test(parts[index])
+      || /^\s*(?:章|节|卷|篇|课|讲|组|回|册|单元|部分|题|页)/.test(parts[index + 1])
+  ) ? index : -1).filter(index => index >= 0);
+  const hierarchical = /^[0-9０-９]+(?:[.．][0-9０-９]+)+$/.test(patternSource);
+  const defaultIndex = ordinalIndexes.length
+    ? ordinalIndexes[ordinalIndexes.length - 1]
+    : hierarchical ? tokens.length - 1
+      : tokens.length === 1 && (!parts[0] || !parts[1]) ? 0 : -1;
+  return {
+    key: JSON.stringify([range ? 'range' : 'number', parts, tokens.map(token => token.kind)]),
+    kind: range ? 'range' : 'number', values: tokens.map(token => token.value), defaultIndex, omitTitle,
+    format(values) {
+      const numbers = tokens.map((token, index) => token.format(values[index]));
+      if (numbers.some(number => !number)) return '';
+      return numbers.map((number, index) => parts[index] + number).join('') + parts[parts.length - 1];
+    },
+  };
+}
+
+function predictNamedItemSequence(names = [], existingNames = names) {
+  const sequence = names.map(name => String(name || '').trim()).filter(Boolean);
+  const used = new Set(existingNames.map(name => String(name || '').trim().toLocaleLowerCase()));
+  const empty = reason => ({ predictedName: '', previewNames: [], reason, sampleCount: 0 });
+  if (!sequence.length) return empty('请先填写一个名称，再预测下一项。');
+  const last = namedItemSequencePattern(sequence[sequence.length - 1]);
+  if (last.error) return empty(last.error);
+  const samples = [last];
+  // 只使用末尾连续、结构相同的活动行；旧序列和归档行只参与重名检查。
+  for (let index = sequence.length - 2; index >= 0; index--) {
+    const sample = namedItemSequencePattern(sequence[index]);
+    if (sample.key !== last.key) break;
+    samples.unshift(sample);
+  }
+  let step = last.values.map(() => 0);
+  let rule = '';
+  if (samples.length > 1) {
+    step = samples[1].values.map((value, index) => value - samples[0].values[index]);
+    const changingColumn = step.findIndex(value => value !== 0);
+    const consistent = changingColumn >= 0 && samples.slice(1).every((sample, index) => {
+      const previous = samples[index];
+      const distance = (sample.values[changingColumn] - previous.values[changingColumn]) / step[changingColumn];
+      if (!Number.isSafeInteger(distance) || distance < 1 || distance > used.size + 1) return false;
+      if (!sample.values.every((value, column) => value === previous.values[column] + step[column] * distance)) return false;
+      // 允许跨过确实已存在的重名项，防止一次跳过归档项后破坏后续预测。
+      for (let skipped = 1; skipped < distance; skipped++) {
+        const name = last.format(previous.values.map((value, column) => value + step[column] * skipped));
+        if (!used.has(name.toLocaleLowerCase())) return false;
+      }
+      return true;
+    });
+    if (changingColumn < 0) return empty('相邻名称重复，无法确定递增规律。');
+    if (!consistent) return empty('相邻名称的步长不一致；请修正名称或手动填写下一项，建立新序列。');
+    const changes = step.filter(value => value !== 0);
+    if (last.kind === 'range') {
+      if (step[0] !== step[1]) return empty('范围长度或间隔不一致；请再填写一个等长范围。');
+      rule = `范围整体${step[0] > 0 ? '前移' : '后移'} ${Math.abs(step[0])}`;
+    } else {
+      if (changes.length !== 1) return empty('多个编号同时变化，无法确定下一项；请先明确命名规律。');
+      const delta = changes[0];
+      rule = last.kind === 'date' ? `日期每次${delta > 0 ? '增加' : '减少'} ${Math.abs(delta)} 天`
+        : `编号步长 ${delta > 0 ? '+' : ''}${delta}`;
+    }
+  } else if (last.kind === 'range') {
+    const width = last.values[1] - last.values[0] + 1;
+    step = [width, width];
+    rule = `仅 1 个样本，按连续等长范围（${width} 项）推测`;
+  } else {
+    const index = last.kind === 'number' ? last.defaultIndex : 0;
+    if (index < 0) return empty('编号位置有歧义；请再填写一个名称，确定哪一处变化。');
+    step[index] = 1;
+    rule = last.kind === 'date' ? '仅 1 个样本，默认下一天'
+      : '仅 1 个样本，默认编号 +1；再填一项可识别步长';
+  }
+  if (last.omitTitle) rule += '；只延续编号，标题请自行填写';
+  const previewNames = [];
+  let skipped = 0;
+  // 非零固定步长不会重复生成名称，已有名称数量就是跳过重名的自然上界。
+  for (let offset = 1; offset <= used.size + 3 && previewNames.length < 3; offset++) {
+    const values = last.values.map((value, index) => value + step[index] * offset);
+    if (values.some(value => !Number.isSafeInteger(value) || (last.kind !== 'date' && value < 0))) break;
+    const candidate = last.format(values);
+    if (!candidate || candidate.length > 160) break;
+    if (used.has(candidate.toLocaleLowerCase())) {
+      if (!previewNames.length) skipped++;
+      continue;
+    }
+    previewNames.push(candidate);
+  }
+  if (!previewNames.length) return empty('下一项超出支持范围，或没有可用的不重名名称；请手动填写。');
+  return {
+    predictedName: previewNames[0], previewNames, sampleCount: samples.length,
+    reason: `${samples.length > 1 ? `依据末尾 ${samples.length} 个名称，` : ''}${rule}${skipped ? `；已跳过 ${skipped} 个重名项` : ''}`,
+  };
+}
+
+function namedItemPredictionHint(prediction) {
+  const following = prediction.previewNames.slice(1);
+  return `${prediction.reason}${following.length ? `；后续预览：${following.join(' → ')}` : ''}`;
+}
+
+function forecastNamedItemPrediction() {
+  const activeHost = document.getElementById('forecast_named_items_active');
+  const activeNames = [...(activeHost?.querySelectorAll('.forecast-named-item-row') || [])]
+    .map(row => row.querySelector('.forecast-named-item-name')?.value || '');
+  const existingNames = forecastNamedItemRows()
+    .map(row => row.querySelector('.forecast-named-item-name')?.value || '');
+  return predictNamedItemSequence(activeNames, existingNames);
+}
+
+function forecastSelectNamedItem(input) {
+  const host = document.getElementById('forecast_named_items_active');
+  const row = input?.closest('.forecast-named-item-row');
+  if (!host || row?.parentElement !== host || row.dataset.archived === 'true') return;
+  host.dataset.selectedItemId = row.dataset.itemId;
+  forecastRefreshNamedItemSelection();
+}
+
+function forecastRefreshNamedItemSelection() {
+  const host = document.getElementById('forecast_named_items_active');
+  if (!host) return;
+  const rows = [...host.querySelectorAll('.forecast-named-item-row')];
+  const selected = rows.find(row => row.dataset.itemId === host.dataset.selectedItemId);
+  if (!selected) delete host.dataset.selectedItemId;
+  rows.forEach(row => row.classList.toggle('is-selected', row === selected));
+  const hint = document.getElementById('forecast_named_item_insert_hint');
+  if (hint) {
+    const name = selected?.querySelector('.forecast-named-item-name')?.value.trim();
+    hint.textContent = selected
+      ? (name ? `将在「${name}」下方插入空白章节。` : '将在当前空白章节下方插入新章节。')
+      : '点击章节名称选中插入位置；未选中时添加到末尾。';
+  }
+}
+
+function forecastStartNamedItemDrag(event) {
+  const row = event.currentTarget.closest('.forecast-named-item-row');
+  const host = document.getElementById('forecast_named_items_active');
+  if (!host || row?.parentElement !== host || row.dataset.archived === 'true') {
+    event.preventDefault();
+    return;
+  }
+  host.dataset.dragItemId = row.dataset.itemId;
+  forecastSelectNamedItem(row.querySelector('.forecast-named-item-name'));
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', row.dataset.itemId);
+  event.dataTransfer.setDragImage(row, 20, 20);
+  row.classList.add('is-dragging');
+}
+
+function forecastNamedItemDropTarget(event) {
+  const host = event.currentTarget;
+  const rows = [...host.querySelectorAll('.forecast-named-item-row')];
+  const source = rows.find(row => row.dataset.itemId === host.dataset.dragItemId);
+  if (!source || source.dataset.archived === 'true') return null;
+  const others = rows.filter(row => row !== source);
+  const before = others.find(row => {
+    const rect = row.getBoundingClientRect();
+    return event.clientY < rect.top + rect.height / 2;
+  });
+  const target = before || others[others.length - 1];
+  return target ? { host, source, target, before: Boolean(before) } : null;
+}
+
+function forecastDragNamedItemOver(event) {
+  const position = forecastNamedItemDropTarget(event);
+  if (!position) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  position.host.querySelectorAll('.forecast-named-item-row').forEach(row => {
+    row.classList.toggle('drop-before', row === position.target && position.before);
+    row.classList.toggle('drop-after', row === position.target && !position.before);
+  });
+}
+
+function forecastDropNamedItem(event) {
+  const position = forecastNamedItemDropTarget(event);
+  if (!position) return;
+  event.preventDefault();
+  const { host, source, target, before } = position;
+  host.insertBefore(source, before ? target : target.nextSibling);
+  forecastEndNamedItemDrag(host);
+  forecastRefreshNamedItemEditorState();
+  source.querySelector('.forecast-named-item-name')?.focus({ preventScroll: true });
+}
+
+function forecastEndNamedItemDrag(host) {
+  if (!host) return;
+  delete host.dataset.dragItemId;
+  host.querySelectorAll('.forecast-named-item-row').forEach(row => {
+    row.classList.remove('is-dragging', 'drop-before', 'drop-after');
+  });
+}
+
+function forecastAppendNamedItem(name = '', afterItemId = '') {
   const host = document.getElementById('forecast_named_items_active');
   if (!host) return;
   const holder = document.createElement('div');
   holder.innerHTML = forecastNamedItemRowHtml({ id: uid(), name, archived: false, draft: true });
   const row = holder.firstElementChild;
   const empty = document.getElementById('forecast_named_items_empty');
-  host.insertBefore(row, empty || null);
+  const anchor = [...host.querySelectorAll('.forecast-named-item-row')]
+    .find(item => item.dataset.itemId === afterItemId);
+  host.insertBefore(row, anchor ? anchor.nextSibling : empty || null);
   forecastRefreshNamedItemEditorState();
   const input = row.querySelector('.forecast-named-item-name');
   input?.focus();
   if (name) input?.select();
   row.scrollIntoView({ block: 'nearest' });
+  return row;
 }
 
-function forecastAddBlankNamedItem() {
-  forecastAppendNamedItem('');
+function forecastAddBlankNamedItem(afterItemId = '') {
+  const host = document.getElementById('forecast_named_items_active');
+  forecastAppendNamedItem('', afterItemId || host?.dataset.selectedItemId || '');
 }
 
 function forecastAddPredictedNamedItem() {
-  const activeHost = document.getElementById('forecast_named_items_active');
-  const activeRows = [...(activeHost?.querySelectorAll('.forecast-named-item-row') || [])];
-  const lastName = activeRows
-    .map(row => String(row.querySelector('.forecast-named-item-name')?.value || '').trim())
-    .reverse()
-    .find(Boolean) || '';
-  const existingNames = forecastNamedItemRows()
-    .map(row => String(row.querySelector('.forecast-named-item-name')?.value || '').trim())
-    .filter(Boolean);
-  const predictedName = inferNextNamedItemName(lastName, existingNames);
+  const { predictedName } = forecastNamedItemPrediction();
   if (!predictedName) return;
   forecastAppendNamedItem(predictedName);
 }
@@ -16320,6 +16638,7 @@ function forecastMoveNamedItem(id, direction) {
     const next = row.nextElementSibling;
     if (next?.classList.contains('forecast-named-item-row')) row.parentElement.insertBefore(next, row);
   }
+  forecastRefreshNamedItemEditorState();
 }
 
 function forecastNamedItemIsReferenced(id) {
@@ -16340,6 +16659,7 @@ function forecastRemoveNamedItem(id) {
   const archivedHost = document.getElementById('forecast_named_items_archived');
   if (!archivedHost) return;
   row.dataset.archived = 'true';
+  row.querySelector('.forecast-named-item-leading').hidden = true;
   row.querySelectorAll('.forecast-named-item-name, .forecast-named-item-question-count-input')
     .forEach(input => input.disabled = true);
   const actions = row.querySelector('.forecast-named-item-actions');
@@ -16362,6 +16682,7 @@ function forecastRestoreNamedItem(id) {
   const activeHost = document.getElementById('forecast_named_items_active');
   if (!activeHost) return;
   row.dataset.archived = 'false';
+  row.querySelector('.forecast-named-item-leading').hidden = false;
   row.querySelectorAll('.forecast-named-item-name, .forecast-named-item-question-count-input')
     .forEach(input => input.disabled = false);
   const actions = row.querySelector('.forecast-named-item-actions');
@@ -16589,6 +16910,8 @@ async function forecastSaveGoal() {
     }
   }
 
+  const error = chapterQuestionCountError({ ...effectiveTemplate, namedItems });
+  if (error) { alert(error); return; }
   const now = new Date().toISOString();
   const saved = {
     id: existing?.id || uid(),
@@ -17473,23 +17796,19 @@ function workbookAddSection(name = '') {
 function workbookSectionPrediction() {
   ensureWorkbookDraft();
   const names = state.workbookDraft.sections
-    .map(section => String(section?.name || '').trim())
-    .filter(Boolean);
-  const lastName = names[names.length - 1] || '';
-  return {
-    lastName,
-    predictedName: inferNextNamedItemName(lastName, names),
-  };
+    .map(section => String(section?.name || '').trim());
+  return predictNamedItemSequence(names);
 }
 
 function workbookRefreshSectionPrediction() {
   const button = document.getElementById('workbook-section-predict');
   const hint = document.getElementById('workbook-section-predict-hint');
   if (!button || !hint) return;
-  const { lastName, predictedName } = workbookSectionPrediction();
+  const prediction = workbookSectionPrediction();
+  const { predictedName } = prediction;
   button.disabled = !predictedName;
   button.textContent = predictedName ? `⚡＋ ${predictedName}` : '⚡＋预测下一项';
-  hint.textContent = predictedName ? '' : (lastName ? '当前名称无法推测下一项' : '请先填写一个分段名称');
+  hint.textContent = namedItemPredictionHint(prediction);
 }
 
 function workbookAddPredictedSection() {
@@ -19484,3 +19803,80 @@ document.addEventListener('visibilitychange', () => {
     forecastRefreshTrackedToday();
   }
 });
+
+
+function chapterQuestionCountError(template, entries = getForecastTaskEntries()) {
+  if (!templateUsesChapterQuestionCounts(template)) return '';
+  const items = template.namedItems || [];
+  const active = items.filter(item => !item.archived);
+  if (forecastNamedItemQuestionTotal(active) == null) {
+    return '开启“章节仅作题数标定”后，每个活动章节都必须填写非负整数总题数，合计必须大于 0。';
+  }
+  const quantities = new Map();
+  const records = new Map();
+  for (const { task } of entries) {
+    if (resolveTaskTemplateId(task) !== template.id) continue;
+    const allocations = taskNamedItemAllocations(task);
+    const taskQuantity = task.quantity == null ? null : Number(task.quantity);
+    if (taskQuantity != null && (!Number.isSafeInteger(taskQuantity) || taskQuantity < 0)) {
+      return `任务“${task.name || '未命名任务'}”的题数必须是非负整数。`;
+    }
+    if (!allocations.length && taskQuantity > 0) {
+      return `任务“${task.name || '未命名任务'}”缺少章节关联，请先为它选择章节。`;
+    }
+    const allUnassigned = allocations.every(item => item.quantity == null);
+    const values = allocations.map(item => allUnassigned && taskQuantity != null
+      ? taskQuantity / allocations.length : (item.quantity ?? 0));
+    if (values.some(value => !Number.isFinite(value) || value < 0)) {
+      return `任务“${task.name || '未命名任务'}”的章节题数无效。`;
+    }
+    const assigned = values.reduce((sum, value) => sum + value, 0);
+    // 多章节任务会均分题数；比较时只容许浮点运算产生的舍入误差。
+    const rounding = Number.EPSILON * Math.max(1, assigned, taskQuantity || 0) * Math.max(1, values.length) * 4;
+    if (taskQuantity != null && Math.abs(assigned - taskQuantity) > rounding) {
+      return `任务“${task.name || '未命名任务'}”的章节题数合计必须等于任务总题数。`;
+    }
+    for (let index = 0; index < allocations.length; index++) {
+      const allocation = allocations[index];
+      const item = items.find(item => item.id === allocation.itemId) ||
+        items.find(item => item.name.trim().toLocaleLowerCase() === allocation.itemName.toLocaleLowerCase());
+      if (!item) return `章节“${allocation.itemName}”尚未设置总题数，请先在共享章节库添加并标定。`;
+      if (item.questionCount == null && item.archived) continue;
+      if (!Number.isSafeInteger(item.questionCount) || item.questionCount < 0) {
+        return `章节“${item.name}”的总题数无效，请先在共享章节库修正。`;
+      }
+      quantities.set(item.id, (quantities.get(item.id) || 0) + values[index]);
+      records.set(item.id, (records.get(item.id) || 0) + 1);
+    }
+  }
+  for (const item of items) {
+    const quantity = quantities.get(item.id) || 0;
+    const rounding = Number.EPSILON * Math.max(1, quantity, item.questionCount || 0) * (records.get(item.id) || 1) * 4;
+    if (quantity - item.questionCount > rounding) {
+      return `章节“${item.name}”累计题数不能超过 ${item.questionCount} 题；保存后为 ${forecastDisplayMetric(quantity)} 题，超出 ${forecastDisplayMetric(quantity - item.questionCount)} 题。`;
+    }
+  }
+  return '';
+}
+
+function taskChapterQuestionCountError(template, allocations, quantity, dateStr, editId) {
+  if (!templateUsesChapterQuestionCounts(template)) return '';
+  const entries = getForecastTaskEntries().filter(entry => !(editId && entry.date === dateStr && entry.task.id === editId));
+  entries.push({ date: dateStr, task: { templateId: template.id, name: '本次任务', quantity, namedItemAllocations: allocations } });
+  return chapterQuestionCountError(template, entries);
+}
+
+function forecastSyncChapterQuestionCounts() {
+  const editor = document.querySelector('.forecast-named-items-editor');
+  if (!editor) return;
+  const enabled = Boolean(document.getElementById('forecast_chapter_quantity_only')?.checked);
+  editor.classList.toggle('question-counts-enabled', enabled);
+  editor.querySelectorAll('.forecast-named-item-row').forEach(row => {
+    const input = row.querySelector('.forecast-named-item-question-count-input');
+    if (input) input.disabled = !enabled || row.dataset.archived === 'true';
+  });
+  const hint = editor.querySelector('.forecast-chapter-quantity-hint');
+  if (hint) hint.textContent = enabled
+    ? '已开启：总题数用于预测，并限制同一章节所有日期、所有任务的累计题数。请为每个活动章节填写总题数。'
+    : '未开启：总题数不参与预测，也不限制任务数量；仍按章节完成情况和已录入数量估算。已填题数会保留。';
+}

@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+app.py.pre-*
+study_data.json
+draft_snapshot.json
+学习追踪器数据/
